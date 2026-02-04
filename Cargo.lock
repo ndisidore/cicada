@@ -403,6 +403,7 @@ name = "ciro-llb"
 version = "0.1.0"
 dependencies = [
  "buildkit-llb",
+ "buildkit-proto",
  "ciro-core",
  "thiserror",
 ]

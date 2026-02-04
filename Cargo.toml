@@ -5,7 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.93"
 license = "MIT"
 repository = "https://github.com/ndisidore/ciro"
 
@@ -15,6 +15,7 @@ kdl = "6.5"
 
 # BuildKit integration
 buildkit-llb = "0.2"
+buildkit-proto = "0.2"
 buildkit-frontend = "0.3"
 tonic = "0.14"
 
