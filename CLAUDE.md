@@ -35,52 +35,51 @@ internal/runner  # BuildKit runner (internal only)
 
 ## Code Style and Formatting (CS)
 
-- **CS-1**: **MUST** use `gofmt` for all formatting (tabs, not spaces).
-- **CS-2**: No name stutter. `pipeline.Pipeline` is fine; `pipeline.CiroPipeline` is not.
-- **CS-3**: **MUST** use meaningful, descriptive variable and function names.
-- **CS-4**: Follow [Effective Go](https://go.dev/doc/effective_go) and Go idioms.
-- **CS-5**: Functions with >5 parameters **MUST** use an input struct.
+- **CS-01**: **MUST** use `gofmt` for all formatting (tabs, not spaces).
+- **CS-02**: No name stutter. `pipeline.Pipeline` is fine; `pipeline.CiroPipeline` is not.
+- **CS-03**: **MUST** use meaningful, descriptive variable and function names.
+- **CS-04**: Follow [Effective Go](https://go.dev/doc/effective_go) and Go idioms.
+- **CS-05**: Functions with >5 parameters **MUST** use an input struct.
 - **NEVER** use emoji, or unicode that emulates emoji (e.g. check marks, X marks). The only exception is when writing tests and testing the impact of multibyte characters.
 
-## Documentation (API)
+## Logging & Observability (OBS)
 
-- **API-1**: **MUST** include doc comments for all exported functions, types, and methods.
-- **API-2**: Accept interfaces, return concrete types.
-- Keep comments up-to-date with code changes.
+- **OBS-01 (MUST)** Structured logging (`slog`) with levels and consistent fields.
+- **OBS-02 (SHOULD)** Correlate logs/metrics/traces via request IDs from context.
+- **OBS-03 (MUST)** Comments within code should be concise point in time snapshots of **how** things presently work. There should be no meta-commentary about **what** changed.
+- **NEVER** log sensitive information (passwords, tokens, PII).
 
 ## Error Handling (ERR)
 
-- **ERR-1**: All errors **MUST** be wrapped with `fmt.Errorf("context: %w", err)`.
-- **ERR-2**: Use `errors.Is` and `errors.As` for error checking.
-- **ERR-3**: Use sentinel errors (`var ErrFoo = errors.New(...)`) for expected failure modes.
-- **ERR-5**: **NEVER** return `nil, nil`. If there's no error, return a valid value.
+- **ERR-01**: All errors **MUST** be wrapped with `fmt.Errorf("context: %w", err)`.
+- **ERR-02**: Use `errors.Is` and `errors.As` for error checking.
+- **ERR-03**: Use sentinel errors (`var ErrFoo = errors.New(...)`) for expected failure modes.
+- **ERR-04**: **NEVER** return `nil, nil`. If there's no error, return a valid value.
+- **ERR-05 (MUST)** Use sentinel errors instead of `nil, nil` returns - makes code self-explanatory.
+- **ERR-06 (MUST)** Handle errors only once: either log OR return (wrapped), never both.
+- **ERR-07 (MUST)** Don't use "failed" or "error" in error wrapping - reserve for error origin.
 - **MUST** handle errors once: log OR return, never both.
 - Error wrap messages **MUST NOT** start with "failed" or "error".
 
 ## Architecture (ARCH)
 
-- **ARCH-9**: Use sentinel errors for expected failure modes.
-- **ARCH-10**: Handle errors once (log OR return, not both).
-- **ARCH-11**: Error wrap messages must not begin with "failed"/"error".
-- **ARCH-29**: Underscore prefix for unexported package-level globals (e.g. `_defaultAddr`).
+- **ARCH-01**: Handle errors once (log OR return, not both).
+- **ARCH-02**: Error wrap messages must not begin with "failed"/"error".
+- **ARCH-03**: Underscore prefix for unexported package-level globals (e.g. `_defaultAddr`).
 
 ## Testing (T)
 
-- **T-1**: **MUST** use table-driven tests with `t.Parallel()`.
-- **T-2**: **MUST** use `-race` flag when running tests.
+- **T-01**: **MUST** use table-driven tests with `t.Parallel()`.
+- **T-02**: **MUST** use `-race` flag when running tests.
+- **T-03 (SHOULD)** Avoid shared state between tests to enable parallel/race running.
 - **MUST** mock external dependencies (APIs, databases, file systems).
 - Follow the Arrange-Act-Assert pattern.
 - Do not commit commented-out tests.
 
-## Observability (OBS)
-
-- **OBS-1**: Use `log/slog` (stdlib) for structured logging.
-- **NEVER** log sensitive information (passwords, tokens, PII).
-
 ## Concurrency (CC)
 
-- **CC-1**: The sender closes the channel.
-- **CC-4**: Use `golang.org/x/sync/errgroup` for concurrent goroutine management.
+- **CC-01**: The sender closes the channel.
+- **CC-02**: Use `golang.org/x/sync/errgroup` for concurrent goroutine management.
 - Prefer channels for communication, mutexes for state protection.
 - Always use `context.Context` for cancellation.
 
@@ -92,10 +91,10 @@ internal/runner  # BuildKit runner (internal only)
 
 ## Security
 
-- **NEVER** store secrets, API keys, or passwords in code. Only store them in `.env`.
-  - Ensure `.env` is declared in `.gitignore`.
-- **MUST** use environment variables for sensitive configuration via `os.Getenv`.
 - **NEVER** log sensitive information (passwords, tokens, PII).
+- **SEC-1 (MUST)** Validate inputs; set explicit I/O timeouts; prefer TLS everywhere.
+- **SEC-2 (MUST)** Never log secrets; manage secrets outside code (env/secret manager).
+- **SEC-3 (SHOULD)** Limit filesystem/network access by default; principle of least privilege.
 
 ## Version Control
 
