@@ -13,30 +13,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Build
-        run: go build ./...
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Test
-        run: go test -race ./...
+      - uses: jdx/mise-action@v2
+      - run: mise build
+      - run: mise vet
+      - run: mise test
 
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - uses: golangci/golangci-lint-action@v7
-        with:
-          version: v2.8.0
-          args: -c=.golangci.yaml --max-issues-per-linter=50 ./...
+      - uses: jdx/mise-action@v2
+      - run: mise lint
+      - run: mise fmt:check
