@@ -2,11 +2,13 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 
-	"github.com/urfave/cli/v2"
+	"github.com/tonistiigi/fsutil"
+	"github.com/urfave/cli/v3"
 
 	"github.com/ndisidore/ciro/internal/builder"
 	"github.com/ndisidore/ciro/internal/runner"
@@ -15,7 +17,7 @@ import (
 )
 
 func main() {
-	app := &cli.App{
+	cmd := &cli.Command{
 		Name:  "ciro",
 		Usage: "a container-native CI/CD pipeline runner",
 		Commands: []*cli.Command{
@@ -47,20 +49,20 @@ func main() {
 				Action: runAction,
 			},
 		},
-		ExitErrHandler: func(_ *cli.Context, err error) {
+		ExitErrHandler: func(_ context.Context, _ *cli.Command, err error) {
 			if err != nil {
 				_, _ = fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			}
 		},
 	}
 
-	if err := app.Run(os.Args); err != nil {
+	if err := cmd.Run(context.Background(), os.Args); err != nil {
 		os.Exit(1)
 	}
 }
 
-func validateAction(c *cli.Context) error {
-	path := c.Args().First()
+func validateAction(_ context.Context, cmd *cli.Command) error {
+	path := cmd.Args().First()
 	if path == "" {
 		return errors.New("usage: ciro validate <file>")
 	}
@@ -78,8 +80,8 @@ func validateAction(c *cli.Context) error {
 	return nil
 }
 
-func runAction(c *cli.Context) error {
-	path := c.Args().First()
+func runAction(ctx context.Context, cmd *cli.Command) error {
+	path := cmd.Args().First()
 	if path == "" {
 		return errors.New("usage: ciro run <file>")
 	}
@@ -89,14 +91,14 @@ func runAction(c *cli.Context) error {
 		return fmt.Errorf("parsing %s: %w", path, err)
 	}
 
-	result, err := builder.Build(c.Context, p, builder.BuildOpts{
-		NoCache: c.Bool("no-cache"),
+	result, err := builder.Build(ctx, p, builder.BuildOpts{
+		NoCache: cmd.Bool("no-cache"),
 	})
 	if err != nil {
 		return fmt.Errorf("building %s: %w", path, err)
 	}
 
-	if c.Bool("dry-run") {
+	if cmd.Bool("dry-run") {
 		_, _ = fmt.Printf("Pipeline '%s' validated\n", p.Name)
 		_, _ = fmt.Printf("  Steps: %d\n", len(result.Definitions))
 		for i, name := range result.StepNames {
@@ -114,11 +116,16 @@ func runAction(c *cli.Context) error {
 		return fmt.Errorf("getting working directory: %w", err)
 	}
 
-	return runner.Run(c.Context, runner.RunInput{
-		Addr:   c.String("addr"),
+	contextFS, err := fsutil.NewFS(cwd)
+	if err != nil {
+		return fmt.Errorf("opening context directory %s: %w", cwd, err)
+	}
+
+	return runner.Run(ctx, runner.RunInput{
+		Addr:   cmd.String("addr"),
 		Result: result,
-		LocalDirs: map[string]string{
-			"context": cwd,
+		LocalMounts: map[string]fsutil.FS{
+			"context": contextFS,
 		},
 	})
 }

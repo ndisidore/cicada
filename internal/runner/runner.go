@@ -11,6 +11,7 @@ import (
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb"
 	"github.com/opencontainers/go-digest"
+	"github.com/tonistiigi/fsutil"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/ndisidore/ciro/internal/builder"
@@ -20,9 +21,9 @@ const _connectTimeout = 30 * time.Second
 
 // RunInput holds parameters for executing a pipeline against BuildKit.
 type RunInput struct {
-	Addr      string
-	Result    builder.Result
-	LocalDirs map[string]string
+	Addr        string
+	Result      builder.Result
+	LocalMounts map[string]fsutil.FS
 }
 
 // Run executes each step's LLB definition sequentially against a BuildKit daemon.
@@ -34,6 +35,9 @@ func Run(ctx context.Context, in RunInput) error {
 		)
 	}
 
+	log := slog.Default()
+	log.DebugContext(ctx, "connecting to buildkitd", slog.String("addr", in.Addr))
+
 	connCtx, cancel := context.WithTimeout(ctx, _connectTimeout)
 	defer cancel()
 
@@ -43,13 +47,11 @@ func Run(ctx context.Context, in RunInput) error {
 	}
 	defer c.Close()
 
-	log := slog.Default()
-
 	for i, def := range in.Result.Definitions {
 		name := in.Result.StepNames[i]
 		log.Info("starting step", slog.String("step", name))
 
-		if err := solveStep(ctx, c, log, name, def, in.LocalDirs); err != nil {
+		if err := solveStep(ctx, c, log, name, def, in.LocalMounts); err != nil {
 			return fmt.Errorf("step %q: %w", name, err)
 		}
 
@@ -65,7 +67,7 @@ func solveStep(
 	log *slog.Logger,
 	name string,
 	def *llb.Definition,
-	localDirs map[string]string,
+	localMounts map[string]fsutil.FS,
 ) error {
 	ch := make(chan *client.SolveStatus)
 
@@ -73,7 +75,7 @@ func solveStep(
 
 	g.Go(func() error {
 		_, err := c.Solve(ctx, def, client.SolveOpt{
-			LocalDirs: localDirs,
+			LocalMounts: localMounts,
 		}, ch)
 		return err
 	})
