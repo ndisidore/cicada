@@ -121,11 +121,14 @@ func buildStep(
 	}
 
 	for _, m := range step.Mounts {
+		mountOpts := []llb.MountOption{llb.SourcePath(m.Source)}
+		if m.ReadOnly {
+			mountOpts = append(mountOpts, llb.Readonly)
+		}
 		runOpts = append(runOpts, llb.AddMount(
 			m.Target,
 			llb.Local("context"),
-			llb.SourcePath(m.Source),
-			llb.Readonly,
+			mountOpts...,
 		))
 	}
 

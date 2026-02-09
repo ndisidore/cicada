@@ -96,6 +96,41 @@ func TestParse(t *testing.T) {
 			},
 		},
 		{
+			name: "mount with readonly property",
+			input: `pipeline "ro" {
+				step "build" {
+					image "rust:1.76"
+					mount "." "/src" readonly=true
+					run "cargo build"
+				}
+			}`,
+			want: pipeline.Pipeline{
+				Name: "ro",
+				Steps: []pipeline.Step{
+					{
+						Name:  "build",
+						Image: "rust:1.76",
+						Run:   []string{"cargo build"},
+						Mounts: []pipeline.Mount{
+							{Source: ".", Target: "/src", ReadOnly: true},
+						},
+					},
+				},
+				TopoOrder: []int{0},
+			},
+		},
+		{
+			name: "mount readonly non-boolean",
+			input: `pipeline "bad" {
+				step "a" {
+					image "alpine:latest"
+					mount "." "/src" readonly="yes"
+					run "echo hi"
+				}
+			}`,
+			wantErr: ErrTypeMismatch,
+		},
+		{
 			name: "multiple run commands",
 			input: `pipeline "multi" {
 				step "info" {

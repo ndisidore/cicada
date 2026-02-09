@@ -45,8 +45,9 @@ type Step struct {
 
 // Mount represents a bind mount from host to container.
 type Mount struct {
-	Source string
-	Target string
+	Source   string
+	Target   string
+	ReadOnly bool
 }
 
 // Cache represents a persistent cache volume.

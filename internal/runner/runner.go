@@ -27,7 +27,7 @@ type RunInput struct {
 }
 
 // Run executes each step's LLB definition sequentially against a BuildKit daemon.
-func Run(ctx context.Context, in RunInput) error {
+func Run(ctx context.Context, in RunInput) (rerr error) {
 	if len(in.Result.Definitions) != len(in.Result.StepNames) {
 		return fmt.Errorf(
 			"result mismatch: %d definitions vs %d step names",
@@ -45,7 +45,11 @@ func Run(ctx context.Context, in RunInput) error {
 	if err != nil {
 		return fmt.Errorf("connecting to buildkitd at %s: %w", in.Addr, err)
 	}
-	defer c.Close()
+	defer func() {
+		if cerr := c.Close(); cerr != nil && rerr == nil {
+			rerr = fmt.Errorf("closing buildkitd connection: %w", cerr)
+		}
+	}()
 
 	for i, def := range in.Result.Definitions {
 		name := in.Result.StepNames[i]

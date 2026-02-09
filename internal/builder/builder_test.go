@@ -102,7 +102,7 @@ func TestBuild(t *testing.T) {
 			},
 		},
 		{
-			name: "step with bind mount",
+			name: "step with bind mount read-write",
 			p: pipeline.Pipeline{
 				Name: "mounted",
 				Steps: []pipeline.Step{
@@ -121,14 +121,42 @@ func TestBuild(t *testing.T) {
 			verify: func(t *testing.T, result Result) {
 				t.Helper()
 				mounts := execMounts(t, result.Definitions[0].Def)
-				var found bool
 				for _, m := range mounts {
 					if m.GetDest() == "/src" && m.GetSelector() == "." {
-						found = true
-						break
+						assert.False(t, m.GetReadonly(), "mount at /src should be read-write")
+						return
 					}
 				}
-				assert.True(t, found, "expected bind mount at /src with selector '.'")
+				t.Fatal("expected bind mount at /src with selector '.'")
+			},
+		},
+		{
+			name: "step with bind mount readonly",
+			p: pipeline.Pipeline{
+				Name: "mounted-ro",
+				Steps: []pipeline.Step{
+					{
+						Name:    "build",
+						Image:   "rust:1.76",
+						Run:     []string{"cargo build"},
+						Workdir: "/src",
+						Mounts: []pipeline.Mount{
+							{Source: ".", Target: "/src", ReadOnly: true},
+						},
+					},
+				},
+			},
+			wantSteps: 1,
+			verify: func(t *testing.T, result Result) {
+				t.Helper()
+				mounts := execMounts(t, result.Definitions[0].Def)
+				for _, m := range mounts {
+					if m.GetDest() == "/src" && m.GetSelector() == "." {
+						assert.True(t, m.GetReadonly(), "mount at /src should be readonly")
+						return
+					}
+				}
+				t.Fatal("expected bind mount at /src with selector '.'")
 			},
 		},
 		{

@@ -137,7 +137,11 @@ func applyStepField(s *pipeline.Step, node *document.Node, filename string) erro
 		if err != nil {
 			return err
 		}
-		s.Mounts = append(s.Mounts, pipeline.Mount{Source: m[0], Target: m[1]})
+		ro, err := boolProp(node, "readonly")
+		if err != nil {
+			return fmt.Errorf("%s: step %q: mount: %w", filename, s.Name, err)
+		}
+		s.Mounts = append(s.Mounts, pipeline.Mount{Source: m[0], Target: m[1], ReadOnly: ro})
 		return nil
 	case "cache":
 		c, err := stringArgs2(node, filename, "cache")
@@ -229,4 +233,18 @@ func stringArg(node *document.Node, idx int) (string, error) {
 		return "", fmt.Errorf("argument %d: not a string: %w", idx, ErrTypeMismatch)
 	}
 	return v, nil
+}
+
+// boolProp reads an optional boolean property from a node.
+// Returns false when the property is absent.
+func boolProp(node *document.Node, key string) (bool, error) {
+	v, ok := node.Properties[key]
+	if !ok {
+		return false, nil
+	}
+	b, ok := v.ResolvedValue().(bool)
+	if !ok {
+		return false, fmt.Errorf("property %q: not a boolean: %w", key, ErrTypeMismatch)
+	}
+	return b, nil
 }

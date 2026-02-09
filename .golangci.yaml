@@ -83,8 +83,14 @@ linters:
     presets:
       - common-false-positives
       - legacy
-      - std-error-handling
     rules:
+      # Ignore unchecked errors on stdout/stderr print calls in CLI output.
+      # These are unrecoverable in a CLI context and the codebase already
+      # uses `_, _ =` for explicit discard (ERR-05).
+      - linters:
+          - errcheck
+        text: "Error return value of .((os\\.)?std(out|err)\\..*).*|.*print(f|ln)?. is not checked"
+
       - linters:
           - dupl
           - errcheck
@@ -156,7 +162,6 @@ linters:
 issues:
   max-issues-per-linter: 50
   max-same-issues: 3
-  new-from-patch: ""
   new: false
   fix: false
 severity:
