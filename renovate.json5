@@ -6,11 +6,12 @@
   ],
   "labels": ["dependencies"],
   "packageRules": [
-    // Group all Cargo dependencies
+    // Group all Go module dependencies
     {
-      "matchManagers": ["cargo"],
-      "groupName": "rust dependencies",
-      "labels": ["dependencies", "rust"]
+      "matchManagers": ["gomod"],
+      "postUpdateOptions": ["gomodTidy"],
+      "groupName": "go dependencies",
+      "labels": ["dependencies", "go"]
     },
     // Group GitHub Actions
     {

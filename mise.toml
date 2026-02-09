@@ -16,7 +16,7 @@ run = "go vet ./..."
 
 [tasks.lint]
 description = "Run golangci-lint"
-run = "golangci-lint run"
+run = 'golangci-lint run --config=".golangci.yaml"'
 
 [tasks.fmt]
 description = "Format code"
