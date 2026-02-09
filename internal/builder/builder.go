@@ -23,12 +23,15 @@ type Result struct {
 type BuildOpts struct {
 	// NoCache disables BuildKit cache for all operations when true.
 	NoCache bool
+	// ExcludePatterns are glob patterns to exclude from local context mounts.
+	ExcludePatterns []string
 }
 
 // stepOpts holds pre-computed LLB options applied to every step.
 type stepOpts struct {
-	imgOpts []llb.ImageOption
-	runOpts []llb.RunOption
+	imgOpts         []llb.ImageOption
+	runOpts         []llb.RunOption
+	excludePatterns []string
 }
 
 // Build converts a pipeline to BuildKit LLB definitions.
@@ -43,7 +46,7 @@ func Build(ctx context.Context, p pipeline.Pipeline, opts BuildOpts) (Result, er
 		}
 	}
 
-	var so stepOpts
+	so := stepOpts{excludePatterns: opts.ExcludePatterns}
 	if opts.NoCache {
 		so.imgOpts = append(so.imgOpts, llb.IgnoreCache)
 		so.runOpts = append(so.runOpts, llb.IgnoreCache)
@@ -120,6 +123,13 @@ func buildStep(
 		))
 	}
 
+	// All mounts share a single named local context ("context"). Each m.Source
+	// is a path within that shared context, not a distinct source directory.
+	localOpts := []llb.LocalOption{llb.SharedKeyHint("context")}
+	if len(opts.excludePatterns) > 0 {
+		localOpts = append(localOpts, llb.ExcludePatterns(opts.excludePatterns))
+	}
+
 	for _, m := range step.Mounts {
 		mountOpts := []llb.MountOption{llb.SourcePath(m.Source)}
 		if m.ReadOnly {
@@ -127,7 +137,7 @@ func buildStep(
 		}
 		runOpts = append(runOpts, llb.AddMount(
 			m.Target,
-			llb.Local("context"),
+			llb.Local("context", localOpts...),
 			mountOpts...,
 		))
 	}

@@ -5,10 +5,8 @@ pipeline "hello" {
   }
 
   step "build" {
-    image "rust:1.76"
+    image "node:24-alpine"
     depends-on "greet"
-    mount "." "/src"
-    workdir "/src"
-    run "cargo build"
+    run "node -e \"console.log('hello from node')\""
   }
 }

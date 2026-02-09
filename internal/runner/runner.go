@@ -3,31 +3,39 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log/slog"
-	"strings"
-	"time"
 
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb"
-	"github.com/opencontainers/go-digest"
 	"github.com/tonistiigi/fsutil"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/ndisidore/ciro/internal/builder"
+	"github.com/ndisidore/ciro/internal/progress"
 )
-
-const _connectTimeout = 30 * time.Second
 
 // RunInput holds parameters for executing a pipeline against BuildKit.
 type RunInput struct {
-	Addr        string
-	Result      builder.Result
+	// Client is the BuildKit API client used to solve LLB definitions.
+	Client *client.Client
+	// Result contains the LLB definitions and step names to execute.
+	Result builder.Result
+	// LocalMounts maps mount names to local filesystem sources.
 	LocalMounts map[string]fsutil.FS
+	// Display renders solve progress to the user (TUI, plain, or quiet).
+	Display progress.Display
 }
 
 // Run executes each step's LLB definition sequentially against a BuildKit daemon.
-func Run(ctx context.Context, in RunInput) (rerr error) {
+func Run(ctx context.Context, in RunInput) error {
+	if in.Client == nil {
+		return errors.New("RunInput.Client must not be nil")
+	}
+	if in.Display == nil {
+		return errors.New("RunInput.Display must not be nil")
+	}
+
 	if len(in.Result.Definitions) != len(in.Result.StepNames) {
 		return fmt.Errorf(
 			"result mismatch: %d definitions vs %d step names",
@@ -35,31 +43,11 @@ func Run(ctx context.Context, in RunInput) (rerr error) {
 		)
 	}
 
-	log := slog.Default()
-	log.DebugContext(ctx, "connecting to buildkitd", slog.String("addr", in.Addr))
-
-	connCtx, cancel := context.WithTimeout(ctx, _connectTimeout)
-	defer cancel()
-
-	c, err := client.New(connCtx, in.Addr)
-	if err != nil {
-		return fmt.Errorf("connecting to buildkitd at %s: %w", in.Addr, err)
-	}
-	defer func() {
-		if cerr := c.Close(); cerr != nil && rerr == nil {
-			rerr = fmt.Errorf("closing buildkitd connection: %w", cerr)
-		}
-	}()
-
 	for i, def := range in.Result.Definitions {
 		name := in.Result.StepNames[i]
-		log.Info("starting step", slog.String("step", name))
-
-		if err := solveStep(ctx, c, log, name, def, in.LocalMounts); err != nil {
+		if err := solveStep(ctx, in.Client, in.Display, name, def, in.LocalMounts); err != nil {
 			return fmt.Errorf("step %q: %w", name, err)
 		}
-
-		log.Info("completed step", slog.String("step", name))
 	}
 
 	return nil
@@ -68,7 +56,7 @@ func Run(ctx context.Context, in RunInput) (rerr error) {
 func solveStep(
 	ctx context.Context,
 	c *client.Client,
-	log *slog.Logger,
+	display progress.Display,
 	name string,
 	def *llb.Definition,
 	localMounts map[string]fsutil.FS,
@@ -81,75 +69,18 @@ func solveStep(
 		_, err := c.Solve(ctx, def, client.SolveOpt{
 			LocalMounts: localMounts,
 		}, ch)
-		return err
+		if err != nil {
+			return fmt.Errorf("solving step: %w", err)
+		}
+		return nil
 	})
 
 	g.Go(func() error {
-		return displayProgress(ctx, log, name, ch)
+		if err := display.Run(ctx, name, ch); err != nil {
+			return fmt.Errorf("displaying progress: %w", err)
+		}
+		return nil
 	})
 
 	return g.Wait()
-}
-
-// vertexState tracks what we've already printed for each vertex.
-type vertexState int
-
-const (
-	_stateUnseen vertexState = iota
-	_stateStarted
-	_stateDone
-)
-
-func displayProgress(ctx context.Context, log *slog.Logger, stepName string, ch chan *client.SolveStatus) error {
-	seen := make(map[digest.Digest]vertexState)
-
-	for status := range ch {
-		for _, v := range status.Vertexes {
-			printVertex(ctx, log, stepName, v, seen)
-		}
-		for _, l := range status.Logs {
-			if len(l.Data) > 0 {
-				msg := strings.TrimRight(string(l.Data), "\n")
-				if msg != "" {
-					log.LogAttrs(ctx, slog.LevelInfo, "output",
-						slog.String("step", stepName),
-						slog.String("data", msg),
-					)
-				}
-			}
-		}
-	}
-	return nil
-}
-
-func printVertex(ctx context.Context, log *slog.Logger, stepName string, v *client.Vertex, seen map[digest.Digest]vertexState) {
-	prev := seen[v.Digest]
-
-	attrs := []slog.Attr{
-		slog.String("step", stepName),
-		slog.String("vertex", v.Name),
-	}
-
-	switch {
-	case v.Error != "":
-		log.LogAttrs(ctx, slog.LevelError, "vertex error",
-			append(attrs, slog.String("error", v.Error))...,
-		)
-		seen[v.Digest] = _stateDone
-	case v.Cached && prev < _stateDone:
-		log.LogAttrs(ctx, slog.LevelInfo, "cached", attrs...)
-		seen[v.Digest] = _stateDone
-	case v.Completed != nil && prev < _stateDone:
-		if v.Started != nil {
-			dur := v.Completed.Sub(*v.Started).Round(time.Millisecond)
-			attrs = append(attrs, slog.Duration("duration", dur))
-		}
-		log.LogAttrs(ctx, slog.LevelInfo, "done", attrs...)
-		seen[v.Digest] = _stateDone
-	case v.Started != nil && prev < _stateStarted:
-		log.LogAttrs(ctx, slog.LevelInfo, "started", attrs...)
-		seen[v.Digest] = _stateStarted
-	default:
-		// No state change; nothing to display.
-	}
 }

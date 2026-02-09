@@ -4,16 +4,16 @@ language: en-US
 
 tone_instructions: >-
   Be direct and technical. Focus on correctness, performance, and idiomatic
-  Rust patterns. Flag issues clearly without excessive praise.
+  Go patterns. Flag issues clearly without excessive praise.
 
 reviews:
-  profile: assertive
+  profile: chill
   request_changes_workflow: true
   high_level_summary: true
   commit_status: true
   collapse_walkthrough: true
   changed_files_summary: true
-  sequence_diagrams: false
+  sequence_diagrams: true
   poem: false
   review_status: true
   suggested_labels: true
@@ -32,37 +32,66 @@ reviews:
       - "[DRAFT]"
 
   path_filters:
-    - "!target/**"
-    - "!**/target/**"
     - "!vendor/**"
     - "!**/vendor/**"
     - "!**/generated/**"
-    - "!**/*.generated.rs"
+    - "!**/*.pb.go"
+    - "!**/mock/**"
+    - "!go.sum"
 
   # Exceptions to CLAUDE.md rules (which is auto-applied via knowledge_base.code_guidelines)
   path_instructions:
-    - path: "**/tests/**/*.rs"
+    - path: "**/*_test.go"
       instructions: |
-        Test code exceptions: `.unwrap()`, `.expect()`, `println!`, `dbg!` are acceptable.
+        Test code exceptions: long functions and raw string literals are acceptable.
         Focus on test coverage, assertion quality, and Arrange-Act-Assert pattern.
-        Flag flaky patterns (timing dependencies, global state).
+        Verify table-driven tests use t.Parallel() and subtests use t.Parallel().
+        Flag shared mutable state between parallel tests.
+        Ensure require is used for error checks, assert for value checks.
 
-    - path: "**/benches/**/*.rs"
+    - path: "pkg/**/*.go"
       instructions: |
-        Benchmark exceptions: `.unwrap()` is acceptable.
-        Focus on methodology correctness and black_box usage for inputs/outputs.
+        Public API surface. Review for:
+        - Backwards compatibility (breaking changes to exported types/functions)
+        - Clear, stable interfaces with doc comments on all exports
+        - Sentinel errors for expected failure modes
+        - No leaking of internal types
 
-    - path: "**/examples/**/*.rs"
+    - path: "internal/**/*.go"
       instructions: |
-        Example exceptions: `.unwrap()` is acceptable for brevity.
-        Focus on clarity and idiomatic usage demonstration.
+        Internal implementation. Focus on:
+        - Error wrapping with context (fmt.Errorf("...: %w", err))
+        - Proper context.Context propagation and cancellation
+        - Goroutine lifecycle (errgroup usage, channel ownership)
+        - No "failed" or "error" in error wrap strings
+
+    - path: "cmd/**/*.go"
+      instructions: |
+        CLI entry point. Check for:
+        - Clean flag definitions and usage strings
+        - Proper error propagation to ExitErrHandler
+        - No business logic leaking into CLI layer
 
   tools:
+    actionlint:
+      enabled: true
+    golangci-lint:
+      enabled: true
+      config_file: ".golangci.yaml"
     semgrep:
       enabled: true
     gitleaks:
       enabled: true
-    clippy:
+    checkov:
+      enabled: true
+    languagetool:
+      enabled: true
+      level: default
+    shellcheck:
+      enabled: true
+    markdownlint:
+      enabled: true
+    trivy:
       enabled: true
 
 chat:
@@ -77,5 +106,4 @@ knowledge_base:
     enabled: true
     filePatterns:
       - "CLAUDE.md"
-      - ".cursorrules"
       - "CONTRIBUTING.md"
