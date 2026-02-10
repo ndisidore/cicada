@@ -6,9 +6,14 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/moby/buildkit/client/llb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/urfave/cli/v3"
+
+	"github.com/ndisidore/cicada/internal/builder"
+	"github.com/ndisidore/cicada/internal/runner"
+	"github.com/ndisidore/cicada/pkg/pipeline"
 )
 
 // fakeEngine implements Engine for testing.
@@ -263,6 +268,91 @@ func TestResolveAddr(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantAddr, addr)
+		})
+	}
+}
+
+func TestBuildSteps(t *testing.T) {
+	t.Parallel()
+
+	def, err := llb.Scratch().Marshal(context.Background())
+	require.NoError(t, err)
+
+	tests := []struct {
+		name         string
+		result       builder.Result
+		pipeline     pipeline.Pipeline
+		want         []runner.Step
+		wantSentinel error
+	}{
+		{
+			name: "matching order",
+			result: builder.Result{
+				Definitions: []*llb.Definition{def, def},
+				StepNames:   []string{"a", "b"},
+			},
+			pipeline: pipeline.Pipeline{
+				Steps: []pipeline.Step{
+					{Name: "a"},
+					{Name: "b", DependsOn: []string{"a"}},
+				},
+			},
+			want: []runner.Step{
+				{Name: "a", Definition: def},
+				{Name: "b", Definition: def, DependsOn: []string{"a"}},
+			},
+		},
+		{
+			name: "reordered builder output wires deps correctly",
+			result: builder.Result{
+				Definitions: []*llb.Definition{def, def},
+				StepNames:   []string{"b", "a"},
+			},
+			pipeline: pipeline.Pipeline{
+				Steps: []pipeline.Step{
+					{Name: "a"},
+					{Name: "b", DependsOn: []string{"a"}},
+				},
+			},
+			want: []runner.Step{
+				{Name: "b", Definition: def, DependsOn: []string{"a"}},
+				{Name: "a", Definition: def},
+			},
+		},
+		{
+			name: "definitions and step names length mismatch",
+			result: builder.Result{
+				Definitions: []*llb.Definition{def},
+				StepNames:   []string{"a", "b"},
+			},
+			pipeline:     pipeline.Pipeline{},
+			wantSentinel: errResultMismatch,
+		},
+		{
+			name: "unknown builder step name",
+			result: builder.Result{
+				Definitions: []*llb.Definition{def},
+				StepNames:   []string{"unknown"},
+			},
+			pipeline: pipeline.Pipeline{
+				Steps: []pipeline.Step{
+					{Name: "a"},
+				},
+			},
+			wantSentinel: errUnknownBuilderStep,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := buildSteps(tt.result, tt.pipeline)
+			if tt.wantSentinel != nil {
+				require.ErrorIs(t, err, tt.wantSentinel)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }

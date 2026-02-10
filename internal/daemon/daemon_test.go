@@ -191,6 +191,15 @@ func TestStop(t *testing.T) {
 			},
 		},
 		{
+			name: "created container is no-op",
+			docker: func(_ context.Context, args ...string) (string, error) {
+				if len(args) > 0 && args[0] == "inspect" {
+					return "created\n", nil
+				}
+				return "", nil
+			},
+		},
+		{
 			name: "missing container is no-op",
 			docker: func(_ context.Context, args ...string) (string, error) {
 				if len(args) > 0 && args[0] == "inspect" {

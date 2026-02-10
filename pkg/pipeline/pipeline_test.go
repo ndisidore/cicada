@@ -6,6 +6,84 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestMatrixCombinations(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		m    Matrix
+		want []map[string]string
+	}{
+		{
+			name: "single dimension",
+			m: Matrix{
+				Dimensions: []Dimension{
+					{Name: "os", Values: []string{"linux", "darwin"}},
+				},
+			},
+			want: []map[string]string{
+				{"os": "linux"},
+				{"os": "darwin"},
+			},
+		},
+		{
+			name: "multi dimension cartesian product",
+			m: Matrix{
+				Dimensions: []Dimension{
+					{Name: "os", Values: []string{"linux", "darwin"}},
+					{Name: "arch", Values: []string{"amd64", "arm64"}},
+				},
+			},
+			want: []map[string]string{
+				{"os": "linux", "arch": "amd64"},
+				{"os": "linux", "arch": "arm64"},
+				{"os": "darwin", "arch": "amd64"},
+				{"os": "darwin", "arch": "arm64"},
+			},
+		},
+		{
+			name: "three dimensions",
+			m: Matrix{
+				Dimensions: []Dimension{
+					{Name: "os", Values: []string{"linux"}},
+					{Name: "go", Values: []string{"1.21", "1.22"}},
+					{Name: "db", Values: []string{"pg", "mysql"}},
+				},
+			},
+			want: []map[string]string{
+				{"os": "linux", "go": "1.21", "db": "pg"},
+				{"os": "linux", "go": "1.21", "db": "mysql"},
+				{"os": "linux", "go": "1.22", "db": "pg"},
+				{"os": "linux", "go": "1.22", "db": "mysql"},
+			},
+		},
+		{
+			name: "empty matrix",
+			m:    Matrix{},
+			want: nil,
+		},
+		{
+			name: "single value dimension",
+			m: Matrix{
+				Dimensions: []Dimension{
+					{Name: "os", Values: []string{"linux"}},
+				},
+			},
+			want: []map[string]string{
+				{"os": "linux"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := tt.m.Combinations()
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestCollectImages(t *testing.T) {
 	t.Parallel()
 

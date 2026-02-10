@@ -4,6 +4,7 @@ package pipeline
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -20,16 +21,69 @@ var (
 	ErrSelfDependency = errors.New("step depends on itself")
 	ErrUnknownDep     = errors.New("unknown dependency")
 	ErrCycleDetected  = errors.New("dependency cycle detected")
+	ErrEmptyMatrix    = errors.New("matrix has no dimensions")
+	ErrEmptyDimension = errors.New("dimension has no values")
+	ErrInvalidDimName = errors.New("invalid dimension name")
+	ErrDuplicateDim   = errors.New("duplicate dimension name")
+	ErrMatrixTooLarge = errors.New("matrix produces too many combinations")
 )
 
 // _validName matches step names that are safe for use in filesystem paths.
-var _validName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+// The optional bracket suffix accommodates expanded matrix step names like
+// "build[os=linux,go-version=1.22]".
+var _validName = regexp.MustCompile(`^[a-zA-Z0-9_-]+(\[[a-zA-Z0-9_.:-]+(=[a-zA-Z0-9_.:-]+)?(,[a-zA-Z0-9_.:-]+(=[a-zA-Z0-9_.:-]+)?)*\])?$`)
+
+// _validDimName matches dimension names: alphanumeric, hyphens, underscores.
+var _validDimName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// Matrix defines a set of dimensions whose cartesian product generates
+// concrete step variants during expansion.
+type Matrix struct {
+	Dimensions []Dimension
+}
+
+// Dimension is a single axis in a Matrix with one or more string values.
+type Dimension struct {
+	Name   string
+	Values []string
+}
+
+// Combinations returns the cartesian product of all dimensions as a slice of
+// maps. Each map maps dimension name to a single value. Returns nil for an
+// empty matrix.
+func (m Matrix) Combinations() []map[string]string {
+	if len(m.Dimensions) == 0 {
+		return nil
+	}
+	// Count total combinations up front.
+	total := 1
+	for i := range m.Dimensions {
+		total *= len(m.Dimensions[i].Values)
+	}
+	combos := make([]map[string]string, 0, total)
+	combos = append(combos, make(map[string]string, len(m.Dimensions)))
+	for i := range m.Dimensions {
+		dim := &m.Dimensions[i]
+		next := make([]map[string]string, 0, len(combos)*len(dim.Values))
+		for _, combo := range combos {
+			for _, val := range dim.Values {
+				cp := make(map[string]string, len(combo)+1)
+				maps.Copy(cp, combo)
+				cp[dim.Name] = val
+				next = append(next, cp)
+			}
+		}
+		combos = next
+	}
+	return combos
+}
 
 // Pipeline represents a CI/CD pipeline parsed from KDL.
 type Pipeline struct {
 	Name      string
 	Steps     []Step
-	TopoOrder []int // cached topological order from Validate; nil if not yet validated
+	Matrix    *Matrix // pipeline-level matrix; nil if not set
+	TopoOrder []int   // cached topological order from Validate; nil if not yet validated
 }
 
 // Step represents a single execution unit within a pipeline.
@@ -41,6 +95,7 @@ type Step struct {
 	DependsOn []string
 	Mounts    []Mount
 	Caches    []Cache
+	Matrix    *Matrix // step-level matrix; nil if not set
 }
 
 // Mount represents a bind mount from host to container.

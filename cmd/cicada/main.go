@@ -28,6 +28,9 @@ import (
 // errResultMismatch indicates builder.Result has mismatched Definitions and StepNames lengths.
 var errResultMismatch = errors.New("builder.Result: definitions/step-names length mismatch")
 
+// errUnknownBuilderStep indicates a builder step name not found in the pipeline.
+var errUnknownBuilderStep = errors.New("builder step not found in pipeline")
+
 // errOfflineMissingImages indicates that offline mode was requested but some
 // pipeline images are not present in the BuildKit cache.
 var errOfflineMissingImages = errors.New("offline mode: images not cached")
@@ -96,6 +99,12 @@ func main() {
 					&cli.BoolFlag{
 						Name:  "boring",
 						Usage: "use ASCII instead of emoji in TUI output",
+					},
+					&cli.IntFlag{
+						Name:    "parallelism",
+						Aliases: []string{"j"},
+						Usage:   "max concurrent steps (0 = unlimited)",
+						Value:   0,
 					},
 				),
 				Action: a.runAction,
@@ -202,6 +211,10 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 		return errors.New("usage: cicada run <file>")
 	}
 
+	if cmd.Int("parallelism") < 0 {
+		return fmt.Errorf("invalid value %d for flag --parallelism: must be >= 0", cmd.Int("parallelism"))
+	}
+
 	p, err := a.parse(path)
 	if err != nil {
 		return fmt.Errorf("parsing %s: %w", path, err)
@@ -225,7 +238,7 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("building %s: %w", path, err)
 	}
 
-	steps, err := buildSteps(result)
+	steps, err := buildSteps(result, p)
 	if err != nil {
 		return fmt.Errorf("converting build result: %w", err)
 	}
@@ -235,6 +248,11 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 		return nil
 	}
 
+	return a.executePipeline(ctx, cmd, path, p, steps, cwd)
+}
+
+// executePipeline connects to BuildKit and runs the pipeline steps.
+func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, path string, p pipeline.Pipeline, steps []runner.Step, cwd string) error {
 	addr, err := a.resolveAddr(ctx, cmd)
 	if err != nil {
 		return err
@@ -261,7 +279,17 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("opening context directory %s: %w", cwd, err)
 	}
 
-	display, err := a.selectDisplay(cmd.String("progress"), cmd.Bool("boring"))
+	parallelism := int(cmd.Int("parallelism"))
+
+	// Fall back to plain display when running steps in parallel (parallelism
+	// 0 = unlimited, >1 = bounded), since bubbletea cannot multiplex
+	// concurrent step displays.
+	progressMode := cmd.String("progress")
+	if parallelism != 1 && progressMode == "auto" && a.isTTY {
+		progressMode = "plain"
+	}
+
+	display, err := a.selectDisplay(progressMode, cmd.Bool("boring"))
 	if err != nil {
 		return err
 	}
@@ -272,7 +300,8 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 		LocalMounts: map[string]fsutil.FS{
 			"context": contextFS,
 		},
-		Display: display,
+		Display:     display,
+		Parallelism: parallelism,
 	})
 }
 
@@ -284,21 +313,41 @@ func (a *app) printDryRun(name string, steps []runner.Step) {
 		if step.Definition != nil {
 			ops = len(step.Definition.Def)
 		}
-		_, _ = fmt.Fprintf(a.stdout, "    - %s (%d LLB ops)\n", step.Name, ops)
+		if len(step.DependsOn) > 0 {
+			_, _ = fmt.Fprintf(a.stdout, "    - %s (%d LLB ops, depends: %s)\n",
+				step.Name, ops, strings.Join(step.DependsOn, ", "))
+		} else {
+			_, _ = fmt.Fprintf(a.stdout, "    - %s (%d LLB ops)\n", step.Name, ops)
+		}
 	}
 }
 
-// buildSteps converts a builder.Result into a slice of runner.Step.
-func buildSteps(r builder.Result) ([]runner.Step, error) {
+// buildSteps converts a builder.Result into a slice of runner.Step, carrying
+// dependency information from the pipeline. Dependencies are resolved by name
+// rather than positional index, so builder output ordering need not match
+// pipeline declaration order.
+func buildSteps(r builder.Result, p pipeline.Pipeline) ([]runner.Step, error) {
 	if len(r.Definitions) != len(r.StepNames) {
 		return nil, fmt.Errorf("%w: %d definitions, %d step names",
 			errResultMismatch, len(r.Definitions), len(r.StepNames))
 	}
+
+	// Index pipeline steps by name for name-based dependency lookup.
+	pipelineIdx := make(map[string][]string, len(p.Steps))
+	for i := range p.Steps {
+		pipelineIdx[p.Steps[i].Name] = p.Steps[i].DependsOn
+	}
+
 	steps := make([]runner.Step, len(r.Definitions))
 	for i := range r.Definitions {
+		deps, ok := pipelineIdx[r.StepNames[i]]
+		if !ok {
+			return nil, fmt.Errorf("%w: %q", errUnknownBuilderStep, r.StepNames[i])
+		}
 		steps[i] = runner.Step{
 			Name:       r.StepNames[i],
 			Definition: r.Definitions[i],
+			DependsOn:  deps,
 		}
 	}
 	return steps, nil
@@ -415,7 +464,12 @@ func (a *app) printPipelineSummary(name string, steps []pipeline.Step) {
 	_, _ = fmt.Fprintf(a.stdout, "Pipeline '%s' is valid\n", name)
 	_, _ = fmt.Fprintf(a.stdout, "  Steps: %d\n", len(steps))
 	for _, s := range steps {
-		_, _ = fmt.Fprintf(a.stdout, "    - %s (image: %s)\n", s.Name, s.Image)
+		if len(s.DependsOn) > 0 {
+			_, _ = fmt.Fprintf(a.stdout, "    - %s (image: %s, depends: %s)\n",
+				s.Name, s.Image, strings.Join(s.DependsOn, ", "))
+		} else {
+			_, _ = fmt.Fprintf(a.stdout, "    - %s (image: %s)\n", s.Name, s.Image)
+		}
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"github.com/moby/buildkit/client/llb"
 	"github.com/tonistiigi/fsutil"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/ndisidore/cicada/internal/progress"
 )
@@ -22,6 +23,12 @@ var ErrNilDisplay = errors.New("RunInput.Display must not be nil")
 
 // ErrNilDefinition indicates that a Step has a nil LLB Definition.
 var ErrNilDefinition = errors.New("Step.Definition must not be nil")
+
+// ErrUnknownDep indicates a step depends on a name not in the step list.
+var ErrUnknownDep = errors.New("unknown dependency")
+
+// ErrDuplicateStep indicates two steps share the same name.
+var ErrDuplicateStep = errors.New("duplicate step name")
 
 // Solver abstracts the BuildKit Solve RPC for testability.
 //
@@ -36,10 +43,11 @@ type Solver interface {
 	Solve(ctx context.Context, def *llb.Definition, opt client.SolveOpt, statusChan chan *client.SolveStatus) (*client.SolveResponse, error)
 }
 
-// Step pairs an LLB definition with its human-readable step name.
+// Step pairs an LLB definition with its human-readable step name and dependencies.
 type Step struct {
 	Name       string
 	Definition *llb.Definition
+	DependsOn  []string
 }
 
 // RunInput holds parameters for executing a pipeline against BuildKit.
@@ -52,9 +60,23 @@ type RunInput struct {
 	LocalMounts map[string]fsutil.FS
 	// Display renders solve progress to the user (TUI, plain, or quiet).
 	Display progress.Display
+	// Parallelism limits concurrent step execution. 0 means unlimited.
+	Parallelism int
 }
 
-// Run executes each step's LLB definition sequentially against a BuildKit daemon.
+// dagNode tracks a step and a done channel that is closed on completion.
+// The err field is written before done is closed, establishing a
+// happens-before for any goroutine that reads err after <-done.
+type dagNode struct {
+	step Step
+	done chan struct{}
+	err  error
+}
+
+// Run executes steps against a BuildKit daemon, respecting dependency ordering
+// and parallelism limits. Steps with no dependencies start immediately (subject
+// to the parallelism semaphore); steps with dependencies wait for all deps to
+// complete before acquiring a semaphore slot.
 func Run(ctx context.Context, in RunInput) error {
 	if in.Solver == nil {
 		return ErrNilSolver
@@ -62,13 +84,79 @@ func Run(ctx context.Context, in RunInput) error {
 	if in.Display == nil {
 		return ErrNilDisplay
 	}
+	if len(in.Steps) == 0 {
+		return nil
+	}
 
-	for _, step := range in.Steps {
-		if err := solveStep(ctx, in.Solver, in.Display, step.Name, step.Definition, in.LocalMounts); err != nil {
-			return fmt.Errorf("step %q: %w", step.Name, err)
+	nodes, err := buildDAG(in.Steps)
+	if err != nil {
+		return err
+	}
+
+	limit := int64(len(in.Steps))
+	if in.Parallelism > 0 {
+		limit = int64(in.Parallelism)
+	}
+	sem := semaphore.NewWeighted(limit)
+
+	g, ctx := errgroup.WithContext(ctx)
+	for i := range in.Steps {
+		node := nodes[in.Steps[i].Name]
+		g.Go(func() error {
+			return runNode(ctx, node, nodes, sem, in)
+		})
+	}
+	return g.Wait()
+}
+
+// buildDAG creates the DAG node index and validates that all deps exist.
+func buildDAG(steps []Step) (map[string]*dagNode, error) {
+	nodes := make(map[string]*dagNode, len(steps))
+	for i := range steps {
+		if _, exists := nodes[steps[i].Name]; exists {
+			return nil, fmt.Errorf("step %q: %w", steps[i].Name, ErrDuplicateStep)
+		}
+		nodes[steps[i].Name] = &dagNode{
+			step: steps[i],
+			done: make(chan struct{}),
+		}
+	}
+	for i := range steps {
+		for _, dep := range steps[i].DependsOn {
+			if _, ok := nodes[dep]; !ok {
+				return nil, fmt.Errorf("step %q depends on %q: %w", steps[i].Name, dep, ErrUnknownDep)
+			}
+		}
+	}
+	return nodes, nil
+}
+
+// runNode waits for dependencies, acquires a semaphore slot, solves, and signals done.
+func runNode(ctx context.Context, node *dagNode, nodes map[string]*dagNode, sem *semaphore.Weighted, in RunInput) error {
+	defer close(node.done)
+
+	for _, dep := range node.step.DependsOn {
+		select {
+		case <-nodes[dep].done:
+			if nodes[dep].err != nil {
+				return fmt.Errorf("step %q: dependency %q: %w", node.step.Name, dep, nodes[dep].err)
+			}
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
 
+	if err := sem.Acquire(ctx, 1); err != nil {
+		node.err = err
+		return err
+	}
+	defer sem.Release(1)
+
+	err := solveStep(ctx, in.Solver, in.Display, node.step.Name, node.step.Definition, in.LocalMounts)
+	if err != nil {
+		node.err = err
+		return fmt.Errorf("step %q: %w", node.step.Name, err)
+	}
 	return nil
 }
 
@@ -99,7 +187,10 @@ func solveStep(
 	})
 
 	g.Go(func() error {
-		if err := display.Run(ctx, name, ch); err != nil {
+		err := display.Run(ctx, name, ch)
+		for range ch { //nolint:revive // drain so Solve can close ch
+		}
+		if err != nil {
 			return fmt.Errorf("displaying progress: %w", err)
 		}
 		return nil

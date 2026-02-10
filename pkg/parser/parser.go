@@ -84,17 +84,34 @@ func parsePipeline(node *document.Node, filename string) (pipeline.Pipeline, err
 	}
 
 	for _, child := range node.Children {
-		if childName := child.Name.ValueString(); childName != "step" {
+		switch childName := child.Name.ValueString(); childName {
+		case "step":
+			step, err := parseStep(child, filename)
+			if err != nil {
+				return pipeline.Pipeline{}, err
+			}
+			p.Steps = append(p.Steps, step)
+		case "matrix":
+			if p.Matrix != nil {
+				return pipeline.Pipeline{}, fmt.Errorf(
+					"%s: %w: %q", filename, ErrDuplicateField, "matrix",
+				)
+			}
+			m, err := parseMatrix(child, filename, "pipeline")
+			if err != nil {
+				return pipeline.Pipeline{}, err
+			}
+			p.Matrix = &m
+		default:
 			return pipeline.Pipeline{}, fmt.Errorf(
-				"%s: %w: %q (expected step)", filename, ErrUnknownNode, childName,
+				"%s: %w: %q (expected step or matrix)", filename, ErrUnknownNode, childName,
 			)
 		}
+	}
 
-		step, err := parseStep(child, filename)
-		if err != nil {
-			return pipeline.Pipeline{}, err
-		}
-		p.Steps = append(p.Steps, step)
+	p, err = pipeline.Expand(p)
+	if err != nil {
+		return pipeline.Pipeline{}, fmt.Errorf("%s: %w", filename, err)
 	}
 
 	if _, err := p.Validate(); err != nil {
@@ -150,6 +167,18 @@ func applyStepField(s *pipeline.Step, node *document.Node, filename string) erro
 		}
 		s.Caches = append(s.Caches, pipeline.Cache{ID: c[0], Target: c[1]})
 		return nil
+	case "matrix":
+		if s.Matrix != nil {
+			return fmt.Errorf(
+				"%s: step %q: %w: %q", filename, s.Name, ErrDuplicateField, "matrix",
+			)
+		}
+		m, err := parseMatrix(node, filename, fmt.Sprintf("step %q", s.Name))
+		if err != nil {
+			return err
+		}
+		s.Matrix = &m
+		return nil
 	default:
 		return fmt.Errorf(
 			"%s: step %q: %w: %q", filename, s.Name, ErrUnknownNode, childName,
@@ -181,6 +210,39 @@ func applySingleArgField(s *pipeline.Step, field, value, filename string) error 
 		panic(fmt.Sprintf("applySingleArgField: unexpected field %q for step %q in %s", field, s.Name, filename))
 	}
 	return nil
+}
+
+// parseMatrix parses a matrix block into a pipeline.Matrix. Each child node
+// is a dimension where the node name is the dimension name and arguments are
+// the string values. Structural validation (empty matrix, duplicate/invalid
+// dimension names, empty dimensions, combination cap) is delegated to
+// pipeline.ValidateMatrix.
+func parseMatrix(node *document.Node, filename, scope string) (pipeline.Matrix, error) {
+	m := pipeline.Matrix{
+		Dimensions: make([]pipeline.Dimension, 0, len(node.Children)),
+	}
+
+	for _, child := range node.Children {
+		dimName := child.Name.ValueString()
+		values := make([]string, 0, len(child.Arguments))
+		for i := range child.Arguments {
+			v, ok := child.Arguments[i].ResolvedValue().(string)
+			if !ok {
+				return pipeline.Matrix{}, fmt.Errorf(
+					"%s: %s: matrix dimension %q value %d: not a string: %w",
+					filename, scope, dimName, i, ErrTypeMismatch,
+				)
+			}
+			values = append(values, v)
+		}
+		m.Dimensions = append(m.Dimensions, pipeline.Dimension{Name: dimName, Values: values})
+	}
+
+	if err := pipeline.ValidateMatrix(&m); err != nil {
+		return pipeline.Matrix{}, fmt.Errorf("%s: %s: matrix: %w", filename, scope, err)
+	}
+
+	return m, nil
 }
 
 // stringArgs2 extracts exactly two string arguments from a node.

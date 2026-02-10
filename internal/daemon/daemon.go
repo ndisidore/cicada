@@ -34,6 +34,11 @@ const (
 	_healthBackoff     = 2
 	_healthMaxInterval = 3 * time.Second
 	_dockerTimeout     = 30 * time.Second
+
+	// Docker container states.
+	_stateRunning = "running"
+	_stateExited  = "exited"
+	_stateCreated = "created"
 )
 
 // Manager manages the lifecycle of a local BuildKit daemon container.
@@ -127,9 +132,9 @@ func (m *Manager) Start(ctx context.Context) (string, error) {
 	}
 
 	switch state {
-	case "running":
+	case _stateRunning:
 		log.InfoContext(ctx, "buildkitd container already running")
-	case "exited", "created":
+	case _stateExited, _stateCreated:
 		log.InfoContext(ctx, "restarting stopped buildkitd container")
 		if out, err := m.dockerExec(ctx, "start", _containerName); err != nil {
 			return "", fmt.Errorf("restarting container: %s: %w: %w", strings.TrimSpace(out), err, ErrStartFailed)
@@ -169,7 +174,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("inspecting container: %w", err)
 	}
-	if state == "" || state == "exited" {
+	if state == "" || state == _stateExited || state == _stateCreated {
 		return nil
 	}
 
@@ -217,7 +222,7 @@ func (m *Manager) containerState(ctx context.Context) (string, error) {
 		}
 		return "", fmt.Errorf("docker inspect: %w", err)
 	}
-	return strings.TrimSpace(out), nil
+	return strings.TrimSpace(strings.ToLower(out)), nil
 }
 
 func (m *Manager) waitHealthy(ctx context.Context) error {
