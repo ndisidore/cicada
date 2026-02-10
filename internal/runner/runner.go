@@ -11,7 +11,7 @@ import (
 	"github.com/tonistiigi/fsutil"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/ndisidore/ciro/internal/progress"
+	"github.com/ndisidore/cicada/internal/progress"
 )
 
 // ErrNilSolver indicates that RunInput.Solver was not provided.

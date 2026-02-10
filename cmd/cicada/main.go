@@ -1,4 +1,4 @@
-// Package main provides the CLI entry point for ciro.
+// Package main provides the CLI entry point for cicada.
 package main
 
 import (
@@ -15,14 +15,14 @@ import (
 	"github.com/urfave/cli/v3"
 	"golang.org/x/term"
 
-	"github.com/ndisidore/ciro/internal/builder"
-	"github.com/ndisidore/ciro/internal/daemon"
-	"github.com/ndisidore/ciro/internal/imagestore"
-	"github.com/ndisidore/ciro/internal/progress"
-	"github.com/ndisidore/ciro/internal/runner"
-	"github.com/ndisidore/ciro/internal/synccontext"
-	"github.com/ndisidore/ciro/pkg/parser"
-	"github.com/ndisidore/ciro/pkg/pipeline"
+	"github.com/ndisidore/cicada/internal/builder"
+	"github.com/ndisidore/cicada/internal/daemon"
+	"github.com/ndisidore/cicada/internal/imagestore"
+	"github.com/ndisidore/cicada/internal/progress"
+	"github.com/ndisidore/cicada/internal/runner"
+	"github.com/ndisidore/cicada/internal/synccontext"
+	"github.com/ndisidore/cicada/pkg/parser"
+	"github.com/ndisidore/cicada/pkg/pipeline"
 )
 
 // errResultMismatch indicates builder.Result has mismatched Definitions and StepNames lengths.
@@ -67,7 +67,7 @@ func main() {
 	}
 
 	cmd := &cli.Command{
-		Name:  "ciro",
+		Name:  "cicada",
 		Usage: "a container-native CI/CD pipeline runner",
 		Commands: []*cli.Command{
 			{
@@ -91,7 +91,7 @@ func main() {
 					},
 					&cli.BoolFlag{
 						Name:  "offline",
-						Usage: "fail if images are not cached (use 'ciro pull' first)",
+						Usage: "fail if images are not cached (use 'cicada pull' first)",
 					},
 					&cli.BoolFlag{
 						Name:  "boring",
@@ -180,7 +180,7 @@ func buildkitFlags() []cli.Flag {
 func (a *app) validateAction(_ context.Context, cmd *cli.Command) error {
 	path := cmd.Args().First()
 	if path == "" {
-		return errors.New("usage: ciro validate <file>")
+		return errors.New("usage: cicada validate <file>")
 	}
 
 	p, err := a.parse(path)
@@ -199,7 +199,7 @@ func (a *app) validateAction(_ context.Context, cmd *cli.Command) error {
 func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 	path := cmd.Args().First()
 	if path == "" {
-		return errors.New("usage: ciro run <file>")
+		return errors.New("usage: cicada run <file>")
 	}
 
 	p, err := a.parse(path)
@@ -321,7 +321,7 @@ func (a *app) resolveAddr(ctx context.Context, cmd *cli.Command) (string, error)
 func (a *app) pullAction(ctx context.Context, cmd *cli.Command) error {
 	path := cmd.Args().First()
 	if path == "" {
-		return errors.New("usage: ciro pull <file>")
+		return errors.New("usage: cicada pull <file>")
 	}
 
 	p, err := a.parse(path)
@@ -371,7 +371,7 @@ func checkOffline(ctx context.Context, solver runner.Solver, p pipeline.Pipeline
 	}
 	if len(missing) > 0 {
 		msg := fmt.Sprintf(
-			"%d image(s) not cached: %s\nrun 'ciro pull %s' first",
+			"%d image(s) not cached: %s\nrun 'cicada pull %s' first",
 			len(missing), strings.Join(missing, ", "), path,
 		)
 		return fmt.Errorf("%w: %s", errOfflineMissingImages, msg)

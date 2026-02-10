@@ -181,7 +181,7 @@ formatters:
           replacement: "any"
     goimports:
       local-prefixes:
-        - github.com/ndisidore/ciro
+        - github.com/ndisidore/cicada
   exclusions:
     generated: lax
     paths:

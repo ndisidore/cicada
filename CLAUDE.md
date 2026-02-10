@@ -25,7 +25,7 @@ If the code is not fully optimized before handing off to the user, you will be f
 ## Project Layout
 
 ```text
-cmd/ciro/        # CLI entry point
+cmd/cicada/      # CLI entry point
 pkg/pipeline/    # Reusable pipeline types (external consumers may import)
 pkg/parser/      # Reusable KDL parser (external consumers may import)
 internal/builder # BuildKit LLB builder (internal only)
@@ -38,7 +38,7 @@ internal/runner  # BuildKit runner (internal only)
 ## Code Style and Formatting (CS)
 
 - **CS-01**: **MUST** use `gofmt` for all formatting (tabs, not spaces).
-- **CS-02**: No name stutter. `pipeline.Pipeline` is fine; `pipeline.CiroPipeline` is not.
+- **CS-02**: No name stutter. `pipeline.Pipeline` is fine; `pipeline.CicadaPipeline` is not.
 - **CS-03**: **MUST** use meaningful, descriptive variable and function names.
 - **CS-04**: Follow [Effective Go](https://go.dev/doc/effective_go) and Go idioms.
 - **CS-05**: Functions with >5 parameters **MUST** use an input struct.

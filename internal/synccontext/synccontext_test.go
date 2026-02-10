@@ -21,9 +21,9 @@ func TestLoadIgnorePatterns(t *testing.T) {
 		wantErr error
 	}{
 		{
-			name: "ciroignore takes precedence",
+			name: "cicadaignore takes precedence",
 			files: map[string]string{
-				".ciroignore":   "*.log\nbuild/\n",
+				".cicadaignore": "*.log\nbuild/\n",
 				".dockerignore": "*.tmp\n",
 			},
 			want: []string{"*.log", "build/"},
@@ -43,26 +43,26 @@ func TestLoadIgnorePatterns(t *testing.T) {
 		{
 			name: "blank lines and comments skipped",
 			files: map[string]string{
-				".ciroignore": "# this is a comment\n\n*.log\n\n# another\ntmp/\n",
+				".cicadaignore": "# this is a comment\n\n*.log\n\n# another\ntmp/\n",
 			},
 			want: []string{"*.log", "tmp/"},
 		},
 		{
 			name: "whitespace trimmed",
 			files: map[string]string{
-				".ciroignore": "  *.o  \n  dist/  \n",
+				".cicadaignore": "  *.o  \n  dist/  \n",
 			},
 			want: []string{"*.o", "dist/"},
 		},
 		{
-			name:  "unreadable ciroignore returns error",
-			files: map[string]string{".ciroignore": ""},
+			name:  "unreadable cicadaignore returns error",
+			files: map[string]string{".cicadaignore": ""},
 			setup: func(t *testing.T, dir string) {
 				t.Helper()
 				if runtime.GOOS == "windows" {
 					t.Skip("permission test not supported on windows")
 				}
-				require.NoError(t, os.Chmod(filepath.Join(dir, ".ciroignore"), 0o000))
+				require.NoError(t, os.Chmod(filepath.Join(dir, ".cicadaignore"), 0o000))
 			},
 			wantErr: os.ErrPermission,
 		},

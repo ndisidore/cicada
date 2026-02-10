@@ -1,7 +1,7 @@
 pipeline "hello" {
     step "greet" {
         image "alpine:latest"
-        run "echo 'Hello from Ciro!'"
+        run "echo 'Hello from Cicada!'"
     }
 
     step "info" {

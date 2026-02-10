@@ -11,24 +11,24 @@ import (
 	"strings"
 )
 
-// ErrNoIgnoreFile indicates neither .ciroignore nor .dockerignore was found.
+// ErrNoIgnoreFile indicates neither .cicadaignore nor .dockerignore was found.
 var ErrNoIgnoreFile = errors.New("no ignore file found")
 
 const (
-	_ciroIgnore   = ".ciroignore"
+	_cicadaIgnore = ".cicadaignore"
 	_dockerIgnore = ".dockerignore"
 )
 
-// LoadIgnorePatterns reads .ciroignore (or .dockerignore fallback) from dir.
+// LoadIgnorePatterns reads .cicadaignore (or .dockerignore fallback) from dir.
 // Returns ErrNoIgnoreFile when neither file exists.
 func LoadIgnorePatterns(dir string) ([]string, error) {
-	path := filepath.Join(dir, _ciroIgnore)
+	path := filepath.Join(dir, _cicadaIgnore)
 	patterns, err := readPatternFile(path)
 	if err == nil {
 		return patterns, nil
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("reading %s: %w", _ciroIgnore, err)
+		return nil, fmt.Errorf("reading %s: %w", _cicadaIgnore, err)
 	}
 
 	path = filepath.Join(dir, _dockerIgnore)

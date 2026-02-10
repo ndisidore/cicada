@@ -1,4 +1,4 @@
-// Package pipeline defines the core types for a ciro CI/CD pipeline.
+// Package pipeline defines the core types for a cicada CI/CD pipeline.
 package pipeline
 
 import (

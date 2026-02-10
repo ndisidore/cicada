@@ -10,7 +10,7 @@ import (
 	"github.com/moby/buildkit/client/llb"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/ndisidore/ciro/internal/progress"
+	"github.com/ndisidore/cicada/internal/progress"
 )
 
 // Solver abstracts the BuildKit Solve RPC for testability.

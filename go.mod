@@ -1,4 +1,4 @@
-module github.com/ndisidore/ciro
+module github.com/ndisidore/cicada
 
 go 1.25.7
 

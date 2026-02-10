@@ -58,7 +58,7 @@ func TestEnsureRunning(t *testing.T) {
 			}(),
 			docker: func(_ context.Context, args ...string) (string, error) {
 				if len(args) > 0 && args[0] == "inspect" {
-					return "error: no such object: ciro-buildkitd", errors.New("exit 1")
+					return "error: no such object: cicada-buildkitd", errors.New("exit 1")
 				}
 				return "container-id\n", nil
 			},
@@ -83,7 +83,7 @@ func TestEnsureRunning(t *testing.T) {
 			}(),
 			docker: func(_ context.Context, args ...string) (string, error) {
 				if len(args) > 0 && args[0] == "inspect" {
-					return "error: no such object: ciro-buildkitd", errors.New("exit 1")
+					return "error: no such object: cicada-buildkitd", errors.New("exit 1")
 				}
 				return "cannot start\n", errors.New("exit 1")
 			},
@@ -194,7 +194,7 @@ func TestStop(t *testing.T) {
 			name: "missing container is no-op",
 			docker: func(_ context.Context, args ...string) (string, error) {
 				if len(args) > 0 && args[0] == "inspect" {
-					return "Error: No such container: ciro-buildkitd", errors.New("exit 1")
+					return "Error: No such container: cicada-buildkitd", errors.New("exit 1")
 				}
 				return "", nil
 			},
@@ -270,7 +270,7 @@ func TestRemove(t *testing.T) {
 			name: "missing container is no-op",
 			docker: func(_ context.Context, args ...string) (string, error) {
 				if len(args) > 0 && args[0] == "inspect" {
-					return "Error: No such container: ciro-buildkitd", errors.New("exit 1")
+					return "Error: No such container: cicada-buildkitd", errors.New("exit 1")
 				}
 				return "", nil
 			},
@@ -351,7 +351,7 @@ func TestStatus(t *testing.T) {
 		{
 			name: "missing container returns empty",
 			docker: func(context.Context, ...string) (string, error) {
-				return "Error: No such container: ciro-buildkitd", errors.New("exit 1")
+				return "Error: No such container: cicada-buildkitd", errors.New("exit 1")
 			},
 			wantState: "",
 		},
@@ -410,14 +410,14 @@ func TestContainerState(t *testing.T) {
 		{
 			name: "no such container",
 			docker: func(context.Context, ...string) (string, error) {
-				return "Error: No such container: ciro-buildkitd", errors.New("exit 1")
+				return "Error: No such container: cicada-buildkitd", errors.New("exit 1")
 			},
 			wantState: "",
 		},
 		{
 			name: "no such object",
 			docker: func(context.Context, ...string) (string, error) {
-				return "Error: No such object: ciro-buildkitd", errors.New("exit 1")
+				return "Error: No such object: cicada-buildkitd", errors.New("exit 1")
 			},
 			wantState: "",
 		},

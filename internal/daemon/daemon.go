@@ -23,11 +23,11 @@ var ErrEngineUnhealthy = errors.New("engine health check timed out")
 var ErrStartFailed = errors.New("engine start unsuccessful")
 
 const (
-	_containerName = "ciro-buildkitd"
+	_containerName = "cicada-buildkitd"
 	_buildkitImage = "moby/buildkit:v0.27.1"
 	_port          = "1234"
 	_defaultAddr   = "tcp://127.0.0.1:" + _port
-	_volumeName    = "ciro-buildkit-state"
+	_volumeName    = "cicada-buildkit-state"
 
 	_healthTimeout     = 30 * time.Second
 	_healthInterval    = 100 * time.Millisecond
@@ -110,7 +110,7 @@ func (m *Manager) IsReachable(ctx context.Context, addr string) bool {
 	return ok
 }
 
-// Start runs a moby/buildkit container named "ciro-buildkitd".
+// Start runs a moby/buildkit container named "cicada-buildkitd".
 // It is idempotent: if a stopped container exists, it is restarted.
 // The daemon listens on TCP so no Unix socket permissions are needed.
 func (m *Manager) Start(ctx context.Context) (string, error) {
@@ -158,7 +158,7 @@ func (m *Manager) Start(ctx context.Context) (string, error) {
 	return _defaultAddr, nil
 }
 
-// Stop gracefully stops the ciro-buildkitd container without removing it.
+// Stop gracefully stops the cicada-buildkitd container without removing it.
 // It is a no-op if the container is not running.
 func (m *Manager) Stop(ctx context.Context) error {
 	if _, err := m.lookPath("docker"); err != nil {
@@ -179,7 +179,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 	return nil
 }
 
-// Remove force-removes the ciro-buildkitd container (running or stopped).
+// Remove force-removes the cicada-buildkitd container (running or stopped).
 func (m *Manager) Remove(ctx context.Context) error {
 	if _, err := m.lookPath("docker"); err != nil {
 		return fmt.Errorf("%w: %w", ErrDockerNotFound, err)

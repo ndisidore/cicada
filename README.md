@@ -1,7 +1,7 @@
-# Ciro
+# Cicada. Hear your CI before it ships.
 
 <p align="center">
-  <a href="https://github.com/ndisidore/ciro/actions/workflows/ci.yaml"><img src="https://github.com/ndisidore/ciro/actions/workflows/ci.yaml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/ndisidore/cicada/actions/workflows/ci.yaml"><img src="https://github.com/ndisidore/cicada/actions/workflows/ci.yaml/badge.svg" alt="CI"></a>
   <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white" alt="Go"></a>
   <a href="https://github.com/moby/buildkit"><img src="https://img.shields.io/badge/BuildKit-powered-blue?logo=docker&logoColor=white" alt="BuildKit"></a>
   <a href="https://kdl.dev"><img src="https://img.shields.io/badge/config-KDL-blueviolet" alt="KDL"></a>
@@ -18,25 +18,25 @@ Most CI systems share the same dirty secret: the only way to find out if your pi
 
 Good CI should be better than that. Specifically, it should be:
 
-- **Locally repeatable** -- The exact same pipeline that runs in CI should run on your machine. Not a "close enough" approximation. The *same* thing. If it passes on your laptop, it passes in CI. Full stop.
+- **Locally repeatable**: The exact same pipeline that runs in CI should run on your machine. Not a "close enough" approximation. The *same* thing. If it passes on your laptop, it passes in CI. Full stop.
 
-- **Debuggable** -- When something breaks, you should be able to drop into a shell, poke around, and iterate -- not squint at truncated logs from a VM you'll never touch.
+- **Debuggable**: When something breaks, you should be able to drop into a shell, poke around, and iterate -- not squint at truncated logs from a VM you'll never touch.
 
-- **Tool-centric** -- CI should be a thin wrapper around your existing scripts and task runners, not a vendor-specific reimagination of how builds work. Your `mise` tasks, your Makefile, your shell scripts -- those are the source of truth.
+- **Tool-centric**: CI should be a thin wrapper around your existing scripts and task runners, not a vendor-specific reimagination of how builds work. Your `mise` tasks, your Makefile, your shell scripts -- those are the source of truth.
 
-- **Portable** -- Switching CI providers shouldn't require rewriting your entire pipeline from scratch. Your build logic lives in *your* repo, not in some provider's proprietary DSL.
+- **Portable**: Switching CI providers shouldn't require rewriting your entire pipeline from scratch. Your build logic lives in *your* repo, not in some provider's proprietary DSL.
 
-- **Fast via caching** -- Content-hash-based caching should prevent redundant work. You shouldn't reinstall your dependencies every single run because the CI system forgot what happened 5 minutes ago.
+- **Fast via caching**: Content-hash-based caching should prevent redundant work. You shouldn't reinstall your dependencies every single run because the CI system forgot what happened 5 minutes ago.
 
-Ciro takes these ideas seriously. Pipelines are declared in KDL (not YAML -- you're welcome), executed inside containers via BuildKit, and run the same way everywhere. Your laptop is a first-class CI environment.
+Cicada takes these ideas seriously. Pipelines are declared in KDL (not YAML -- you're welcome), executed inside containers via BuildKit, and run the same way everywhere. Your laptop is a first-class CI environment.
 
 ## Comparison to Dagger
 
-[Dagger](https://dagger.io/) is a major inspiration for Ciro. It proved that BuildKit is a fantastic execution engine for CI and that local-first pipelines are not just possible but *preferable*. Ciro wouldn't exist without the trail Dagger blazed.
+[Dagger](https://dagger.io/) is a major inspiration for Cicada. It proved that BuildKit is a fantastic execution engine for CI and that local-first pipelines are not just possible but *preferable*. Cicada wouldn't exist without the trail Dagger blazed.
 
-That said, Dagger's power comes with friction that Ciro tries to avoid:
+That said, Dagger's power comes with friction that Cicada tries to avoid:
 
-| | Dagger | Ciro |
+| | Dagger | Cicada |
 |---|---|---|
 | **Pipeline definition** | Go / TypeScript / Python SDK | KDL config file |
 | **Learning curve** | SDK APIs, generated clients, GraphQL engine internals | One config format, handful of options |
@@ -45,7 +45,7 @@ That said, Dagger's power comes with friction that Ciro tries to avoid:
 | **Module ecosystem** | Daggerverse (powerful, but unclear trust/security model for secrets and env access) | None yet -- your pipeline is self-contained |
 | **Runtime overhead** | GraphQL engine + SDK runtime + BuildKit | BuildKit (that's it) |
 
-The short version: Dagger gives you a full programming language and an ecosystem to go with it. Ciro gives you a config file and gets out of the way. If your pipeline needs loops, conditionals, and dynamic graph construction, Dagger is the better tool. If your pipeline is "run these commands in these containers in this order," Ciro is the lighter path to get there.
+The short version: Dagger gives you a full programming language and an ecosystem to go with it. Cicada gives you a config file and gets out of the way. If your pipeline needs loops, conditionals, and dynamic graph construction, Dagger is the better tool. If your pipeline is "run these commands in these containers in this order," Cicada is the lighter path to get there.
 
 Both agree on the thing that matters most: CI should run on your laptop.
 
@@ -60,14 +60,14 @@ Both agree on the thing that matters most: CI should run on your laptop.
 # Install tools (Go, golangci-lint) via mise
 mise install
 
-# Build ciro
+# Build cicada
 mise build
 
 # Validate a pipeline
-./bin/ciro validate examples/hello.kdl
+./bin/cicada validate examples/hello.kdl
 
 # Run a pipeline
-./bin/ciro run examples/hello.kdl
+./bin/cicada run examples/hello.kdl
 ```
 
 ## Pipeline Syntax
@@ -78,7 +78,7 @@ Pipelines are written in [KDL](https://kdl.dev), a document language that's clea
 pipeline "hello" {
   step "greet" {
     image "alpine:latest"
-    run "echo 'Hello from Ciro!'"
+    run "echo 'Hello from Cicada!'"
   }
 
   step "build" {
@@ -103,25 +103,25 @@ pipeline "hello" {
 | `workdir`    | Working directory inside container       | `workdir "/src"`                         |
 | `cache`      | Persistent cache volume                  | `cache "gomod" "/go/pkg/mod"`            |
 
-Dependencies between steps are resolved via topological sort -- Ciro will catch cycles and missing references before anything runs.
+Dependencies between steps are resolved via topological sort, and Cicada will catch cycles and missing references before anything runs.
 
 ## CLI Usage
 
 ```bash
 # Validate without running
-ciro validate pipeline.kdl
+cicada validate pipeline.kdl
 
 # Run a pipeline
-ciro run pipeline.kdl
+cicada run pipeline.kdl
 
 # Run against a remote BuildKit daemon
-ciro run pipeline.kdl --addr tcp://buildkit.example.com:1234
+cicada run pipeline.kdl --addr tcp://buildkit.example.com:1234
 
 # Dry run (generate LLB without executing)
-ciro run pipeline.kdl --dry-run
+cicada run pipeline.kdl --dry-run
 
 # Skip cache
-ciro run pipeline.kdl --no-cache
+cicada run pipeline.kdl --no-cache
 ```
 
 ## Development
@@ -129,7 +129,7 @@ ciro run pipeline.kdl --no-cache
 [mise](https://mise.jdx.dev/) is the preferred way to interact with the project. All common tasks are a `mise` invocation away:
 
 ```bash
-mise build        # Build the CLI binary to ./bin/ciro
+mise build        # Build the CLI binary to ./bin/cicada
 mise test         # Run tests with -race
 mise vet          # Run go vet
 mise lint         # Run golangci-lint
@@ -143,7 +143,7 @@ Yes, `mise ci` runs the *actual* CI checks on your machine. Locally repeatable C
 ## Project Layout
 
 ```text
-cmd/ciro/          CLI entry point
+cmd/cicada/          CLI entry point
 pkg/pipeline/      Pipeline types and validation (importable)
 pkg/parser/        KDL-to-Pipeline parser (importable)
 internal/builder/  BuildKit LLB generation
@@ -155,10 +155,10 @@ Packages under `pkg/` are stable and safe for external consumers to import. Pack
 
 ## Why Go?
 
-Ciro was originally planned in Rust, and if you go back to the first few commits, you'll see that is how it started. But the container ecosystem speaks Go. BuildKit, containerd, the OCI spec libraries, Docker itself -- they're all Go projects with Go APIs. Writing Ciro in Rust would have meant maintaining FFI bindings or shelling out to CLI wrappers, or attempting to maintain complex gRPC-based session code for core functionality, trading real engineering time for a language preference.
+Cicada was originally planned in Rust, and if you go back to the first few commits, you'll see that is how it started. But the container ecosystem speaks Go. BuildKit, containerd, the OCI spec libraries, Docker itself -- they're all Go projects with Go APIs. Writing Cicada in Rust would have meant maintaining FFI bindings or shelling out to CLI wrappers, or attempting to maintain complex gRPC-based session code for core functionality, trading real engineering time for a language preference.
 
 Go gave us native BuildKit integration (LLB construction, solve API, session management) with zero glue code. The tradeoff was worth it.
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for what's coming next -- matrix builds, modular configs, advanced caching, and more.
+See [ROADMAP.md](ROADMAP.md) for what's coming next; matrix builds, modular configs, advanced caching, and more.

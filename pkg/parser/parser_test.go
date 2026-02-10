@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ndisidore/ciro/pkg/pipeline"
+	"github.com/ndisidore/cicada/pkg/pipeline"
 )
 
 func TestParse(t *testing.T) {

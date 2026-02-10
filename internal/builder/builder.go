@@ -8,7 +8,7 @@ import (
 
 	"github.com/moby/buildkit/client/llb"
 
-	"github.com/ndisidore/ciro/pkg/pipeline"
+	"github.com/ndisidore/cicada/pkg/pipeline"
 )
 
 // Result holds the LLB definitions for a pipeline, one per step in topological order.

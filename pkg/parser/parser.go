@@ -11,7 +11,7 @@ import (
 	kdl "github.com/sblinch/kdl-go"
 	"github.com/sblinch/kdl-go/document"
 
-	"github.com/ndisidore/ciro/pkg/pipeline"
+	"github.com/ndisidore/cicada/pkg/pipeline"
 )
 
 // Sentinel errors for parse failures.

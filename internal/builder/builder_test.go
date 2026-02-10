@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ndisidore/ciro/pkg/pipeline"
+	"github.com/ndisidore/cicada/pkg/pipeline"
 )
 
 // execMounts returns the mounts from the first ExecOp found in the definition.
