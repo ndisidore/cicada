@@ -117,7 +117,7 @@ func TestCollectImages(t *testing.T) {
 		{
 			name: "empty pipeline",
 			p:    Pipeline{},
-			want: []string{},
+			want: nil,
 		},
 		{
 			name: "single step",

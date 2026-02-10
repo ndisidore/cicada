@@ -3,6 +3,7 @@ package pipeline
 import (
 	"fmt"
 	"maps"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -12,7 +13,7 @@ import (
 // Phase 2 expands step-level matrices (all-variant deps).
 // Returns the original pipeline unchanged if no matrices are present.
 func Expand(p Pipeline) (Pipeline, error) {
-	if p.Matrix == nil && !hasStepMatrices(p.Steps) {
+	if p.Matrix == nil && !slices.ContainsFunc(p.Steps, func(s Step) bool { return s.Matrix != nil }) {
 		return p, nil
 	}
 
@@ -27,15 +28,6 @@ func Expand(p Pipeline) (Pipeline, error) {
 	}
 
 	return expanded, nil
-}
-
-func hasStepMatrices(steps []Step) bool {
-	for i := range steps {
-		if steps[i].Matrix != nil {
-			return true
-		}
-	}
-	return false
 }
 
 // expandPipeline handles phase 1: pipeline-level matrix expansion with
@@ -77,7 +69,7 @@ func expandPipeline(p Pipeline) (Pipeline, error) {
 // expandSteps handles phase 2: step-level matrix expansion with
 // all-variant dependency rewriting.
 func expandSteps(p Pipeline) (Pipeline, error) {
-	if !hasStepMatrices(p.Steps) {
+	if !slices.ContainsFunc(p.Steps, func(s Step) bool { return s.Matrix != nil }) {
 		return p, nil
 	}
 
@@ -192,40 +184,20 @@ func checkDimCollisions(pm *Matrix, steps []Step) error {
 // Cache IDs are copied verbatim (including any namespace prefix from phase 1);
 // callers re-namespace IDs via matrixCacheID after replication.
 func replicateStep(s *Step, combo map[string]string) Step {
+	sub := func(v string) string { return substituteVars(v, combo) }
 	cp := Step{
-		Name:    s.Name,
-		Image:   substituteVars(s.Image, combo),
-		Workdir: substituteVars(s.Workdir, combo),
-		Matrix:  s.Matrix,
-	}
-	if len(s.Run) > 0 {
-		cp.Run = make([]string, len(s.Run))
-		for i, cmd := range s.Run {
-			cp.Run[i] = substituteVars(cmd, combo)
-		}
-	}
-	if len(s.DependsOn) > 0 {
-		cp.DependsOn = make([]string, len(s.DependsOn))
-		copy(cp.DependsOn, s.DependsOn)
-	}
-	if len(s.Mounts) > 0 {
-		cp.Mounts = make([]Mount, len(s.Mounts))
-		for i, m := range s.Mounts {
-			cp.Mounts[i] = Mount{
-				Source:   substituteVars(m.Source, combo),
-				Target:   substituteVars(m.Target, combo),
-				ReadOnly: m.ReadOnly,
-			}
-		}
-	}
-	if len(s.Caches) > 0 {
-		cp.Caches = make([]Cache, len(s.Caches))
-		for i, c := range s.Caches {
-			cp.Caches[i] = Cache{
-				ID:     substituteVars(c.ID, combo),
-				Target: substituteVars(c.Target, combo),
-			}
-		}
+		Name:      s.Name,
+		Image:     sub(s.Image),
+		Workdir:   sub(s.Workdir),
+		Matrix:    s.Matrix,
+		Run:       mapSlice(s.Run, sub),
+		DependsOn: mapSlice(s.DependsOn, func(d string) string { return d }),
+		Mounts: mapSlice(s.Mounts, func(m Mount) Mount {
+			return Mount{Source: sub(m.Source), Target: sub(m.Target), ReadOnly: m.ReadOnly}
+		}),
+		Caches: mapSlice(s.Caches, func(c Cache) Cache {
+			return Cache{ID: sub(c.ID), Target: sub(c.Target)}
+		}),
 	}
 	return cp
 }
@@ -295,29 +267,16 @@ func matrixCacheID(baseID, expandedName string) string {
 // correlateDeps rewrites dependencies to their same-replica (correlated) names.
 // Used in phase 1 where test[os=linux] should depend on build[os=linux].
 func correlateDeps(deps []string, combo map[string]string) []string {
-	if len(deps) == 0 {
-		return nil
-	}
-	out := make([]string, len(deps))
-	for i, dep := range deps {
-		out[i] = expandedStepName(dep, combo)
-	}
-	return out
+	return mapSlice(deps, func(dep string) string { return expandedStepName(dep, combo) })
 }
 
 // rewriteDeps replaces each dependency with all of its expanded variants.
 // Used in phase 2 where B depends on ALL variants of matrix step A.
 func rewriteDeps(deps []string, expansionMap map[string][]string) []string {
-	if len(deps) == 0 {
-		return nil
-	}
-	var out []string
-	for _, dep := range deps {
+	return flatMap(deps, func(dep string) []string {
 		if variants, ok := expansionMap[dep]; ok {
-			out = append(out, variants...)
-		} else {
-			out = append(out, dep)
+			return variants
 		}
-	}
-	return out
+		return []string{dep}
+	})
 }
