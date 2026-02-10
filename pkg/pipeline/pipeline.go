@@ -29,10 +29,11 @@ var (
 	ErrMatrixTooLarge = errors.New("matrix produces too many combinations")
 )
 
-// _validName matches step names that are safe for use in filesystem paths.
-// The optional bracket suffix accommodates expanded matrix step names like
-// "build[os=linux,go-version=1.22]".
-var _validName = regexp.MustCompile(`^[a-zA-Z0-9_-]+(\[[a-zA-Z0-9_.:-]+(=[a-zA-Z0-9_.:-]+)?(,[a-zA-Z0-9_.:-]+(=[a-zA-Z0-9_.:-]+)?)*\])?$`)
+// _validName matches step names: alphanumeric base with an optional bracket
+// suffix for expanded matrix step names (e.g. "build[platform=linux/amd64]").
+// The bracket portion permits '/' and ':' for OCI platform specifiers; these
+// names are used as map keys and display labels, not raw filesystem paths.
+var _validName = regexp.MustCompile(`^[a-zA-Z0-9_-]+(\[[a-zA-Z0-9_.:/\-]+(=[a-zA-Z0-9_.:/\-]+)?(,[a-zA-Z0-9_.:/\-]+(=[a-zA-Z0-9_.:/\-]+)?)*\])?$`)
 
 // _validDimName matches dimension names: alphanumeric, hyphens, underscores.
 var _validDimName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
@@ -97,6 +98,7 @@ type Step struct {
 	Image     string
 	Run       []string
 	Workdir   string
+	Platform  string // OCI platform specifier (e.g. "linux/amd64"); empty means default
 	DependsOn []string
 	Mounts    []Mount
 	Caches    []Cache

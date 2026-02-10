@@ -186,7 +186,7 @@ func checkDimCollisions(pm *Matrix, steps []Step) error {
 }
 
 // replicateStep creates a deep copy of a step with matrix variable substitution
-// applied to image, run, workdir, mount source/target, and cache target.
+// applied to image, run, workdir, platform, mount source/target, and cache target.
 // Cache IDs are copied verbatim (including any namespace prefix from phase 1);
 // callers re-namespace IDs via matrixCacheID after replication.
 func replicateStep(s *Step, combo map[string]string) Step {
@@ -195,6 +195,7 @@ func replicateStep(s *Step, combo map[string]string) Step {
 		Name:      s.Name,
 		Image:     sub(s.Image),
 		Workdir:   sub(s.Workdir),
+		Platform:  sub(s.Platform),
 		Matrix:    s.Matrix,
 		Run:       mapSlice(s.Run, sub),
 		DependsOn: mapSlice(s.DependsOn, func(d string) string { return d }),

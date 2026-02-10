@@ -506,6 +506,40 @@ func TestParse(t *testing.T) {
 			wantErr: pipeline.ErrInvalidDimName,
 		},
 		{
+			name: "platform field",
+			input: `pipeline "plat" {
+				step "build" {
+					image "golang:1.23"
+					platform "linux/arm64"
+					run "go version"
+				}
+			}`,
+			want: pipeline.Pipeline{
+				Name: "plat",
+				Steps: []pipeline.Step{
+					{
+						Name:     "build",
+						Image:    "golang:1.23",
+						Platform: "linux/arm64",
+						Run:      []string{"go version"},
+					},
+				},
+				TopoOrder: []int{0},
+			},
+		},
+		{
+			name: "duplicate platform field",
+			input: `pipeline "bad" {
+				step "a" {
+					image "alpine:latest"
+					platform "linux/amd64"
+					platform "linux/arm64"
+					run "echo hi"
+				}
+			}`,
+			wantErr: ErrDuplicateField,
+		},
+		{
 			name: "duplicate dimension name across levels",
 			input: `pipeline "bad" {
 				matrix {

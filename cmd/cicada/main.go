@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	bkclient "github.com/moby/buildkit/client"
+	"github.com/moby/buildkit/client/llb/imagemetaresolver"
 	"github.com/tonistiigi/fsutil"
 	"github.com/urfave/cli/v3"
 	"golang.org/x/term"
@@ -233,6 +234,7 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 	result, err := builder.Build(ctx, p, builder.BuildOpts{
 		NoCache:         cmd.Bool("no-cache"),
 		ExcludePatterns: excludes,
+		MetaResolver:    imagemetaresolver.Default(),
 	})
 	if err != nil {
 		return fmt.Errorf("building %s: %w", path, err)

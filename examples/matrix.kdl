@@ -1,21 +1,25 @@
 // Matrix build example: pipeline-level + step-level matrix.
 //
-// Pipeline-level matrix (os) is correlated across steps:
-//   build[os=linux] -> test[os=linux], build[os=darwin] -> test[os=darwin]
+// Pipeline-level matrix (platform) is correlated across steps:
+//   build[platform=linux/amd64] -> test[platform=linux/amd64], etc.
 //
 // Step-level matrix (go-version) is independent:
 //   Each test step expands into variants per Go version.
 //
 // Total: 2 build steps + 4 test steps.
+//
+// Note: cross-arch execution requires QEMU/binfmt support:
+//   docker run --privileged --rm tonistiigi/binfmt --install all
 
 pipeline "matrix-ci" {
     matrix {
-        os "linux" "darwin"
+        platform "linux/amd64" "linux/arm64"
     }
 
     step "build" {
         image "golang:1.23"
-        run "echo building for GOOS=${matrix.os} && go version"
+        platform "${matrix.platform}"
+        run "echo building for ${matrix.platform} && go version"
     }
 
     step "test" {
@@ -24,6 +28,7 @@ pipeline "matrix-ci" {
         }
         depends-on "build"
         image "golang:${matrix.go-version}"
-        run "echo testing on GOOS=${matrix.os} with $(go version)"
+        platform "${matrix.platform}"
+        run "echo testing on ${matrix.platform} with $(go version)"
     }
 }

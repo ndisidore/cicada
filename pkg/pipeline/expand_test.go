@@ -337,6 +337,27 @@ func TestExpand(t *testing.T) {
 			},
 		},
 		{
+			name: "platform substituted during expansion",
+			input: Pipeline{
+				Name: "ci",
+				Matrix: &Matrix{
+					Dimensions: []Dimension{
+						{Name: "platform", Values: []string{"linux/amd64", "linux/arm64"}},
+					},
+				},
+				Steps: []Step{
+					{Name: "build", Image: "golang:1.23", Platform: "${matrix.platform}", Run: []string{"go version"}},
+				},
+			},
+			want: Pipeline{
+				Name: "ci",
+				Steps: []Step{
+					{Name: "build[platform=linux/amd64]", Image: "golang:1.23", Platform: "linux/amd64", Run: []string{"go version"}},
+					{Name: "build[platform=linux/arm64]", Image: "golang:1.23", Platform: "linux/arm64", Run: []string{"go version"}},
+				},
+			},
+		},
+		{
 			name:    "dimension name collision",
 			wantErr: ErrDuplicateDim,
 			input: Pipeline{

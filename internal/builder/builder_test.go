@@ -2,14 +2,32 @@ package builder
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
+	"github.com/moby/buildkit/client/llb/sourceresolver"
 	"github.com/moby/buildkit/solver/pb"
+	digest "github.com/opencontainers/go-digest"
+	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/ndisidore/cicada/pkg/pipeline"
 )
+
+// mockMetaResolver returns a fixed OCI image config for any image reference.
+type mockMetaResolver struct {
+	config ocispecs.Image
+}
+
+//revive:disable-next-line:function-result-limit // signature dictated by sourceresolver.ImageMetaResolver interface
+func (m *mockMetaResolver) ResolveImageConfig(_ context.Context, ref string, _ sourceresolver.Opt) (string, digest.Digest, []byte, error) {
+	dt, err := json.Marshal(m.config)
+	if err != nil {
+		return "", "", nil, err
+	}
+	return ref, "", dt, nil
+}
 
 // execMounts returns the mounts from the first ExecOp found in the definition.
 func execMounts(t *testing.T, defBytes [][]byte) []*pb.Mount {
@@ -19,6 +37,20 @@ func execMounts(t *testing.T, defBytes [][]byte) []*pb.Mount {
 		require.NoError(t, op.UnmarshalVT(raw))
 		if exec := op.GetExec(); exec != nil {
 			return exec.GetMounts()
+		}
+	}
+	t.Fatal("no ExecOp found in definition")
+	return nil
+}
+
+// execMeta returns the Meta from the first ExecOp found in the definition.
+func execMeta(t *testing.T, defBytes [][]byte) *pb.Meta {
+	t.Helper()
+	for _, raw := range defBytes {
+		var op pb.Op
+		require.NoError(t, op.UnmarshalVT(raw))
+		if exec := op.GetExec(); exec != nil {
+			return exec.GetMeta()
 		}
 	}
 	t.Fatal("no ExecOp found in definition")
@@ -416,4 +448,169 @@ func TestBuildTopoSortOrder(t *testing.T) {
 	result, err := Build(context.Background(), p, BuildOpts{})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"a", "b", "c"}, result.StepNames)
+}
+
+func TestBuildWithPlatform(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		platform string
+		wantOS   string
+		wantArch string
+	}{
+		{
+			name:     "linux/arm64 platform constraint",
+			platform: "linux/arm64",
+			wantOS:   "linux",
+			wantArch: "arm64",
+		},
+		{
+			name:     "linux/amd64 platform constraint",
+			platform: "linux/amd64",
+			wantOS:   "linux",
+			wantArch: "amd64",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			p := pipeline.Pipeline{
+				Name: "plat",
+				Steps: []pipeline.Step{
+					{
+						Name:     "build",
+						Image:    "golang:1.23",
+						Platform: tt.platform,
+						Run:      []string{"go version"},
+					},
+				},
+			}
+
+			result, err := Build(context.Background(), p, BuildOpts{})
+			require.NoError(t, err)
+			require.Len(t, result.Definitions, 1)
+
+			// Walk the marshaled ops and find one with a platform constraint.
+			var found bool
+			for _, raw := range result.Definitions[0].Def {
+				var op pb.Op
+				require.NoError(t, op.UnmarshalVT(raw))
+				if plat := op.GetPlatform(); plat != nil {
+					assert.Equal(t, tt.wantOS, plat.GetOS())
+					assert.Equal(t, tt.wantArch, plat.GetArchitecture())
+					found = true
+				}
+			}
+			assert.True(t, found, "expected at least one op with platform constraint")
+		})
+	}
+}
+
+func TestBuildWithInvalidPlatform(t *testing.T) {
+	t.Parallel()
+
+	p := pipeline.Pipeline{
+		Name: "bad",
+		Steps: []pipeline.Step{
+			{
+				Name:     "build",
+				Image:    "alpine:latest",
+				Platform: "not/a/valid/platform/string",
+				Run:      []string{"echo hi"},
+			},
+		},
+	}
+
+	_, err := Build(context.Background(), p, BuildOpts{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parsing platform")
+}
+
+func TestBuildWithMetaResolver(t *testing.T) {
+	t.Parallel()
+
+	resolver := &mockMetaResolver{
+		config: ocispecs.Image{
+			Config: ocispecs.ImageConfig{
+				Env:        []string{"PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "GOPATH=/go"},
+				WorkingDir: "/go",
+			},
+		},
+	}
+
+	tests := []struct {
+		name    string
+		p       pipeline.Pipeline
+		opts    BuildOpts
+		wantEnv []string
+		wantCwd string
+	}{
+		{
+			name: "image env and workdir propagated",
+			p: pipeline.Pipeline{
+				Name: "go-build",
+				Steps: []pipeline.Step{
+					{
+						Name:  "build",
+						Image: "golang:1.23",
+						Run:   []string{"go version"},
+					},
+				},
+			},
+			opts:    BuildOpts{MetaResolver: resolver},
+			wantEnv: []string{"PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "GOPATH=/go"},
+			wantCwd: "/go",
+		},
+		{
+			name: "step workdir overrides image workdir",
+			p: pipeline.Pipeline{
+				Name: "go-build",
+				Steps: []pipeline.Step{
+					{
+						Name:    "build",
+						Image:   "golang:1.23",
+						Run:     []string{"go version"},
+						Workdir: "/src",
+					},
+				},
+			},
+			opts:    BuildOpts{MetaResolver: resolver},
+			wantEnv: []string{"PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "GOPATH=/go"},
+			wantCwd: "/src",
+		},
+		{
+			name: "no resolver omits image config",
+			p: pipeline.Pipeline{
+				Name: "plain",
+				Steps: []pipeline.Step{
+					{
+						Name:  "build",
+						Image: "golang:1.23",
+						Run:   []string{"echo hello"},
+					},
+				},
+			},
+			opts:    BuildOpts{},
+			wantEnv: nil,
+			wantCwd: "/",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result, err := Build(context.Background(), tt.p, tt.opts)
+			require.NoError(t, err)
+			require.Len(t, result.Definitions, 1)
+
+			meta := execMeta(t, result.Definitions[0].Def)
+			require.NotNil(t, meta)
+			assert.Equal(t, tt.wantEnv, meta.GetEnv())
+			assert.Equal(t, tt.wantCwd, meta.GetCwd())
+		})
+	}
 }

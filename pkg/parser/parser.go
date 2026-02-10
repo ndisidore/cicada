@@ -138,7 +138,7 @@ func parseStep(node *document.Node, filename string) (pipeline.Step, error) {
 func applyStepField(s *pipeline.Step, node *document.Node, filename string) error {
 	nt := NodeType(node.Name.ValueString())
 	switch nt {
-	case NodeTypeImage, NodeTypeWorkdir, NodeTypeRun, NodeTypeDependsOn:
+	case NodeTypeImage, NodeTypeWorkdir, NodeTypeRun, NodeTypeDependsOn, NodeTypePlatform:
 		return applyStringField(s, nt, node, filename)
 	case NodeTypeMount:
 		m, err := stringArgs2(node, filename, string(nt))
@@ -183,6 +183,8 @@ func applyStringField(s *pipeline.Step, nt NodeType, node *document.Node, filena
 		return setOnce(&s.Image, v, filename, scope, string(nt))
 	case NodeTypeWorkdir:
 		return setOnce(&s.Workdir, v, filename, scope, string(nt))
+	case NodeTypePlatform:
+		return setOnce(&s.Platform, v, filename, scope, string(nt))
 	case NodeTypeRun:
 		s.Run = append(s.Run, v)
 	case NodeTypeDependsOn:

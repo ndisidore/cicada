@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/containerd/platforms"
 	"github.com/moby/buildkit/client/llb"
 
 	"github.com/ndisidore/cicada/pkg/pipeline"
@@ -25,6 +26,8 @@ type BuildOpts struct {
 	NoCache bool
 	// ExcludePatterns are glob patterns to exclude from local context mounts.
 	ExcludePatterns []string
+	// MetaResolver resolves OCI image config (ENV, WORKDIR, platform) at build time.
+	MetaResolver llb.ImageMetaResolver
 }
 
 // stepOpts holds pre-computed LLB options applied to every step.
@@ -47,6 +50,9 @@ func Build(ctx context.Context, p pipeline.Pipeline, opts BuildOpts) (Result, er
 	}
 
 	so := stepOpts{excludePatterns: opts.ExcludePatterns}
+	if opts.MetaResolver != nil {
+		so.imgOpts = append(so.imgOpts, llb.WithMetaResolver(opts.MetaResolver))
+	}
 	if opts.NoCache {
 		so.imgOpts = append(so.imgOpts, llb.IgnoreCache)
 		so.runOpts = append(so.runOpts, llb.IgnoreCache)
@@ -98,7 +104,15 @@ func buildStep(
 		return nil, llb.State{}, fmt.Errorf("step %q: %w", step.Name, pipeline.ErrMissingRun)
 	}
 
-	st := llb.Image(step.Image, opts.imgOpts...)
+	imgOpts := append([]llb.ImageOption(nil), opts.imgOpts...)
+	if step.Platform != "" {
+		plat, err := platforms.Parse(step.Platform)
+		if err != nil {
+			return nil, llb.State{}, fmt.Errorf("step %q: parsing platform %q: %w", step.Name, step.Platform, err)
+		}
+		imgOpts = append(imgOpts, llb.Platform(plat))
+	}
+	st := llb.Image(step.Image, imgOpts...)
 
 	if step.Workdir != "" {
 		st = st.Dir(step.Workdir)
