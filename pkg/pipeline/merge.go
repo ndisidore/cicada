@@ -1,9 +1,6 @@
 package pipeline
 
-import (
-	"fmt"
-	"slices"
-)
+import "fmt"
 
 // StepGroup represents a collection of steps from a single source (inline or
 // included file) along with the conflict resolution strategy to apply.
@@ -95,19 +92,29 @@ func ExpandAliases(steps []Step, aliases map[string][]string) ([]Step, error) {
 	result := make([]Step, len(steps))
 	for i := range steps {
 		result[i] = steps[i]
-		if len(steps[i].DependsOn) == 0 {
-			continue
+		if len(steps[i].DependsOn) > 0 {
+			result[i].DependsOn = expandDeps(steps[i].DependsOn, aliases)
 		}
-		var expanded []string
-		for _, dep := range steps[i].DependsOn {
-			if terminals, ok := aliases[dep]; ok {
-				expanded = append(expanded, terminals...)
-			} else {
-				expanded = append(expanded, dep)
-			}
-		}
-		// Deduplicate while preserving order.
-		result[i].DependsOn = slices.Compact(slices.Sorted(slices.Values(expanded)))
 	}
 	return result, nil
+}
+
+// expandDeps resolves alias references in a dependency list and deduplicates
+// while preserving insertion order.
+func expandDeps(deps []string, aliases map[string][]string) []string {
+	seen := make(map[string]struct{}, len(deps))
+	deduped := make([]string, 0, len(deps))
+	for _, dep := range deps {
+		targets := aliases[dep]
+		if targets == nil {
+			targets = []string{dep}
+		}
+		for _, t := range targets {
+			if _, dup := seen[t]; !dup {
+				seen[t] = struct{}{}
+				deduped = append(deduped, t)
+			}
+		}
+	}
+	return deduped
 }

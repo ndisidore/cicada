@@ -14,17 +14,17 @@ pipeline "ci" {
         platform "linux/amd64" "linux/arm64"
     }
 
-    include "./fragments/lint.kdl" as="lint"
+    include "./fragments/lint.kdl"
 
     include "./fragments/go-test.kdl" as="tests" {
-        go-version "1.23"
+        go-version "1.25"
         coverage-threshold "80"
     }
 
     step "build" {
         depends-on "lint"
         depends-on "tests"
-        image "golang:1.23"
+        image "golang:1.25"
         platform "${matrix.platform}"
         mount "." "/src"
         workdir "/src"

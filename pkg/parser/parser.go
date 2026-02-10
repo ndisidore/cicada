@@ -25,10 +25,13 @@ var (
 	ErrExtraArgs         = errors.New("too many arguments")
 	ErrTypeMismatch      = errors.New("argument type mismatch")
 	ErrUnknownProp       = errors.New("unknown property")
+	ErrAmbiguousFile     = errors.New("contains both pipeline and fragment nodes")
 )
 
 // Parser converts KDL documents into validated pipeline definitions.
 type Parser struct {
+	// Resolver opens include sources during parsing. Must be non-nil before
+	// calling ParseFile.
 	Resolver Resolver
 }
 

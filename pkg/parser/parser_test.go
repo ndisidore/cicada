@@ -853,10 +853,15 @@ func TestParseInclude(t *testing.T) {
 			wantErr: pipeline.ErrUnknownParam,
 		},
 		{
-			name: "missing as property",
+			name: "alias falls back to fragment name",
 			files: map[string]string{
 				"/project/ci.kdl": `pipeline "ci" {
 					include "./frag.kdl"
+					step "deploy" {
+						image "alpine:latest"
+						depends-on "f"
+						run "echo deploy"
+					}
 				}`,
 				"/project/frag.kdl": `fragment "f" {
 					step "s" {
@@ -865,8 +870,24 @@ func TestParseInclude(t *testing.T) {
 					}
 				}`,
 			},
-			entry:   "/project/ci.kdl",
-			wantErr: pipeline.ErrMissingAlias,
+			entry: "/project/ci.kdl",
+			want: pipeline.Pipeline{
+				Name: "ci",
+				Steps: []pipeline.Step{
+					{
+						Name:  "s",
+						Image: "alpine:latest",
+						Run:   []string{"echo hello"},
+					},
+					{
+						Name:      "deploy",
+						Image:     "alpine:latest",
+						DependsOn: []string{"s"},
+						Run:       []string{"echo deploy"},
+					},
+				},
+				TopoOrder: []int{0, 1},
+			},
 		},
 		{
 			name: "duplicate alias names",
@@ -1093,6 +1114,161 @@ func TestParseInclude(t *testing.T) {
 				},
 				TopoOrder: []int{0, 1},
 			},
+		},
+		{
+			name: "duplicate include param",
+			files: map[string]string{
+				"/project/ci.kdl": `pipeline "ci" {
+					include "./frag.kdl" as="f" {
+						version "1.23"
+						version "1.24"
+					}
+				}`,
+				"/project/frag.kdl": `fragment "f" {
+					param "version"
+					step "s" {
+						image "golang:${param.version}"
+						run "go version"
+					}
+				}`,
+			},
+			entry:   "/project/ci.kdl",
+			wantErr: ErrDuplicateField,
+		},
+		{
+			name: "included file with both pipeline and fragment",
+			files: map[string]string{
+				"/project/ci.kdl": `pipeline "ci" {
+					include "./both.kdl" as="both"
+				}`,
+				"/project/both.kdl": `pipeline "p" {
+					step "a" {
+						image "alpine:latest"
+						run "echo a"
+					}
+				}
+				fragment "f" {
+					step "b" {
+						image "alpine:latest"
+						run "echo b"
+					}
+				}`,
+			},
+			entry:   "/project/ci.kdl",
+			wantErr: ErrAmbiguousFile,
+		},
+		{
+			name: "unknown top-level node in included file",
+			files: map[string]string{
+				"/project/ci.kdl": `pipeline "ci" {
+					include "./bad.kdl" as="bad"
+				}`,
+				"/project/bad.kdl": `frgament "oops" {
+					step "s" {
+						image "alpine:latest"
+						run "echo hi"
+					}
+				}`,
+			},
+			entry:   "/project/ci.kdl",
+			wantErr: ErrUnknownNode,
+		},
+		{
+			name: "alias falls back to pipeline name",
+			files: map[string]string{
+				"/project/ci.kdl": `pipeline "ci" {
+					include "./other.kdl"
+					step "deploy" {
+						image "alpine:latest"
+						depends-on "security"
+						run "echo deploy"
+					}
+				}`,
+				"/project/other.kdl": `pipeline "security" {
+					step "scan" {
+						image "trivy:latest"
+						run "trivy scan"
+					}
+				}`,
+			},
+			entry: "/project/ci.kdl",
+			want: pipeline.Pipeline{
+				Name: "ci",
+				Steps: []pipeline.Step{
+					{
+						Name:  "scan",
+						Image: "trivy:latest",
+						Run:   []string{"trivy scan"},
+					},
+					{
+						Name:      "deploy",
+						Image:     "alpine:latest",
+						DependsOn: []string{"scan"},
+						Run:       []string{"echo deploy"},
+					},
+				},
+				TopoOrder: []int{0, 1},
+			},
+		},
+		{
+			name: "explicit as overrides fragment name",
+			files: map[string]string{
+				"/project/ci.kdl": `pipeline "ci" {
+					include "./frag.kdl" as="custom"
+					step "deploy" {
+						image "alpine:latest"
+						depends-on "custom"
+						run "echo deploy"
+					}
+				}`,
+				"/project/frag.kdl": `fragment "go-test" {
+					step "unit-test" {
+						image "golang:1.23"
+						run "go test ./..."
+					}
+				}`,
+			},
+			entry: "/project/ci.kdl",
+			want: pipeline.Pipeline{
+				Name: "ci",
+				Steps: []pipeline.Step{
+					{
+						Name:  "unit-test",
+						Image: "golang:1.23",
+						Run:   []string{"go test ./..."},
+					},
+					{
+						Name:      "deploy",
+						Image:     "alpine:latest",
+						DependsOn: []string{"unit-test"},
+						Run:       []string{"echo deploy"},
+					},
+				},
+				TopoOrder: []int{0, 1},
+			},
+		},
+		{
+			name: "duplicate auto-alias",
+			files: map[string]string{
+				"/project/ci.kdl": `pipeline "ci" {
+					include "./a.kdl"
+					include "./b.kdl"
+				}`,
+				"/project/a.kdl": `fragment "shared" {
+					step "a-step" {
+						image "alpine:latest"
+						run "echo a"
+					}
+				}`,
+				"/project/b.kdl": `fragment "shared" {
+					step "b-step" {
+						image "alpine:latest"
+						run "echo b"
+					}
+				}`,
+			},
+			entry:   "/project/ci.kdl",
+			wantErr: pipeline.ErrDuplicateAlias,
 		},
 	}
 

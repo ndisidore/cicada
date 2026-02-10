@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/sblinch/kdl-go/document"
@@ -36,7 +36,9 @@ func newIncludeState() *includeState {
 // depth overflow.
 func (s *includeState) push(absPath string) error {
 	if _, ok := s.ancestorSet[absPath]; ok {
-		cycle := append(s.ancestors, absPath)
+		cycle := make([]string, len(s.ancestors)+1)
+		copy(cycle, s.ancestors)
+		cycle[len(s.ancestors)] = absPath
 		return fmt.Errorf("%w: %s", pipeline.ErrCircularInclude, strings.Join(cycle, " -> "))
 	}
 	if len(s.ancestors) >= _maxIncludeDepth {
@@ -64,7 +66,7 @@ func cacheKey(absPath string, params map[string]string) string {
 	for k := range params {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	pairs := make([]string, len(keys))
 	for i, k := range keys {
 		pairs[i] = k + "=" + params[k]
@@ -131,19 +133,14 @@ func parseIncludeNode(node *document.Node, filename string) (includeDirective, e
 	if err != nil {
 		return includeDirective{}, fmt.Errorf("%s: include %q: %w", filename, source, err)
 	}
-	if alias == "" {
-		return includeDirective{}, fmt.Errorf(
-			"%s: include %q: %w", filename, source, pipeline.ErrMissingAlias,
-		)
-	}
 
 	conflictStr, err := prop[string](node, PropOnConflict)
 	if err != nil {
 		return includeDirective{}, fmt.Errorf("%s: include %q: %w", filename, source, err)
 	}
-	conflict := pipeline.ConflictError
-	if conflictStr == "skip" {
-		conflict = pipeline.ConflictSkip
+	conflict, err := parseConflictStrategy(conflictStr)
+	if err != nil {
+		return includeDirective{}, fmt.Errorf("%s: include %q: %w", filename, source, err)
 	}
 
 	// Reject unknown properties (only as + on-conflict allowed).
@@ -159,6 +156,11 @@ func parseIncludeNode(node *document.Node, filename string) (includeDirective, e
 	params := make(map[string]string, len(node.Children))
 	for _, child := range node.Children {
 		name := child.Name.ValueString()
+		if _, dup := params[name]; dup {
+			return includeDirective{}, fmt.Errorf(
+				"%s: include %q: %w: %q", filename, source, ErrDuplicateField, name,
+			)
+		}
 		val, err := requireStringArg(child, filename, name)
 		if err != nil {
 			return includeDirective{}, fmt.Errorf(
@@ -252,7 +254,7 @@ func (p *Parser) resolveChildInclude(child *document.Node, filename string, stat
 	if err != nil {
 		return nil, includeDirective{}, err
 	}
-	steps, err := p.resolveInclude(inc, filename, state)
+	steps, err := p.resolveInclude(&inc, filename, state)
 	if err != nil {
 		return nil, includeDirective{}, err
 	}
@@ -260,8 +262,9 @@ func (p *Parser) resolveChildInclude(child *document.Node, filename string, stat
 }
 
 // resolveInclude resolves a single include directive into a slice of steps,
-// handling fragment params, cycle detection, and diamond dedup.
-func (p *Parser) resolveInclude(inc includeDirective, fromFile string, state *includeState) ([]pipeline.Step, error) {
+// handling fragment params, cycle detection, and diamond dedup. The alias
+// field of inc is filled from the included file's name when left empty.
+func (p *Parser) resolveInclude(inc *includeDirective, fromFile string, state *includeState) ([]pipeline.Step, error) {
 	basePath := dirOf(fromFile)
 	rc, absPath, err := p.Resolver.Resolve(inc.source, basePath)
 	if err != nil {
@@ -274,25 +277,36 @@ func (p *Parser) resolveInclude(inc includeDirective, fromFile string, state *in
 	}
 	defer state.pop()
 
-	// Check alias uniqueness.
-	if _, exists := state.aliases[inc.alias]; exists {
-		return nil, fmt.Errorf(
-			"%s: include %q: alias %q: %w",
-			fromFile, inc.source, inc.alias, pipeline.ErrDuplicateAlias,
-		)
-	}
-
 	// Diamond dedup: check cache.
 	key := cacheKey(absPath, inc.params)
 	if cached, ok := state.cache[key]; ok {
+		if inc.alias == "" {
+			inc.alias = cached.Name
+		}
+		if _, exists := state.aliases[inc.alias]; exists {
+			return nil, fmt.Errorf(
+				"%s: include %q: alias %q: %w",
+				fromFile, inc.source, inc.alias, pipeline.ErrDuplicateAlias,
+			)
+		}
 		terminals := pipeline.TerminalSteps(cached.Steps)
 		state.aliases[inc.alias] = terminals
 		return cached.Steps, nil
 	}
 
-	steps, err := p.parseIncludedFile(rc, absPath, inc.params, state)
+	name, steps, err := p.parseIncludedFile(rc, absPath, inc.params, state)
 	if err != nil {
 		return nil, fmt.Errorf("%s: include %q: %w", fromFile, inc.source, err)
+	}
+
+	if inc.alias == "" {
+		inc.alias = name
+	}
+	if _, exists := state.aliases[inc.alias]; exists {
+		return nil, fmt.Errorf(
+			"%s: include %q: alias %q: %w",
+			fromFile, inc.source, inc.alias, pipeline.ErrDuplicateAlias,
+		)
 	}
 
 	terminals := pipeline.TerminalSteps(steps)
@@ -301,45 +315,47 @@ func (p *Parser) resolveInclude(inc includeDirective, fromFile string, state *in
 }
 
 // parseIncludedFile parses an included file (either pipeline or fragment) and
-// returns its steps with params substituted.
-func (p *Parser) parseIncludedFile(rc io.Reader, absPath string, params map[string]string, state *includeState) ([]pipeline.Step, error) {
+// returns the fragment/pipeline name along with its steps (params substituted).
+func (p *Parser) parseIncludedFile(rc io.Reader, absPath string, params map[string]string, state *includeState) (string, []pipeline.Step, error) {
 	doc, err := parseKDL(rc, absPath)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 
 	// Detect whether this is a pipeline or fragment file.
 	var pipelineNode, fragNode *document.Node
 	for _, node := range doc.Nodes {
-		switch NodeType(node.Name.ValueString()) {
+		switch nt := NodeType(node.Name.ValueString()); nt {
 		case NodeTypePipeline:
 			pipelineNode = node
 		case NodeTypeFragment:
 			fragNode = node
 		default:
-			// Ignore unknown top-level nodes in included files.
+			return "", nil, fmt.Errorf("%s: %w: %q (expected pipeline or fragment)", absPath, ErrUnknownNode, string(nt))
 		}
 	}
 
 	switch {
+	case fragNode != nil && pipelineNode != nil:
+		return "", nil, fmt.Errorf("%s: %w", absPath, ErrAmbiguousFile)
 	case fragNode != nil:
 		return p.includeFragment(fragNode, absPath, params, state)
 	case pipelineNode != nil:
 		return p.includePipeline(pipelineNode, absPath, params, state)
 	default:
-		return nil, fmt.Errorf("%s: no pipeline or fragment node found", absPath)
+		return "", nil, fmt.Errorf("%s: no pipeline or fragment node found", absPath)
 	}
 }
 
 // includeFragment resolves a fragment node from an included file.
-func (p *Parser) includeFragment(node *document.Node, absPath string, params map[string]string, state *includeState) ([]pipeline.Step, error) {
+func (p *Parser) includeFragment(node *document.Node, absPath string, params map[string]string, state *includeState) (string, []pipeline.Step, error) {
 	frag, err := p.parseFragmentNode(node, absPath, state)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	resolved, err := pipeline.ResolveParams(frag.Params, params)
 	if err != nil {
-		return nil, fmt.Errorf("fragment %q: %w", frag.Name, err)
+		return "", nil, fmt.Errorf("fragment %q: %w", frag.Name, err)
 	}
 	steps := pipeline.SubstituteParams(frag.Steps, resolved)
 	state.cache[cacheKey(absPath, params)] = pipeline.Fragment{
@@ -347,15 +363,31 @@ func (p *Parser) includeFragment(node *document.Node, absPath string, params map
 		Params: frag.Params,
 		Steps:  steps,
 	}
-	return steps, nil
+	return frag.Name, steps, nil
+}
+
+// parseConflictStrategy converts a string to a ConflictStrategy, returning
+// ErrInvalidConflict for unrecognized values. An empty string defaults to error.
+func parseConflictStrategy(s string) (pipeline.ConflictStrategy, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "error":
+		return pipeline.ConflictError, nil
+	case "skip":
+		return pipeline.ConflictSkip, nil
+	default:
+		return 0, fmt.Errorf("%w: %q (expected \"error\" or \"skip\")", pipeline.ErrInvalidConflict, s)
+	}
 }
 
 // includePipeline extracts steps from an included pipeline file, ignoring its
 // pipeline-level matrix.
-func (p *Parser) includePipeline(node *document.Node, absPath string, params map[string]string, state *includeState) ([]pipeline.Step, error) {
-	name, _ := requireStringArg(node, absPath, string(NodeTypePipeline))
+func (p *Parser) includePipeline(node *document.Node, absPath string, params map[string]string, state *includeState) (string, []pipeline.Step, error) {
+	name, err := requireStringArg(node, absPath, string(NodeTypePipeline))
+	if err != nil {
+		return "", nil, fmt.Errorf("%s: %w", absPath, err)
+	}
 	if len(params) > 0 {
-		return nil, fmt.Errorf("pipeline %q does not accept parameters", name)
+		return "", nil, fmt.Errorf("pipeline %q does not accept parameters", name)
 	}
 
 	var steps []pipeline.Step
@@ -364,7 +396,7 @@ func (p *Parser) includePipeline(node *document.Node, absPath string, params map
 		case NodeTypeStep:
 			step, err := parseStep(child, absPath)
 			if err != nil {
-				return nil, err
+				return "", nil, err
 			}
 			steps = append(steps, step)
 		case NodeTypeMatrix:
@@ -375,12 +407,16 @@ func (p *Parser) includePipeline(node *document.Node, absPath string, params map
 		case NodeTypeInclude:
 			incSteps, _, err := p.resolveChildInclude(child, absPath, state)
 			if err != nil {
-				return nil, err
+				return "", nil, err
 			}
 			steps = append(steps, incSteps...)
 		default:
-			return nil, fmt.Errorf("%s: %w: %q", absPath, ErrUnknownNode, string(nt))
+			return "", nil, fmt.Errorf("%s: %w: %q", absPath, ErrUnknownNode, string(nt))
 		}
 	}
-	return steps, nil
+	state.cache[cacheKey(absPath, params)] = pipeline.Fragment{
+		Name:  name,
+		Steps: steps,
+	}
+	return name, steps, nil
 }

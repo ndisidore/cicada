@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"sort"
 	"strings"
 )
 
@@ -238,7 +237,7 @@ func expandedStepName(base string, combo map[string]string) string {
 	for k := range existing {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 
 	var b strings.Builder
 	_, _ = fmt.Fprintf(&b, "%s[", name)

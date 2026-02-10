@@ -38,7 +38,7 @@ var (
 	ErrDuplicateParam  = errors.New("duplicate parameter name")
 	ErrDuplicateAlias  = errors.New("duplicate include alias")
 	ErrAliasCollision  = errors.New("alias collides with step name")
-	ErrMissingAlias    = errors.New("include missing required as property")
+	ErrInvalidConflict = errors.New("invalid on-conflict value")
 )
 
 // ConflictStrategy determines behavior when step names collide during merge.

@@ -1,5 +1,5 @@
 fragment "go-test" {
-    param "go-version" default="1.23"
+    param "go-version" default="1.24"
     param "coverage-threshold"
 
     step "unit-test" {
