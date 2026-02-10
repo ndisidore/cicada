@@ -50,7 +50,7 @@ func Parse(r io.Reader, filename string) (pipeline.Pipeline, error) {
 
 	var pipelineNode *document.Node
 	for _, node := range doc.Nodes {
-		if node.Name.ValueString() == "pipeline" {
+		if NodeType(node.Name.ValueString()) == NodeTypePipeline {
 			if pipelineNode != nil {
 				return pipeline.Pipeline{}, fmt.Errorf("%s: %w", filename, ErrMultiplePipelines)
 			}
@@ -71,7 +71,7 @@ func ParseString(content string) (pipeline.Pipeline, error) {
 }
 
 func parsePipeline(node *document.Node, filename string) (pipeline.Pipeline, error) {
-	name, err := stringArg(node, 0)
+	name, err := requireStringArg(node, filename, string(NodeTypePipeline))
 	if err != nil {
 		return pipeline.Pipeline{}, fmt.Errorf(
 			"%s: %w: %w", filename, ErrMissingName, err,
@@ -84,17 +84,31 @@ func parsePipeline(node *document.Node, filename string) (pipeline.Pipeline, err
 	}
 
 	for _, child := range node.Children {
-		if childName := child.Name.ValueString(); childName != "step" {
+		switch nt := NodeType(child.Name.ValueString()); nt {
+		case NodeTypeStep:
+			step, err := parseStep(child, filename)
+			if err != nil {
+				return pipeline.Pipeline{}, err
+			}
+			p.Steps = append(p.Steps, step)
+		case NodeTypeMatrix:
+			m, err := parseMatrix(child, filename, "pipeline")
+			if err != nil {
+				return pipeline.Pipeline{}, err
+			}
+			if err := setOnce(&p.Matrix, &m, filename, "pipeline", string(NodeTypeMatrix)); err != nil {
+				return pipeline.Pipeline{}, err
+			}
+		default:
 			return pipeline.Pipeline{}, fmt.Errorf(
-				"%s: %w: %q (expected step)", filename, ErrUnknownNode, childName,
+				"%s: %w: %q (expected step or matrix)", filename, ErrUnknownNode, string(nt),
 			)
 		}
+	}
 
-		step, err := parseStep(child, filename)
-		if err != nil {
-			return pipeline.Pipeline{}, err
-		}
-		p.Steps = append(p.Steps, step)
+	p, err = pipeline.Expand(p)
+	if err != nil {
+		return pipeline.Pipeline{}, fmt.Errorf("%s: %w", filename, err)
 	}
 
 	if _, err := p.Validate(); err != nil {
@@ -105,7 +119,7 @@ func parsePipeline(node *document.Node, filename string) (pipeline.Pipeline, err
 }
 
 func parseStep(node *document.Node, filename string) (pipeline.Step, error) {
-	name, err := stringArg(node, 0)
+	name, err := requireStringArg(node, filename, string(NodeTypeStep))
 	if err != nil {
 		return pipeline.Step{}, fmt.Errorf(
 			"%s: step missing name: %w: %w", filename, ErrMissingField, err,
@@ -122,65 +136,96 @@ func parseStep(node *document.Node, filename string) (pipeline.Step, error) {
 }
 
 func applyStepField(s *pipeline.Step, node *document.Node, filename string) error {
-	childName := node.Name.ValueString()
-
-	// Single-arg fields share the same extraction pattern.
-	switch childName {
-	case "image", "run", "workdir", "depends-on":
-		v, err := requireStringArg(node, filename, childName)
+	nt := NodeType(node.Name.ValueString())
+	switch nt {
+	case NodeTypeImage, NodeTypeWorkdir, NodeTypeRun, NodeTypeDependsOn:
+		return applyStringField(s, nt, node, filename)
+	case NodeTypeMount:
+		m, err := stringArgs2(node, filename, string(nt))
 		if err != nil {
 			return err
 		}
-		return applySingleArgField(s, childName, v, filename)
-	case "mount":
-		m, err := stringArgs2(node, filename, "mount")
-		if err != nil {
-			return err
-		}
-		ro, err := boolProp(node, "readonly")
+		ro, err := prop[bool](node, PropReadonly)
 		if err != nil {
 			return fmt.Errorf("%s: step %q: mount: %w", filename, s.Name, err)
 		}
 		s.Mounts = append(s.Mounts, pipeline.Mount{Source: m[0], Target: m[1], ReadOnly: ro})
-		return nil
-	case "cache":
-		c, err := stringArgs2(node, filename, "cache")
+	case NodeTypeCache:
+		c, err := stringArgs2(node, filename, string(nt))
 		if err != nil {
 			return err
 		}
 		s.Caches = append(s.Caches, pipeline.Cache{ID: c[0], Target: c[1]})
-		return nil
+	case NodeTypeMatrix:
+		m, err := parseMatrix(node, filename, fmt.Sprintf("step %q", s.Name))
+		if err != nil {
+			return err
+		}
+		if err := setOnce(&s.Matrix, &m, filename, fmt.Sprintf("step %q", s.Name), string(nt)); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf(
-			"%s: step %q: %w: %q", filename, s.Name, ErrUnknownNode, childName,
+			"%s: step %q: %w: %q", filename, s.Name, ErrUnknownNode, string(nt),
 		)
 	}
+	return nil
 }
 
-func applySingleArgField(s *pipeline.Step, field, value, filename string) error {
-	switch field {
-	case "image":
-		if s.Image != "" {
-			return fmt.Errorf(
-				"%s: step %q: %w: %q", filename, s.Name, ErrDuplicateField, field,
-			)
-		}
-		s.Image = value
-	case "run":
-		s.Run = append(s.Run, value)
-	case "workdir":
-		if s.Workdir != "" {
-			return fmt.Errorf(
-				"%s: step %q: %w: %q", filename, s.Name, ErrDuplicateField, field,
-			)
-		}
-		s.Workdir = value
-	case "depends-on":
-		s.DependsOn = append(s.DependsOn, value)
+func applyStringField(s *pipeline.Step, nt NodeType, node *document.Node, filename string) error {
+	v, err := requireStringArg(node, filename, string(nt))
+	if err != nil {
+		return err
+	}
+	scope := fmt.Sprintf("step %q", s.Name)
+	switch nt {
+	case NodeTypeImage:
+		return setOnce(&s.Image, v, filename, scope, string(nt))
+	case NodeTypeWorkdir:
+		return setOnce(&s.Workdir, v, filename, scope, string(nt))
+	case NodeTypeRun:
+		s.Run = append(s.Run, v)
+	case NodeTypeDependsOn:
+		s.DependsOn = append(s.DependsOn, v)
 	default:
-		panic(fmt.Sprintf("applySingleArgField: unexpected field %q for step %q in %s", field, s.Name, filename))
+		return fmt.Errorf(
+			"%s: step %q: %w: %q", filename, s.Name, ErrUnknownNode, string(nt),
+		)
 	}
 	return nil
+}
+
+// parseMatrix parses a matrix block into a pipeline.Matrix. Each child node
+// is a dimension where the node name is the dimension name and arguments are
+// the string values. Structural validation (empty matrix, duplicate/invalid
+// dimension names, empty dimensions, combination cap) is delegated to
+// pipeline.ValidateMatrix.
+func parseMatrix(node *document.Node, filename, scope string) (pipeline.Matrix, error) {
+	m := pipeline.Matrix{
+		Dimensions: make([]pipeline.Dimension, 0, len(node.Children)),
+	}
+
+	for _, child := range node.Children {
+		dimName := child.Name.ValueString()
+		values := make([]string, 0, len(child.Arguments))
+		for i := range child.Arguments {
+			v, err := arg[string](child, i)
+			if err != nil {
+				return pipeline.Matrix{}, fmt.Errorf(
+					"%s: %s: matrix dimension %q value %d: %w",
+					filename, scope, dimName, i, err,
+				)
+			}
+			values = append(values, v)
+		}
+		m.Dimensions = append(m.Dimensions, pipeline.Dimension{Name: dimName, Values: values})
+	}
+
+	if err := pipeline.ValidateMatrix(&m); err != nil {
+		return pipeline.Matrix{}, fmt.Errorf("%s: %s: matrix: %w", filename, scope, err)
+	}
+
+	return m, nil
 }
 
 // stringArgs2 extracts exactly two string arguments from a node.
@@ -197,13 +242,13 @@ func stringArgs2(node *document.Node, filename, field string) ([2]string, error)
 			filename, field, len(node.Arguments), ErrExtraArgs,
 		)
 	}
-	first, err := stringArg(node, 0)
+	first, err := arg[string](node, 0)
 	if err != nil {
 		return [2]string{}, fmt.Errorf(
 			"%s: %s first argument: %w", filename, field, err,
 		)
 	}
-	second, err := stringArg(node, 1)
+	second, err := arg[string](node, 1)
 	if err != nil {
 		return [2]string{}, fmt.Errorf(
 			"%s: %s second argument: %w", filename, field, err,
@@ -214,7 +259,7 @@ func stringArgs2(node *document.Node, filename, field string) ([2]string, error)
 
 // requireStringArg extracts the first string argument, wrapping errors with context.
 func requireStringArg(node *document.Node, filename, field string) (string, error) {
-	v, err := stringArg(node, 0)
+	v, err := arg[string](node, 0)
 	if err != nil {
 		return "", fmt.Errorf(
 			"%s: %q requires a string value: %w", filename, field, err,
@@ -223,28 +268,43 @@ func requireStringArg(node *document.Node, filename, field string) (string, erro
 	return v, nil
 }
 
-// stringArg returns the string value at the given argument index, or an error.
-func stringArg(node *document.Node, idx int) (string, error) {
+// arg returns the typed value at the given argument index, or an error.
+func arg[T any](node *document.Node, idx int) (T, error) {
+	var zero T
 	if idx >= len(node.Arguments) {
-		return "", fmt.Errorf("argument %d: %w", idx, ErrMissingField)
+		return zero, fmt.Errorf("argument %d: %w", idx, ErrMissingField)
 	}
-	v, ok := node.Arguments[idx].ResolvedValue().(string)
+	v, ok := node.Arguments[idx].ResolvedValue().(T)
 	if !ok {
-		return "", fmt.Errorf("argument %d: not a string: %w", idx, ErrTypeMismatch)
+		return zero, fmt.Errorf("argument %d: not a %T: %w", idx, zero, ErrTypeMismatch)
 	}
 	return v, nil
 }
 
-// boolProp reads an optional boolean property from a node.
-// Returns false when the property is absent.
-func boolProp(node *document.Node, key string) (bool, error) {
+// prop reads an optional typed property from a node.
+// Returns the zero value when the property is absent.
+func prop[T any](node *document.Node, key string) (T, error) {
+	var zero T
 	v, ok := node.Properties[key]
 	if !ok {
-		return false, nil
+		return zero, nil
 	}
-	b, ok := v.ResolvedValue().(bool)
+	t, ok := v.ResolvedValue().(T)
 	if !ok {
-		return false, fmt.Errorf("property %q: not a boolean: %w", key, ErrTypeMismatch)
+		return zero, fmt.Errorf("property %q: not a %T: %w", key, zero, ErrTypeMismatch)
 	}
-	return b, nil
+	return t, nil
+}
+
+// setOnce assigns value to *dst if *dst is the zero value, or returns
+// ErrDuplicateField if already set.
+func setOnce[T comparable](dst *T, value T, filename, scope, field string) error {
+	var zero T
+	if *dst != zero {
+		return fmt.Errorf(
+			"%s: %s: %w: %q", filename, scope, ErrDuplicateField, field,
+		)
+	}
+	*dst = value
+	return nil
 }
