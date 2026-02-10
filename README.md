@@ -1,4 +1,4 @@
-# Cicada
+# Cicada. Hear your CI before it ships.
 
 <p align="center">
   <a href="https://github.com/ndisidore/cicada/actions/workflows/ci.yaml"><img src="https://github.com/ndisidore/cicada/actions/workflows/ci.yaml/badge.svg" alt="CI"></a>
@@ -18,15 +18,15 @@ Most CI systems share the same dirty secret: the only way to find out if your pi
 
 Good CI should be better than that. Specifically, it should be:
 
-- **Locally repeatable** -- The exact same pipeline that runs in CI should run on your machine. Not a "close enough" approximation. The *same* thing. If it passes on your laptop, it passes in CI. Full stop.
+- **Locally repeatable**: The exact same pipeline that runs in CI should run on your machine. Not a "close enough" approximation. The *same* thing. If it passes on your laptop, it passes in CI. Full stop.
 
-- **Debuggable** -- When something breaks, you should be able to drop into a shell, poke around, and iterate -- not squint at truncated logs from a VM you'll never touch.
+- **Debuggable**: When something breaks, you should be able to drop into a shell, poke around, and iterate -- not squint at truncated logs from a VM you'll never touch.
 
-- **Tool-centric** -- CI should be a thin wrapper around your existing scripts and task runners, not a vendor-specific reimagination of how builds work. Your `mise` tasks, your Makefile, your shell scripts -- those are the source of truth.
+- **Tool-centric**: CI should be a thin wrapper around your existing scripts and task runners, not a vendor-specific reimagination of how builds work. Your `mise` tasks, your Makefile, your shell scripts -- those are the source of truth.
 
-- **Portable** -- Switching CI providers shouldn't require rewriting your entire pipeline from scratch. Your build logic lives in *your* repo, not in some provider's proprietary DSL.
+- **Portable**: Switching CI providers shouldn't require rewriting your entire pipeline from scratch. Your build logic lives in *your* repo, not in some provider's proprietary DSL.
 
-- **Fast via caching** -- Content-hash-based caching should prevent redundant work. You shouldn't reinstall your dependencies every single run because the CI system forgot what happened 5 minutes ago.
+- **Fast via caching**: Content-hash-based caching should prevent redundant work. You shouldn't reinstall your dependencies every single run because the CI system forgot what happened 5 minutes ago.
 
 Cicada takes these ideas seriously. Pipelines are declared in KDL (not YAML -- you're welcome), executed inside containers via BuildKit, and run the same way everywhere. Your laptop is a first-class CI environment.
 
@@ -103,7 +103,7 @@ pipeline "hello" {
 | `workdir`    | Working directory inside container       | `workdir "/src"`                         |
 | `cache`      | Persistent cache volume                  | `cache "gomod" "/go/pkg/mod"`            |
 
-Dependencies between steps are resolved via topological sort -- Cicada will catch cycles and missing references before anything runs.
+Dependencies between steps are resolved via topological sort, and Cicada will catch cycles and missing references before anything runs.
 
 ## CLI Usage
 
@@ -161,4 +161,4 @@ Go gave us native BuildKit integration (LLB construction, solve API, session man
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for what's coming next -- matrix builds, modular configs, advanced caching, and more.
+See [ROADMAP.md](ROADMAP.md) for what's coming next; matrix builds, modular configs, advanced caching, and more.

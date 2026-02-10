@@ -23,7 +23,7 @@ func TestLoadIgnorePatterns(t *testing.T) {
 		{
 			name: "cicadaignore takes precedence",
 			files: map[string]string{
-				".cicadaignore":   "*.log\nbuild/\n",
+				".cicadaignore": "*.log\nbuild/\n",
 				".dockerignore": "*.tmp\n",
 			},
 			want: []string{"*.log", "build/"},
