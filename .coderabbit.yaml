@@ -46,6 +46,7 @@ reviews:
         Test code exceptions: long functions and raw string literals are acceptable.
         Focus on test coverage, assertion quality, and Arrange-Act-Assert pattern.
         Verify table-driven tests use t.Parallel() and subtests use t.Parallel().
+        Do not suggest capturing loop variables in parallel subtests (this project uses go 1.25+).
         Flag shared mutable state between parallel tests.
         Ensure require is used for error checks, assert for value checks.
 
