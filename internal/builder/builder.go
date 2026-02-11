@@ -4,6 +4,7 @@ package builder
 import (
 	"context"
 	"fmt"
+	"path"
 	"strings"
 
 	"github.com/containerd/platforms"
@@ -12,12 +13,23 @@ import (
 	"github.com/ndisidore/cicada/pkg/pipeline"
 )
 
+// LocalExport pairs an LLB definition containing exported files with the
+// target host path for the local exporter.
+type LocalExport struct {
+	Definition *llb.Definition
+	StepName   string
+	Local      string // host path target
+	Dir        bool   // true when exporting a directory (trailing / on container path)
+}
+
 // Result holds the LLB definitions for a pipeline, one per step in topological order.
 type Result struct {
 	// Definitions contains one LLB definition per step, ordered by dependency.
 	Definitions []*llb.Definition
 	// StepNames maps each definition index to its step name.
 	StepNames []string
+	// Exports contains LLB definitions for steps with local export paths.
+	Exports []LocalExport
 }
 
 // BuildOpts configures the LLB build process.
@@ -28,6 +40,8 @@ type BuildOpts struct {
 	ExcludePatterns []string
 	// MetaResolver resolves OCI image config (ENV, WORKDIR, platform) at build time.
 	MetaResolver llb.ImageMetaResolver
+	// ExposeDeps mounts full dependency root filesystems at /deps/{name} (legacy).
+	ExposeDeps bool
 }
 
 // stepOpts holds pre-computed LLB options applied to every step.
@@ -35,6 +49,8 @@ type stepOpts struct {
 	imgOpts         []llb.ImageOption
 	runOpts         []llb.RunOption
 	excludePatterns []string
+	pipelineEnv     []pipeline.EnvVar
+	exposeDeps      bool
 }
 
 // Build converts a pipeline to BuildKit LLB definitions.
@@ -49,7 +65,11 @@ func Build(ctx context.Context, p pipeline.Pipeline, opts BuildOpts) (Result, er
 		}
 	}
 
-	so := stepOpts{excludePatterns: opts.ExcludePatterns}
+	so := stepOpts{
+		excludePatterns: opts.ExcludePatterns,
+		pipelineEnv:     p.Env,
+		exposeDeps:      opts.ExposeDeps,
+	}
 	if opts.MetaResolver != nil {
 		so.imgOpts = append(so.imgOpts, llb.WithMetaResolver(opts.MetaResolver))
 	}
@@ -73,6 +93,20 @@ func Build(ctx context.Context, p pipeline.Pipeline, opts BuildOpts) (Result, er
 		result.Definitions = append(result.Definitions, def)
 		result.StepNames = append(result.StepNames, step.Name)
 		states[step.Name] = st
+
+		// Build export definitions for steps with local exports.
+		for _, exp := range step.Exports {
+			exportDef, err := buildExportDef(ctx, st, exp.Path)
+			if err != nil {
+				return Result{}, fmt.Errorf("building export for step %q: %w", step.Name, err)
+			}
+			result.Exports = append(result.Exports, LocalExport{
+				Definition: exportDef,
+				StepName:   step.Name,
+				Local:      exp.Local,
+				Dir:        strings.HasSuffix(exp.Path, "/"),
+			})
+		}
 	}
 
 	return result, nil
@@ -93,6 +127,7 @@ func validOrder(order []int, n int) bool {
 	return true
 }
 
+//revive:disable-next-line:function-length,cognitive-complexity buildStep is a linear pipeline of LLB operations; splitting it further hurts readability.
 func buildStep(
 	ctx context.Context,
 	step *pipeline.Step,
@@ -118,24 +153,48 @@ func buildStep(
 		st = st.Dir(step.Workdir)
 	}
 
+	// Apply env vars: pipeline-level first, then step-level (step overrides).
+	for _, e := range opts.pipelineEnv {
+		st = st.AddEnv(e.Key, e.Value)
+	}
+	for _, e := range step.Env {
+		st = st.AddEnv(e.Key, e.Value)
+	}
+	st = st.File(llb.Mkdir("/cicada", 0o755))
+	// Set after user env vars so it cannot be overridden; the output sourcing
+	// preamble and dep mounts depend on this exact path.
+	st = st.AddEnv("CICADA_OUTPUT", "/cicada/output")
+
+	// Import artifacts from dependency steps.
+	for _, art := range step.Artifacts {
+		depSt, ok := depStates[art.From]
+		if !ok {
+			return nil, llb.State{}, fmt.Errorf(
+				"step %q: missing dependency state for artifact from %q", step.Name, art.From,
+			)
+		}
+		st = st.File(llb.Copy(depSt, art.Source, art.Target))
+	}
+
+	// For steps with dependencies, prepend output sourcing preamble so
+	// env vars exported by dependencies via $CICADA_OUTPUT are available.
+	// Dependency output files must contain valid shell KEY=VALUE pairs;
+	// malformed content will cause the source (.) command to fail.
+	if len(step.DependsOn) > 0 {
+		preamble := `for __f in /cicada/deps/*/output; do [ -f "$__f" ] && { set -a; . "$__f"; set +a; }; done` + "\n"
+		cmd = preamble + cmd
+	}
+
 	runOpts := append([]llb.RunOption{
 		llb.Args([]string{"/bin/sh", "-c", cmd}),
 		llb.WithCustomName(step.Name),
 	}, opts.runOpts...)
 
-	for _, dep := range step.DependsOn {
-		depSt, ok := depStates[dep]
-		if !ok {
-			return nil, llb.State{}, fmt.Errorf(
-				"step %q: missing dependency state for %q", step.Name, dep,
-			)
-		}
-		runOpts = append(runOpts, llb.AddMount(
-			"/deps/"+dep,
-			depSt,
-			llb.Readonly,
-		))
+	depMounts, err := depMountOpts(step, depStates, opts.exposeDeps)
+	if err != nil {
+		return nil, llb.State{}, err
 	}
+	runOpts = append(runOpts, depMounts...)
 
 	// All mounts share a single named local context ("context"). Each m.Source
 	// is a path within that shared context, not a distinct source directory.
@@ -170,4 +229,74 @@ func buildStep(
 		return nil, llb.State{}, fmt.Errorf("marshaling: %w", err)
 	}
 	return def, execState, nil
+}
+
+// depMountOpts builds run options for dependency mounts: /cicada/deps/{name}
+// for output sourcing (always), and /deps/{name} for legacy full-FS access
+// (only when exposeDeps is true).
+//
+//revive:disable-next-line:flag-parameter exposeDeps controls a clear behavioral branch.
+func depMountOpts(step *pipeline.Step, depStates map[string]llb.State, exposeDeps bool) ([]llb.RunOption, error) {
+	var opts []llb.RunOption
+	for _, dep := range step.DependsOn {
+		depSt, ok := depStates[dep]
+		if !ok {
+			return nil, fmt.Errorf(
+				"step %q: missing dependency state for %q", step.Name, dep,
+			)
+		}
+		opts = append(opts, llb.AddMount(
+			"/cicada/deps/"+dep,
+			depSt,
+			llb.SourcePath("/cicada"),
+			llb.Readonly,
+		))
+		if exposeDeps {
+			opts = append(opts, llb.AddMount(
+				"/deps/"+dep,
+				depSt,
+				llb.Readonly,
+			))
+		}
+	}
+	return opts, nil
+}
+
+// buildExportDef creates an LLB definition that extracts a file or directory
+// from the exec state onto a scratch mount, suitable for solving with the local
+// exporter. A trailing "/" on containerPath indicates a directory export; the
+// contents are copied into the scratch mount root. Otherwise the single file is
+// copied by basename.
+// It uses a lightweight exec with GetMount rather than a FileOp Copy, because
+// Copy from Run().Root() in a separate solve session can resolve the exec's
+// input snapshot instead of its output.
+// The step image must provide cp (coreutils); scratch or distroless images
+// that lack it will fail at solve time.
+func buildExportDef(ctx context.Context, execState llb.State, containerPath string) (*llb.Definition, error) {
+	cleaned := path.Clean(containerPath)
+	if cleaned == "." || cleaned == "/" {
+		return nil, fmt.Errorf("invalid export path: %q", containerPath)
+	}
+
+	// For directories (trailing /), append /. so cp copies contents, not the
+	// directory itself. For files, copy by basename.
+	var src, dest string
+	if strings.HasSuffix(containerPath, "/") {
+		src = cleaned + "/."
+		dest = "/cicada/export/"
+	} else {
+		src = cleaned
+		dest = "/cicada/export/" + path.Base(cleaned)
+	}
+
+	exportRun := execState.Run(
+		llb.Args([]string{"cp", "-a", src, dest}),
+		llb.AddMount("/cicada/export", llb.Scratch()),
+		llb.WithCustomName("export:"+cleaned),
+	)
+	def, err := exportRun.GetMount("/cicada/export").Marshal(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling export for %q: %w", containerPath, err)
+	}
+	return def, nil
 }

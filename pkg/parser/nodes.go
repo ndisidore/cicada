@@ -18,6 +18,9 @@ const (
 	NodeTypeInclude   NodeType = "include"
 	NodeTypeFragment  NodeType = "fragment"
 	NodeTypeParam     NodeType = "param"
+	NodeTypeEnv       NodeType = "env"
+	NodeTypeExport    NodeType = "export"
+	NodeTypeArtifact  NodeType = "artifact"
 )
 
 // Property keys.
@@ -26,4 +29,5 @@ const (
 	PropOnConflict = "on-conflict"
 	PropDefault    = "default"
 	PropAs         = "as"
+	PropLocal      = "local"
 )

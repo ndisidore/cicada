@@ -103,36 +103,11 @@ func (p *Parser) parsePipeline(node *document.Node, filename string, state *incl
 
 	gc := newGroupCollector(filename)
 	var mat *pipeline.Matrix
+	var envVars []pipeline.EnvVar
 
 	for _, child := range node.Children {
-		switch nt := NodeType(child.Name.ValueString()); nt {
-		case NodeTypeStep:
-			step, err := parseStep(child, filename)
-			if err != nil {
-				return pipeline.Pipeline{}, err
-			}
-			gc.addStep(step)
-
-		case NodeTypeMatrix:
-			m, err := parseMatrix(child, filename, "pipeline")
-			if err != nil {
-				return pipeline.Pipeline{}, err
-			}
-			if err := setOnce(&mat, &m, filename, "pipeline", string(NodeTypeMatrix)); err != nil {
-				return pipeline.Pipeline{}, err
-			}
-
-		case NodeTypeInclude:
-			steps, inc, err := p.resolveChildInclude(child, filename, state)
-			if err != nil {
-				return pipeline.Pipeline{}, err
-			}
-			gc.addInclude(steps, inc)
-
-		default:
-			return pipeline.Pipeline{}, fmt.Errorf(
-				"%s: %w: %q (expected step, matrix, or include)", filename, ErrUnknownNode, string(nt),
-			)
+		if err := p.parsePipelineChild(child, filename, state, gc, &mat, &envVars); err != nil {
+			return pipeline.Pipeline{}, err
 		}
 	}
 
@@ -141,17 +116,61 @@ func (p *Parser) parsePipeline(node *document.Node, filename string, state *incl
 		return pipeline.Pipeline{}, fmt.Errorf("%s: %w", filename, err)
 	}
 
-	return finalizePipeline(name, merged, mat, state.aliases, filename)
+	return finalizePipeline(name, merged, envVars, mat, state.aliases, filename)
+}
+
+// parsePipelineChild dispatches a single child node of a pipeline block.
+func (p *Parser) parsePipelineChild(
+	child *document.Node,
+	filename string,
+	state *includeState,
+	gc *groupCollector,
+	mat **pipeline.Matrix,
+	envVars *[]pipeline.EnvVar,
+) error {
+	switch nt := NodeType(child.Name.ValueString()); nt {
+	case NodeTypeStep:
+		step, err := parseStep(child, filename)
+		if err != nil {
+			return err
+		}
+		gc.addStep(step)
+	case NodeTypeMatrix:
+		m, err := parseMatrix(child, filename, "pipeline")
+		if err != nil {
+			return err
+		}
+		if err := setOnce(mat, &m, filename, "pipeline", string(NodeTypeMatrix)); err != nil {
+			return err
+		}
+	case NodeTypeEnv:
+		ev, err := parseEnvNode(child, filename, "pipeline")
+		if err != nil {
+			return err
+		}
+		*envVars = append(*envVars, ev)
+	case NodeTypeInclude:
+		steps, inc, err := p.resolveChildInclude(child, filename, state)
+		if err != nil {
+			return err
+		}
+		gc.addInclude(steps, inc)
+	default:
+		return fmt.Errorf(
+			"%s: %w: %q (expected step, matrix, env, or include)", filename, ErrUnknownNode, string(nt),
+		)
+	}
+	return nil
 }
 
 // finalizePipeline expands aliases, applies matrix expansion, and validates.
-func finalizePipeline(name string, steps []pipeline.Step, mat *pipeline.Matrix, aliases map[string][]string, filename string) (pipeline.Pipeline, error) {
+func finalizePipeline(name string, steps []pipeline.Step, env []pipeline.EnvVar, mat *pipeline.Matrix, aliases map[string][]string, filename string) (pipeline.Pipeline, error) {
 	steps, err := pipeline.ExpandAliases(steps, aliases)
 	if err != nil {
 		return pipeline.Pipeline{}, fmt.Errorf("%s: %w", filename, err)
 	}
 
-	pl := pipeline.Pipeline{Name: name, Steps: steps, Matrix: mat}
+	pl := pipeline.Pipeline{Name: name, Steps: steps, Env: env, Matrix: mat}
 	pl, err = pipeline.Expand(pl)
 	if err != nil {
 		return pipeline.Pipeline{}, fmt.Errorf("%s: %w", filename, err)
@@ -221,6 +240,24 @@ func applyStepField(s *pipeline.Step, node *document.Node, filename string) erro
 			return err
 		}
 		s.Caches = append(s.Caches, pipeline.Cache{ID: c[0], Target: c[1]})
+	case NodeTypeEnv:
+		ev, err := parseEnvNode(node, filename, fmt.Sprintf("step %q", s.Name))
+		if err != nil {
+			return err
+		}
+		s.Env = append(s.Env, ev)
+	case NodeTypeExport:
+		exp, err := parseExportNode(node, filename, s.Name)
+		if err != nil {
+			return err
+		}
+		s.Exports = append(s.Exports, exp)
+	case NodeTypeArtifact:
+		art, err := parseArtifactNode(node, filename, s.Name)
+		if err != nil {
+			return err
+		}
+		s.Artifacts = append(s.Artifacts, art)
 	case NodeTypeMatrix:
 		m, err := parseMatrix(node, filename, fmt.Sprintf("step %q", s.Name))
 		if err != nil {
@@ -293,6 +330,77 @@ func parseMatrix(node *document.Node, filename, scope string) (pipeline.Matrix, 
 	}
 
 	return m, nil
+}
+
+// parseEnvNode extracts a key-value pair from an env node (two string args).
+func parseEnvNode(node *document.Node, filename, scope string) (pipeline.EnvVar, error) {
+	kv, err := stringArgs2(node, filename, string(NodeTypeEnv))
+	if err != nil {
+		return pipeline.EnvVar{}, fmt.Errorf("%s: %s: %w", filename, scope, err)
+	}
+	return pipeline.EnvVar{Key: kv[0], Value: kv[1]}, nil
+}
+
+// parseExportNode extracts an export path and required local property.
+func parseExportNode(node *document.Node, filename, stepName string) (pipeline.Export, error) {
+	if len(node.Arguments) > 1 {
+		return pipeline.Export{}, fmt.Errorf(
+			"%s: step %q: export requires exactly one argument, got %d: %w",
+			filename, stepName, len(node.Arguments), ErrExtraArgs,
+		)
+	}
+	path, err := requireStringArg(node, filename, string(NodeTypeExport))
+	if err != nil {
+		return pipeline.Export{}, fmt.Errorf("%s: step %q: export: %w", filename, stepName, err)
+	}
+	local, err := prop[string](node, PropLocal)
+	if err != nil {
+		return pipeline.Export{}, fmt.Errorf("%s: step %q: export: %w", filename, stepName, err)
+	}
+	if local == "" {
+		return pipeline.Export{}, fmt.Errorf(
+			"%s: step %q: export: local property: %w", filename, stepName, ErrMissingField,
+		)
+	}
+	return pipeline.Export{Path: path, Local: local}, nil
+}
+
+// parseArtifactNode extracts an artifact definition (three string args: from, source, target).
+func parseArtifactNode(node *document.Node, filename, stepName string) (pipeline.Artifact, error) {
+	args, err := stringArgs3(node, string(NodeTypeArtifact))
+	if err != nil {
+		return pipeline.Artifact{}, fmt.Errorf("%s: step %q: %w", filename, stepName, err)
+	}
+	return pipeline.Artifact{From: args[0], Source: args[1], Target: args[2]}, nil
+}
+
+// stringArgs3 extracts exactly three string arguments from a node.
+func stringArgs3(node *document.Node, field string) ([3]string, error) {
+	switch {
+	case len(node.Arguments) < 3:
+		return [3]string{}, fmt.Errorf(
+			"%s requires exactly three arguments, got %d: %w",
+			field, len(node.Arguments), ErrMissingField,
+		)
+	case len(node.Arguments) > 3:
+		return [3]string{}, fmt.Errorf(
+			"%s requires exactly three arguments, got %d: %w",
+			field, len(node.Arguments), ErrExtraArgs,
+		)
+	}
+	first, err := arg[string](node, 0)
+	if err != nil {
+		return [3]string{}, fmt.Errorf("%s first argument: %w", field, err)
+	}
+	second, err := arg[string](node, 1)
+	if err != nil {
+		return [3]string{}, fmt.Errorf("%s second argument: %w", field, err)
+	}
+	third, err := arg[string](node, 2)
+	if err != nil {
+		return [3]string{}, fmt.Errorf("%s third argument: %w", field, err)
+	}
+	return [3]string{first, second, third}, nil
 }
 
 // stringArgs2 extracts exactly two string arguments from a node.

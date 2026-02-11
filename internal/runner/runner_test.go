@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,6 +14,9 @@ import (
 	"github.com/moby/buildkit/client/llb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/ndisidore/cicada/internal/builder"
+	"github.com/ndisidore/cicada/pkg/pipeline"
 )
 
 // fakeSolver implements the Solver interface for testing.
@@ -644,4 +648,221 @@ func TestRun_solverWritesStatus(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), received.Load())
+}
+
+func TestRun_exports(t *testing.T) {
+	t.Parallel()
+
+	def, err := llb.Scratch().Marshal(context.Background())
+	require.NoError(t, err)
+
+	tests := []struct {
+		name          string
+		exports       []builder.LocalExport
+		solver        *fakeSolver
+		display       *fakeDisplay
+		wantErr       string
+		wantSentinel  error
+		checkOpt      bool   // whether to assert on capturedExportOpt after Run
+		wantOutputDir string // expected OutputDir when checkOpt is true
+	}{
+		{
+			name: "export solves with local exporter",
+			exports: []builder.LocalExport{
+				{Definition: def, StepName: "build", Local: "/tmp/out/myapp"},
+			},
+			solver: &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+				close(ch)
+				return &client.SolveResponse{}, nil
+			}},
+			display:       &fakeDisplay{},
+			checkOpt:      true,
+			wantOutputDir: "/tmp/out",
+		},
+		{
+			name: "directory export uses Local as OutputDir",
+			exports: []builder.LocalExport{
+				{Definition: def, StepName: "build", Local: "/tmp/out/dist", Dir: true},
+			},
+			solver: &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+				close(ch)
+				return &client.SolveResponse{}, nil
+			}},
+			display:       &fakeDisplay{},
+			checkOpt:      true,
+			wantOutputDir: "/tmp/out/dist",
+		},
+		{
+			name: "export solve error wraps step and path",
+			exports: []builder.LocalExport{
+				{Definition: def, StepName: "compile", Local: "/tmp/bin/app"},
+			},
+			solver: &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+				close(ch)
+				return nil, errors.New("disk full")
+			}},
+			display: &fakeDisplay{},
+			wantErr: `exporting "/tmp/bin/app" from step "compile"`,
+		},
+		{
+			name: "export display error propagates",
+			exports: []builder.LocalExport{
+				{Definition: def, StepName: "build", Local: "/tmp/out/myapp"},
+			},
+			solver: &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+				close(ch)
+				return &client.SolveResponse{}, nil
+			}},
+			display: &fakeDisplay{runFn: func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
+				for s := range ch {
+					_ = s
+				}
+				if strings.HasPrefix(name, "export:") {
+					return errors.New("render failed")
+				}
+				return nil
+			}},
+			wantErr: "displaying export progress",
+		},
+		{
+			name: "nil export definition returns error",
+			exports: []builder.LocalExport{
+				{Definition: nil, StepName: "bad", Local: "/tmp/out/x"},
+			},
+			solver:       &fakeSolver{},
+			display:      &fakeDisplay{},
+			wantSentinel: ErrNilDefinition,
+		},
+		{
+			name: "empty export local returns error",
+			exports: []builder.LocalExport{
+				{Definition: def, StepName: "bad", Local: ""},
+			},
+			solver:       &fakeSolver{},
+			display:      &fakeDisplay{},
+			wantSentinel: pipeline.ErrEmptyExportLocal,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var capturedExportOpt atomic.Pointer[client.SolveOpt]
+
+			// Use the same solver for both the step and export phases.
+			// For step phase, always succeed.
+			stepSolver := &fakeSolver{solveFn: func(ctx context.Context, d *llb.Definition, opt client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+				// Export phase: capture opt and delegate to test's solver.
+				if len(opt.Exports) > 0 {
+					capturedExportOpt.Store(&opt)
+					return tt.solver.solveFn(ctx, d, opt, ch)
+				}
+				close(ch)
+				return &client.SolveResponse{}, nil
+			}}
+
+			err := Run(context.Background(), RunInput{
+				Solver:  stepSolver,
+				Steps:   []Step{{Name: "step", Definition: def}},
+				Display: tt.display,
+				Exports: tt.exports,
+			})
+			if tt.wantSentinel != nil {
+				require.ErrorIs(t, err, tt.wantSentinel)
+				return
+			}
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			if tt.checkOpt {
+				opt := capturedExportOpt.Load()
+				require.NotNil(t, opt)
+				require.Len(t, opt.Exports, 1)
+				assert.Equal(t, client.ExporterLocal, opt.Exports[0].Type)
+				assert.Equal(t, tt.wantOutputDir, opt.Exports[0].OutputDir)
+			}
+		})
+	}
+}
+
+func TestRun_exportsConcurrent(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		def, err := llb.Scratch().Marshal(t.Context())
+		require.NoError(t, err)
+
+		var concurrent, maxConcurrent atomic.Int64
+
+		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, opt client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			// Only track concurrency for export solves.
+			if len(opt.Exports) > 0 {
+				cur := concurrent.Add(1)
+				for {
+					old := maxConcurrent.Load()
+					if cur <= old || maxConcurrent.CompareAndSwap(old, cur) {
+						break
+					}
+				}
+				time.Sleep(10 * time.Millisecond)
+				concurrent.Add(-1)
+			}
+			close(ch)
+			return &client.SolveResponse{}, nil
+		}}
+
+		err = Run(t.Context(), RunInput{
+			Solver:  solver,
+			Steps:   []Step{{Name: "build", Definition: def}},
+			Display: &fakeDisplay{},
+			Exports: []builder.LocalExport{
+				{Definition: def, StepName: "build", Local: "/tmp/a"},
+				{Definition: def, StepName: "build", Local: "/tmp/b"},
+				{Definition: def, StepName: "build", Local: "/tmp/c"},
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(3), maxConcurrent.Load(), "all 3 exports should run concurrently")
+	})
+}
+
+func TestRun_exportErrorCancelsSiblings(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		def, err := llb.Scratch().Marshal(t.Context())
+		require.NoError(t, err)
+
+		var started atomic.Int64
+
+		solver := &fakeSolver{solveFn: func(ctx context.Context, _ *llb.Definition, opt client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			if len(opt.Exports) > 0 {
+				idx := started.Add(1)
+				if idx == 1 {
+					close(ch)
+					return nil, errors.New("disk full")
+				}
+				// Other exports block until cancelled.
+				<-ctx.Done()
+				close(ch)
+				return nil, ctx.Err()
+			}
+			close(ch)
+			return &client.SolveResponse{}, nil
+		}}
+
+		err = Run(t.Context(), RunInput{
+			Solver:  solver,
+			Steps:   []Step{{Name: "build", Definition: def}},
+			Display: &fakeDisplay{},
+			Exports: []builder.LocalExport{
+				{Definition: def, StepName: "build", Local: "/tmp/a"},
+				{Definition: def, StepName: "build", Local: "/tmp/b"},
+			},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "disk full")
+	})
 }

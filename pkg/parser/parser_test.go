@@ -595,6 +595,181 @@ func TestParse(t *testing.T) {
 			}`,
 			wantErr: pipeline.ErrDuplicateDim,
 		},
+		{
+			name: "pipeline-level env vars",
+			input: `pipeline "ci" {
+				env "CI" "true"
+				env "GOFLAGS" "-mod=vendor"
+				step "build" {
+					image "golang:1.23"
+					run "go build ./..."
+				}
+			}`,
+			want: pipeline.Pipeline{
+				Name: "ci",
+				Env:  []pipeline.EnvVar{{Key: "CI", Value: "true"}, {Key: "GOFLAGS", Value: "-mod=vendor"}},
+				Steps: []pipeline.Step{
+					{
+						Name:  "build",
+						Image: "golang:1.23",
+						Run:   []string{"go build ./..."},
+					},
+				},
+				TopoOrder: []int{0},
+			},
+		},
+		{
+			name: "step-level env vars",
+			input: `pipeline "ci" {
+				step "build" {
+					image "golang:1.23"
+					env "CGO_ENABLED" "0"
+					run "go build ./..."
+				}
+			}`,
+			want: pipeline.Pipeline{
+				Name: "ci",
+				Steps: []pipeline.Step{
+					{
+						Name:  "build",
+						Image: "golang:1.23",
+						Env:   []pipeline.EnvVar{{Key: "CGO_ENABLED", Value: "0"}},
+						Run:   []string{"go build ./..."},
+					},
+				},
+				TopoOrder: []int{0},
+			},
+		},
+		{
+			name: "step export without local",
+			input: `pipeline "ci" {
+				step "build" {
+					image "golang:1.23"
+					run "go build -o /out/myapp ./..."
+					export "/out/myapp"
+				}
+			}`,
+			wantErr: ErrMissingField,
+		},
+		{
+			name: "step export with empty local",
+			input: `pipeline "ci" {
+				step "build" {
+					image "golang:1.23"
+					run "go build -o /out/myapp ./..."
+					export "/out/myapp" local=""
+				}
+			}`,
+			wantErr: ErrMissingField,
+		},
+		{
+			name: "step export with local",
+			input: `pipeline "ci" {
+				step "build" {
+					image "golang:1.23"
+					run "go build -o /out/myapp ./..."
+					export "/out/myapp" local="./bin/myapp"
+				}
+			}`,
+			want: pipeline.Pipeline{
+				Name: "ci",
+				Steps: []pipeline.Step{
+					{
+						Name:    "build",
+						Image:   "golang:1.23",
+						Run:     []string{"go build -o /out/myapp ./..."},
+						Exports: []pipeline.Export{{Path: "/out/myapp", Local: "./bin/myapp"}},
+					},
+				},
+				TopoOrder: []int{0},
+			},
+		},
+		{
+			name: "step artifact",
+			input: `pipeline "ci" {
+				step "build" {
+					image "golang:1.23"
+					run "go build -o /out/myapp ./..."
+				}
+				step "deploy" {
+					image "alpine:latest"
+					depends-on "build"
+					artifact "build" "/out/myapp" "/usr/local/bin/myapp"
+					run "echo deploying"
+				}
+			}`,
+			want: pipeline.Pipeline{
+				Name: "ci",
+				Steps: []pipeline.Step{
+					{
+						Name:  "build",
+						Image: "golang:1.23",
+						Run:   []string{"go build -o /out/myapp ./..."},
+					},
+					{
+						Name:      "deploy",
+						Image:     "alpine:latest",
+						DependsOn: []string{"build"},
+						Artifacts: []pipeline.Artifact{{From: "build", Source: "/out/myapp", Target: "/usr/local/bin/myapp"}},
+						Run:       []string{"echo deploying"},
+					},
+				},
+				TopoOrder: []int{0, 1},
+			},
+		},
+		{
+			name: "artifact without dependency errors",
+			input: `pipeline "bad" {
+				step "build" {
+					image "golang:1.23"
+					run "go build -o /out/myapp ./..."
+				}
+				step "deploy" {
+					image "alpine:latest"
+					artifact "build" "/out/myapp" "/usr/local/bin/myapp"
+					run "echo deploying"
+				}
+			}`,
+			wantErr: pipeline.ErrArtifactNoDep,
+		},
+		{
+			name: "env with wrong args",
+			input: `pipeline "bad" {
+				step "a" {
+					image "alpine:latest"
+					env "ONLY_KEY"
+					run "echo hi"
+				}
+			}`,
+			wantErr: ErrMissingField,
+		},
+		{
+			name: "export with extra args",
+			input: `pipeline "bad" {
+				step "a" {
+					image "alpine:latest"
+					export "/out/myapp" "/extra"
+					run "echo hi"
+				}
+			}`,
+			wantErr: ErrExtraArgs,
+		},
+		{
+			name: "artifact with wrong args",
+			input: `pipeline "bad" {
+				step "other" {
+					image "alpine:latest"
+					run "echo other"
+				}
+				step "a" {
+					image "alpine:latest"
+					depends-on "other"
+					artifact "other" "/src"
+					run "echo hi"
+				}
+			}`,
+			wantErr: ErrMissingField,
+		},
 	}
 
 	for _, tt := range tests {

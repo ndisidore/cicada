@@ -1,6 +1,7 @@
 # Build artifacts
 /cicada
 /bin/
+/dist/
 
 # IDE
 .idea/

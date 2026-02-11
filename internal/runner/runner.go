@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb"
@@ -12,17 +13,19 @@ import (
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 
+	"github.com/ndisidore/cicada/internal/builder"
 	"github.com/ndisidore/cicada/internal/progress"
+	"github.com/ndisidore/cicada/pkg/pipeline"
 )
 
-// ErrNilSolver indicates that RunInput.Solver was not provided.
-var ErrNilSolver = errors.New("RunInput.Solver must not be nil")
+// ErrNilSolver indicates that Solver was not provided.
+var ErrNilSolver = errors.New("solver must not be nil")
 
-// ErrNilDisplay indicates that RunInput.Display was not provided.
-var ErrNilDisplay = errors.New("RunInput.Display must not be nil")
+// ErrNilDisplay indicates that Display was not provided.
+var ErrNilDisplay = errors.New("display must not be nil")
 
-// ErrNilDefinition indicates that a Step has a nil LLB Definition.
-var ErrNilDefinition = errors.New("Step.Definition must not be nil")
+// ErrNilDefinition indicates that an LLB Definition is unexpectedly nil.
+var ErrNilDefinition = errors.New("definition must not be nil")
 
 // ErrUnknownDep indicates a step depends on a name not in the step list.
 var ErrUnknownDep = errors.New("unknown dependency")
@@ -65,6 +68,8 @@ type RunInput struct {
 	Display progress.Display
 	// Parallelism limits concurrent step execution. 0 means unlimited.
 	Parallelism int
+	// Exports contains artifacts to export to the host after all steps complete.
+	Exports []builder.LocalExport
 }
 
 // dagNode tracks a step and a done channel that is closed on completion.
@@ -102,14 +107,30 @@ func Run(ctx context.Context, in RunInput) error {
 	}
 	sem := semaphore.NewWeighted(limit)
 
-	g, ctx := errgroup.WithContext(ctx)
+	g, gctx := errgroup.WithContext(ctx)
 	for i := range in.Steps {
 		node := nodes[in.Steps[i].Name]
 		g.Go(func() error {
-			return runNode(ctx, node, nodes, sem, in)
+			return runNode(gctx, node, nodes, sem, in)
 		})
 	}
-	return g.Wait()
+	if err := g.Wait(); err != nil {
+		return err
+	}
+
+	// Export artifacts to the host filesystem concurrently.
+	// Uses the original ctx since the step errgroup's derived context is
+	// canceled when Wait returns.
+	eg, ectx := errgroup.WithContext(ctx)
+	for _, exp := range in.Exports {
+		eg.Go(func() error {
+			if err := solveExport(ectx, in.Solver, in.Display, exp); err != nil {
+				return fmt.Errorf("exporting %q from step %q: %w", exp.Local, exp.StepName, err)
+			}
+			return nil
+		})
+	}
+	return eg.Wait()
 }
 
 // buildDAG creates the DAG node index and validates that all deps exist.
@@ -233,6 +254,49 @@ func solveStep(
 		}
 		if err != nil {
 			return fmt.Errorf("displaying progress: %w", err)
+		}
+		return nil
+	})
+
+	return g.Wait()
+}
+
+// solveExport solves an export LLB definition using the local exporter to
+// write files to the host filesystem.
+func solveExport(ctx context.Context, s Solver, display progress.Display, exp builder.LocalExport) error {
+	if exp.Definition == nil {
+		return ErrNilDefinition
+	}
+	if exp.Local == "" {
+		return pipeline.ErrEmptyExportLocal
+	}
+	outputDir := filepath.Dir(exp.Local)
+	if exp.Dir {
+		outputDir = exp.Local
+	}
+
+	ch := make(chan *client.SolveStatus)
+	g, ctx := errgroup.WithContext(ctx)
+
+	g.Go(func() error {
+		_, err := s.Solve(ctx, exp.Definition, client.SolveOpt{
+			Exports: []client.ExportEntry{{
+				Type:      client.ExporterLocal,
+				OutputDir: outputDir,
+			}},
+		}, ch)
+		if err != nil {
+			return fmt.Errorf("solving export: %w", err)
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		err := display.Run(ctx, "export:"+exp.StepName, ch)
+		for range ch { //nolint:revive // drain so Solve can close ch
+		}
+		if err != nil {
+			return fmt.Errorf("displaying export progress: %w", err)
 		}
 		return nil
 	})

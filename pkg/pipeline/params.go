@@ -59,8 +59,8 @@ func SubstituteParams(steps []Step, params map[string]string) []Step {
 }
 
 // substituteStepVars applies ${prefix.key} substitution to step fields
-// (Image, Workdir, Platform, Run, Mounts, Caches). Name and DependsOn are
-// copied without substitution.
+// (Image, Workdir, Platform, Run, Mounts, Caches, Env values, Exports,
+// Artifacts). Name and DependsOn are copied without substitution.
 func substituteStepVars(s Step, combo map[string]string, prefix string) Step {
 	sub := func(v string) string { return substituteVars(v, combo, prefix) }
 	return Step{
@@ -76,6 +76,15 @@ func substituteStepVars(s Step, combo map[string]string, prefix string) Step {
 		}),
 		Caches: mapSlice(s.Caches, func(c Cache) Cache {
 			return Cache{ID: sub(c.ID), Target: sub(c.Target)}
+		}),
+		Env: mapSlice(s.Env, func(e EnvVar) EnvVar {
+			return EnvVar{Key: e.Key, Value: sub(e.Value)}
+		}),
+		Exports: mapSlice(s.Exports, func(e Export) Export {
+			return Export{Path: sub(e.Path), Local: sub(e.Local)}
+		}),
+		Artifacts: mapSlice(s.Artifacts, func(a Artifact) Artifact {
+			return Artifact{From: a.From, Source: sub(a.Source), Target: sub(a.Target)}
 		}),
 	}
 }

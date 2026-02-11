@@ -132,6 +132,10 @@ func main() {
 						Usage:   "max concurrent steps (0 = unlimited)",
 						Value:   0,
 					},
+					&cli.BoolFlag{
+						Name:  "expose-deps",
+						Usage: "mount full dependency root filesystems at /deps/{name}",
+					},
 				),
 				Action: a.runAction,
 			},
@@ -262,6 +266,7 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 		NoCache:         cmd.Bool("no-cache"),
 		ExcludePatterns: excludes,
 		MetaResolver:    imagemetaresolver.Default(),
+		ExposeDeps:      cmd.Bool("expose-deps"),
 	})
 	if err != nil {
 		return fmt.Errorf("building %s: %w", path, err)
@@ -277,11 +282,26 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 		return nil
 	}
 
-	return a.executePipeline(ctx, cmd, path, p, steps, cwd)
+	return a.executePipeline(ctx, cmd, pipelineRunParams{
+		path:    path,
+		pipe:    p,
+		steps:   steps,
+		exports: result.Exports,
+		cwd:     cwd,
+	})
+}
+
+// pipelineRunParams groups parameters for executePipeline.
+type pipelineRunParams struct {
+	path    string
+	pipe    pipeline.Pipeline
+	steps   []runner.Step
+	exports []builder.LocalExport
+	cwd     string
 }
 
 // executePipeline connects to BuildKit and runs the pipeline steps.
-func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, path string, p pipeline.Pipeline, steps []runner.Step, cwd string) error {
+func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipelineRunParams) error {
 	addr, err := a.resolveAddr(ctx, cmd)
 	if err != nil {
 		return err
@@ -298,14 +318,14 @@ func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, path string
 	}()
 
 	if cmd.Bool("offline") {
-		if err := checkOffline(ctx, solver, p, path); err != nil {
+		if err := checkOffline(ctx, solver, params.pipe, params.path); err != nil {
 			return err
 		}
 	}
 
-	contextFS, err := fsutil.NewFS(cwd)
+	contextFS, err := fsutil.NewFS(params.cwd)
 	if err != nil {
-		return fmt.Errorf("opening context directory %s: %w", cwd, err)
+		return fmt.Errorf("opening context directory %s: %w", params.cwd, err)
 	}
 
 	parallelism := int(cmd.Int("parallelism"))
@@ -325,12 +345,13 @@ func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, path string
 
 	return runner.Run(ctx, runner.RunInput{
 		Solver: solver,
-		Steps:  steps,
+		Steps:  params.steps,
 		LocalMounts: map[string]fsutil.FS{
 			"context": contextFS,
 		},
 		Display:     display,
 		Parallelism: parallelism,
+		Exports:     params.exports,
 	})
 }
 
