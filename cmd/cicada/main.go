@@ -21,6 +21,7 @@ import (
 	"github.com/ndisidore/cicada/internal/imagestore"
 	"github.com/ndisidore/cicada/internal/progress"
 	"github.com/ndisidore/cicada/internal/runner"
+	"github.com/ndisidore/cicada/internal/runtime"
 	"github.com/ndisidore/cicada/internal/synccontext"
 	"github.com/ndisidore/cicada/pkg/parser"
 	"github.com/ndisidore/cicada/pkg/pipeline"
@@ -63,7 +64,6 @@ type app struct {
 func main() {
 	p := &parser.Parser{Resolver: &parser.FileResolver{}}
 	a := &app{
-		engine:  daemon.NewManager(),
 		connect: defaultConnect,
 		parse:   p.ParseFile,
 		getwd:   os.Getwd,
@@ -71,9 +71,32 @@ func main() {
 		isTTY:   term.IsTerminal(int(os.Stdout.Fd())) && os.Getenv("CI") == "",
 	}
 
+	resolver := runtime.DefaultResolver()
+	initEngine := func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+		rtName := cmd.String("runtime")
+		rt, err := resolver.Get(ctx, rtName)
+		if err != nil {
+			return ctx, fmt.Errorf("resolve runtime %s: %w", rtName, err)
+		}
+		mgr, err := daemon.NewManager(rt)
+		if err != nil {
+			return ctx, fmt.Errorf("create daemon manager for runtime %s: %w", rtName, err)
+		}
+		a.engine = mgr
+		return ctx, nil
+	}
+
 	cmd := &cli.Command{
 		Name:  "cicada",
 		Usage: "a container-native CI/CD pipeline runner",
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:    "runtime",
+				Usage:   "container runtime (auto, docker, podman)",
+				Value:   "auto",
+				Sources: cli.EnvVars("CICADA_RUNTIME"),
+			},
+		},
 		Commands: []*cli.Command{
 			{
 				Name:      "validate",
@@ -85,6 +108,7 @@ func main() {
 				Name:      "run",
 				Usage:     "run a KDL pipeline against BuildKit",
 				ArgsUsage: "<file>",
+				Before:    initEngine,
 				Flags: append(buildkitFlags(),
 					&cli.BoolFlag{
 						Name:  "dry-run",
@@ -115,6 +139,7 @@ func main() {
 				Name:      "pull",
 				Usage:     "pre-pull pipeline images into the BuildKit cache",
 				ArgsUsage: "<file>",
+				Before:    initEngine,
 				Flags: append(buildkitFlags(),
 					&cli.BoolFlag{
 						Name:  "boring",
@@ -124,8 +149,9 @@ func main() {
 				Action: a.pullAction,
 			},
 			{
-				Name:  "engine",
-				Usage: "manage the local BuildKit engine",
+				Name:   "engine",
+				Usage:  "manage the local BuildKit engine",
+				Before: initEngine,
 				Commands: []*cli.Command{
 					{
 						Name:   "start",

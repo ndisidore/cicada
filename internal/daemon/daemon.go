@@ -6,15 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os/exec"
-	"strings"
 	"time"
 
 	bkclient "github.com/moby/buildkit/client"
-)
 
-// ErrDockerNotFound indicates the docker binary is not in PATH.
-var ErrDockerNotFound = errors.New("docker binary not found in PATH")
+	"github.com/ndisidore/cicada/internal/runtime"
+)
 
 // ErrEngineUnhealthy indicates the engine health check timed out.
 var ErrEngineUnhealthy = errors.New("engine health check timed out")
@@ -22,51 +19,49 @@ var ErrEngineUnhealthy = errors.New("engine health check timed out")
 // ErrStartFailed indicates the engine container could not be started.
 var ErrStartFailed = errors.New("engine start unsuccessful")
 
+// ErrNilRuntime indicates NewManager was called with a nil runtime.
+var ErrNilRuntime = errors.New("nil runtime")
+
 const (
 	_containerName = "cicada-buildkitd"
 	_buildkitImage = "moby/buildkit:v0.27.1"
 	_port          = "1234"
 	_defaultAddr   = "tcp://127.0.0.1:" + _port
 	_volumeName    = "cicada-buildkit-state"
-
-	_healthTimeout     = 30 * time.Second
-	_healthInterval    = 100 * time.Millisecond
-	_healthBackoff     = 2
-	_healthMaxInterval = 3 * time.Second
-	_dockerTimeout     = 30 * time.Second
-
-	// Docker container states.
-	_stateRunning = "running"
-	_stateExited  = "exited"
-	_stateCreated = "created"
 )
 
+// healthConfig holds timing parameters for the engine health check loop.
+type healthConfig struct {
+	timeout     time.Duration
+	interval    time.Duration
+	backoff     int
+	maxInterval time.Duration
+}
+
+var _defaultHealthConfig = healthConfig{
+	timeout:     30 * time.Second,
+	interval:    100 * time.Millisecond,
+	backoff:     2,
+	maxInterval: 3 * time.Second,
+}
+
 // Manager manages the lifecycle of a local BuildKit daemon container.
-// The dockerExec, bkDial, and lookPath fields are injected for testability.
 type Manager struct {
-	dockerExec func(ctx context.Context, args ...string) (string, error)
-	bkDial     func(ctx context.Context, addr string) (bool, error)
-	lookPath   func(file string) (string, error)
+	rt     runtime.Runtime
+	bkDial func(ctx context.Context, addr string) (bool, error)
+	health healthConfig
 }
 
-// NewManager creates a Manager with production docker/buildkit implementations.
-func NewManager() *Manager {
+// NewManager creates a Manager backed by the given container runtime.
+func NewManager(rt runtime.Runtime) (*Manager, error) {
+	if rt == nil {
+		return nil, ErrNilRuntime
+	}
 	return &Manager{
-		dockerExec: defaultDockerExec,
-		bkDial:     defaultBkDial,
-		lookPath:   exec.LookPath,
-	}
-}
-
-func defaultDockerExec(ctx context.Context, args ...string) (string, error) {
-	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, _dockerTimeout)
-		defer cancel()
-	}
-	cmd := exec.CommandContext(ctx, "docker", args...)
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+		rt:     rt,
+		bkDial: defaultBkDial,
+		health: _defaultHealthConfig,
+	}, nil
 }
 
 func defaultBkDial(ctx context.Context, addr string) (bool, error) {
@@ -119,40 +114,37 @@ func (m *Manager) IsReachable(ctx context.Context, addr string) bool {
 // It is idempotent: if a stopped container exists, it is restarted.
 // The daemon listens on TCP so no Unix socket permissions are needed.
 func (m *Manager) Start(ctx context.Context) (string, error) {
-	if _, err := m.lookPath("docker"); err != nil {
-		return "", fmt.Errorf("%w: %w", ErrDockerNotFound, err)
-	}
+	log := slog.Default().With(slog.String("runtime", string(m.rt.Type())))
 
-	log := slog.Default()
-
-	// Check if container already exists (running or stopped).
-	state, err := m.containerState(ctx)
-	if err != nil {
+	state, err := m.rt.Inspect(ctx, _containerName)
+	if err != nil && !errors.Is(err, runtime.ErrContainerNotFound) {
 		return "", fmt.Errorf("inspecting container: %w", err)
 	}
 
 	switch state {
-	case _stateRunning:
+	case runtime.StateRunning:
 		log.InfoContext(ctx, "buildkitd container already running")
-	case _stateExited, _stateCreated:
+	case runtime.StateExited, runtime.StateCreated:
 		log.InfoContext(ctx, "restarting stopped buildkitd container")
-		if out, err := m.dockerExec(ctx, "start", _containerName); err != nil {
-			return "", fmt.Errorf("restarting container: %s: %w: %w", strings.TrimSpace(out), err, ErrStartFailed)
+		if err := m.rt.Start(ctx, _containerName); err != nil {
+			return "", fmt.Errorf("restarting container: %w: %w", err, ErrStartFailed)
 		}
-	default:
-		// Container doesn't exist; create it.
+	default: // includes container-not-found (zero-value state)
 		log.InfoContext(ctx, "starting buildkitd container")
-		args := []string{
-			"run", "-d",
-			"--name", _containerName,
-			"--privileged", // required for BuildKit to perform nested container operations
-			"-p", "127.0.0.1:" + _port + ":" + _port,
-			"-v", _volumeName + ":/var/lib/buildkit",
-			_buildkitImage,
-			"--addr", "tcp://0.0.0.0:" + _port,
-		}
-		if out, err := m.dockerExec(ctx, args...); err != nil {
-			return "", fmt.Errorf("creating container: %s: %w: %w", strings.TrimSpace(out), err, ErrStartFailed)
+		if _, err := m.rt.Run(ctx, runtime.RunConfig{
+			Name:       _containerName,
+			Image:      _buildkitImage,
+			Privileged: true,
+			Detach:     true,
+			Ports: []runtime.PortBinding{
+				{HostAddr: "127.0.0.1", HostPort: _port, ContPort: _port},
+			},
+			Volumes: []runtime.VolumeMount{
+				{Name: _volumeName, Target: "/var/lib/buildkit"},
+			},
+			Args: []string{"--addr", "tcp://0.0.0.0:" + _port},
+		}); err != nil {
+			return "", fmt.Errorf("creating container: %w: %w", err, ErrStartFailed)
 		}
 	}
 
@@ -164,21 +156,20 @@ func (m *Manager) Start(ctx context.Context) (string, error) {
 }
 
 // Stop gracefully stops the cicada-buildkitd container without removing it.
-// It is a no-op if the container is not running.
+// It is a no-op if the container is not running or does not exist.
 func (m *Manager) Stop(ctx context.Context) error {
-	if _, err := m.lookPath("docker"); err != nil {
-		return fmt.Errorf("%w: %w", ErrDockerNotFound, err)
+	state, err := m.rt.Inspect(ctx, _containerName)
+	if errors.Is(err, runtime.ErrContainerNotFound) {
+		return nil
 	}
-
-	state, err := m.containerState(ctx)
 	if err != nil {
 		return fmt.Errorf("inspecting container: %w", err)
 	}
-	if state == "" || state == _stateExited || state == _stateCreated {
+	if state != runtime.StateRunning {
 		return nil
 	}
 
-	if _, err := m.dockerExec(ctx, "stop", _containerName); err != nil {
+	if err := m.rt.Stop(ctx, _containerName); err != nil {
 		return fmt.Errorf("stopping container: %w", err)
 	}
 	return nil
@@ -186,19 +177,15 @@ func (m *Manager) Stop(ctx context.Context) error {
 
 // Remove force-removes the cicada-buildkitd container (running or stopped).
 func (m *Manager) Remove(ctx context.Context) error {
-	if _, err := m.lookPath("docker"); err != nil {
-		return fmt.Errorf("%w: %w", ErrDockerNotFound, err)
+	_, err := m.rt.Inspect(ctx, _containerName)
+	if errors.Is(err, runtime.ErrContainerNotFound) {
+		return nil
 	}
-
-	state, err := m.containerState(ctx)
 	if err != nil {
 		return fmt.Errorf("inspecting container: %w", err)
 	}
-	if state == "" {
-		return nil
-	}
 
-	if _, err := m.dockerExec(ctx, "rm", "-f", _containerName); err != nil {
+	if err := m.rt.Remove(ctx, _containerName); err != nil {
 		return fmt.Errorf("removing container: %w", err)
 	}
 	return nil
@@ -206,28 +193,19 @@ func (m *Manager) Remove(ctx context.Context) error {
 
 // Status returns the current container state or empty string if not found.
 func (m *Manager) Status(ctx context.Context) (string, error) {
-	if _, err := m.lookPath("docker"); err != nil {
-		return "", fmt.Errorf("%w: %w", ErrDockerNotFound, err)
+	state, err := m.rt.Inspect(ctx, _containerName)
+	if errors.Is(err, runtime.ErrContainerNotFound) {
+		return "", nil
 	}
-	return m.containerState(ctx)
-}
-
-func (m *Manager) containerState(ctx context.Context) (string, error) {
-	out, err := m.dockerExec(ctx, "inspect", "-f", "{{.State.Status}}", _containerName)
 	if err != nil {
-		// Only swallow "not found" errors; propagate unexpected failures.
-		lower := strings.ToLower(out)
-		if strings.Contains(lower, "no such object") || strings.Contains(lower, "no such container") {
-			return "", nil
-		}
-		return "", fmt.Errorf("docker inspect: %w", err)
+		return "", fmt.Errorf("inspecting container: %w", err)
 	}
-	return strings.TrimSpace(strings.ToLower(out)), nil
+	return string(state), nil
 }
 
 func (m *Manager) waitHealthy(ctx context.Context) error {
-	deadline := time.Now().Add(_healthTimeout)
-	interval := _healthInterval
+	deadline := time.Now().Add(m.health.timeout)
+	interval := m.health.interval
 
 	for time.Now().Before(deadline) {
 		ok, err := m.bkDial(ctx, _defaultAddr)
@@ -241,9 +219,9 @@ func (m *Manager) waitHealthy(ctx context.Context) error {
 		case <-ctx.Done():
 			return fmt.Errorf("waiting for healthy engine: %w", ctx.Err())
 		case <-time.After(interval):
-			interval *= _healthBackoff
-			if interval > _healthMaxInterval {
-				interval = _healthMaxInterval
+			interval *= time.Duration(m.health.backoff)
+			if interval > m.health.maxInterval {
+				interval = m.health.maxInterval
 			}
 		}
 	}

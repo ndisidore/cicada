@@ -5,14 +5,59 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+
+	"github.com/ndisidore/cicada/internal/runtime"
 )
 
-func noopDockerExec(context.Context, ...string) (string, error) { return "", nil }
-func noopBkDial(context.Context, string) (bool, error)          { return false, nil }
-func noopLookPath(string) (string, error)                       { return "/usr/bin/docker", nil }
+// mockRuntime is a testify mock for runtime.Runtime.
+type mockRuntime struct {
+	mock.Mock
+}
+
+func (m *mockRuntime) Type() runtime.Type {
+	return m.Called().Get(0).(runtime.Type)
+}
+
+func (m *mockRuntime) Available(ctx context.Context) bool {
+	return m.Called(ctx).Bool(0)
+}
+
+func (m *mockRuntime) Run(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+	args := m.Called(ctx, cfg)
+	return args.String(0), args.Error(1)
+}
+
+func (m *mockRuntime) Start(ctx context.Context, name string) error {
+	return m.Called(ctx, name).Error(0)
+}
+
+func (m *mockRuntime) Stop(ctx context.Context, name string) error {
+	return m.Called(ctx, name).Error(0)
+}
+
+func (m *mockRuntime) Remove(ctx context.Context, name string) error {
+	return m.Called(ctx, name).Error(0)
+}
+
+func (m *mockRuntime) Inspect(ctx context.Context, name string) (runtime.ContainerState, error) {
+	args := m.Called(ctx, name)
+	cs, _ := args.Get(0).(runtime.ContainerState)
+	return cs, args.Error(1)
+}
+
+func noopBkDial(context.Context, string) (bool, error) { return false, nil }
+
+func TestNewManagerNilRuntime(t *testing.T) {
+	t.Parallel()
+	_, err := NewManager(nil)
+	require.ErrorIs(t, err, ErrNilRuntime)
+}
 
 func TestDefaultAddr(t *testing.T) {
 	t.Parallel()
@@ -26,8 +71,7 @@ func TestEnsureRunning(t *testing.T) {
 		name     string
 		userAddr string
 		dial     func(ctx context.Context, addr string) (bool, error)
-		docker   func(ctx context.Context, args ...string) (string, error)
-		lp       func(file string) (string, error)
+		setup    func(m *mockRuntime)
 		wantAddr string
 		wantErr  error
 	}{
@@ -48,31 +92,21 @@ func TestEnsureRunning(t *testing.T) {
 			dial: func() func(context.Context, string) (bool, error) {
 				var calls atomic.Int32
 				return func(context.Context, string) (bool, error) {
-					// First call (from EnsureRunning): unreachable.
-					// Subsequent calls (from waitHealthy): reachable.
 					if calls.Add(1) == 1 {
 						return false, nil
 					}
 					return true, nil
 				}
 			}(),
-			docker: func(_ context.Context, args ...string) (string, error) {
-				if len(args) > 0 && args[0] == "inspect" {
-					return "error: no such object: cicada-buildkitd", errors.New("exit 1")
-				}
-				return "container-id\n", nil
+			setup: func(m *mockRuntime) {
+				m.On("Type").Return(runtime.Docker)
+				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateUnknown, runtime.ErrContainerNotFound)
+				m.On("Run", mock.Anything, mock.AnythingOfType("runtime.RunConfig")).Return("container-id", nil)
 			},
 			wantAddr: _defaultAddr,
 		},
 		{
-			name:     "docker not found returns ErrDockerNotFound",
-			userAddr: "",
-			dial:     func(context.Context, string) (bool, error) { return false, nil },
-			lp:       func(string) (string, error) { return "", errors.New("not found") },
-			wantErr:  ErrDockerNotFound,
-		},
-		{
-			name:     "docker run fails returns ErrStartFailed",
+			name:     "runtime run fails returns ErrStartFailed",
 			userAddr: "",
 			dial: func() func(context.Context, string) (bool, error) {
 				var calls atomic.Int32
@@ -81,11 +115,10 @@ func TestEnsureRunning(t *testing.T) {
 					return false, nil
 				}
 			}(),
-			docker: func(_ context.Context, args ...string) (string, error) {
-				if len(args) > 0 && args[0] == "inspect" {
-					return "error: no such object: cicada-buildkitd", errors.New("exit 1")
-				}
-				return "cannot start\n", errors.New("exit 1")
+			setup: func(m *mockRuntime) {
+				m.On("Type").Return(runtime.Docker)
+				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateUnknown, runtime.ErrContainerNotFound)
+				m.On("Run", mock.Anything, mock.AnythingOfType("runtime.RunConfig")).Return("", errors.New("cannot start"))
 			},
 			wantErr: ErrStartFailed,
 		},
@@ -95,21 +128,15 @@ func TestEnsureRunning(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			lp := tt.lp
-			if lp == nil {
-				lp = noopLookPath
+			rt := new(mockRuntime)
+			if tt.setup != nil {
+				tt.setup(rt)
 			}
-			mgr := &Manager{
-				dockerExec: tt.docker,
-				bkDial:     tt.dial,
-				lookPath:   lp,
+			dial := tt.dial
+			if dial == nil {
+				dial = noopBkDial
 			}
-			if mgr.dockerExec == nil {
-				mgr.dockerExec = noopDockerExec
-			}
-			if mgr.bkDial == nil {
-				mgr.bkDial = noopBkDial
-			}
+			mgr := &Manager{rt: rt, bkDial: dial, health: _defaultHealthConfig}
 
 			addr, err := mgr.EnsureRunning(context.Background(), tt.userAddr)
 			if tt.wantErr != nil {
@@ -119,6 +146,7 @@ func TestEnsureRunning(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantAddr, addr)
+			rt.AssertExpectations(t)
 		})
 	}
 }
@@ -151,12 +179,7 @@ func TestIsReachable(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-
-			mgr := &Manager{
-				dockerExec: noopDockerExec,
-				bkDial:     tt.dial,
-				lookPath:   noopLookPath,
-			}
+			mgr := &Manager{rt: new(mockRuntime), bkDial: tt.dial, health: _defaultHealthConfig}
 			got := mgr.IsReachable(context.Background(), _defaultAddr)
 			assert.Equal(t, tt.want, got)
 		})
@@ -168,272 +191,39 @@ func TestStop(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		docker  func(ctx context.Context, args ...string) (string, error)
-		lp      func(file string) (string, error)
-		wantErr error
+		setup   func(m *mockRuntime)
+		wantErr bool
 	}{
 		{
 			name: "running container stops successfully",
-			docker: func(_ context.Context, args ...string) (string, error) {
-				if len(args) > 0 && args[0] == "inspect" {
-					return "running\n", nil
-				}
-				return "", nil
+			setup: func(m *mockRuntime) {
+				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateRunning, nil)
+				m.On("Stop", mock.Anything, _containerName).Return(nil)
 			},
 		},
 		{
 			name: "stopped container is no-op",
-			docker: func(_ context.Context, args ...string) (string, error) {
-				if len(args) > 0 && args[0] == "inspect" {
-					return "exited\n", nil
-				}
-				return "", nil
+			setup: func(m *mockRuntime) {
+				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateExited, nil)
 			},
 		},
 		{
 			name: "created container is no-op",
-			docker: func(_ context.Context, args ...string) (string, error) {
-				if len(args) > 0 && args[0] == "inspect" {
-					return "created\n", nil
-				}
-				return "", nil
+			setup: func(m *mockRuntime) {
+				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateCreated, nil)
 			},
 		},
 		{
 			name: "missing container is no-op",
-			docker: func(_ context.Context, args ...string) (string, error) {
-				if len(args) > 0 && args[0] == "inspect" {
-					return "Error: No such container: cicada-buildkitd", errors.New("exit 1")
-				}
-				return "", nil
+			setup: func(m *mockRuntime) {
+				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateUnknown, runtime.ErrContainerNotFound)
 			},
 		},
 		{
-			name:    "docker not found",
-			lp:      func(string) (string, error) { return "", errors.New("not found") },
-			wantErr: ErrDockerNotFound,
-		},
-		{
-			name: "docker stop fails propagates error",
-			docker: func(_ context.Context, args ...string) (string, error) {
-				if len(args) > 0 && args[0] == "inspect" {
-					return "running\n", nil
-				}
-				return "timeout\n", errors.New("exit 1")
-			},
-			wantErr: errors.New("stopping container"),
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			lp := tt.lp
-			if lp == nil {
-				lp = noopLookPath
-			}
-			docker := tt.docker
-			if docker == nil {
-				docker = noopDockerExec
-			}
-			mgr := &Manager{
-				dockerExec: docker,
-				bkDial:     noopBkDial,
-				lookPath:   lp,
-			}
-			err := mgr.Stop(context.Background())
-			if tt.wantErr != nil {
-				require.Error(t, err)
-				if errors.Is(tt.wantErr, ErrDockerNotFound) {
-					assert.ErrorIs(t, err, ErrDockerNotFound)
-				} else {
-					assert.Contains(t, err.Error(), tt.wantErr.Error())
-				}
-				return
-			}
-			require.NoError(t, err)
-		})
-	}
-}
-
-func TestRemove(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		docker  func(ctx context.Context, args ...string) (string, error)
-		lp      func(file string) (string, error)
-		wantErr error
-	}{
-		{
-			name: "existing container removed",
-			docker: func(_ context.Context, args ...string) (string, error) {
-				if len(args) > 0 && args[0] == "inspect" {
-					return "exited\n", nil
-				}
-				return "", nil
-			},
-		},
-		{
-			name: "missing container is no-op",
-			docker: func(_ context.Context, args ...string) (string, error) {
-				if len(args) > 0 && args[0] == "inspect" {
-					return "Error: No such container: cicada-buildkitd", errors.New("exit 1")
-				}
-				return "", nil
-			},
-		},
-		{
-			name:    "docker not found",
-			lp:      func(string) (string, error) { return "", errors.New("not found") },
-			wantErr: ErrDockerNotFound,
-		},
-		{
-			name: "docker rm fails propagates error",
-			docker: func(_ context.Context, args ...string) (string, error) {
-				if len(args) > 0 && args[0] == "inspect" {
-					return "exited\n", nil
-				}
-				return "permission denied\n", errors.New("exit 1")
-			},
-			wantErr: errors.New("removing container"),
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			lp := tt.lp
-			if lp == nil {
-				lp = noopLookPath
-			}
-			docker := tt.docker
-			if docker == nil {
-				docker = noopDockerExec
-			}
-			mgr := &Manager{
-				dockerExec: docker,
-				bkDial:     noopBkDial,
-				lookPath:   lp,
-			}
-			err := mgr.Remove(context.Background())
-			if tt.wantErr != nil {
-				require.Error(t, err)
-				if errors.Is(tt.wantErr, ErrDockerNotFound) {
-					assert.ErrorIs(t, err, ErrDockerNotFound)
-				} else {
-					assert.Contains(t, err.Error(), tt.wantErr.Error())
-				}
-				return
-			}
-			require.NoError(t, err)
-		})
-	}
-}
-
-func TestStatus(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		docker    func(ctx context.Context, args ...string) (string, error)
-		lp        func(file string) (string, error)
-		wantState string
-		wantErr   error
-	}{
-		{
-			name: "running container",
-			docker: func(context.Context, ...string) (string, error) {
-				return "running\n", nil
-			},
-			wantState: "running",
-		},
-		{
-			name: "exited container",
-			docker: func(context.Context, ...string) (string, error) {
-				return "exited\n", nil
-			},
-			wantState: "exited",
-		},
-		{
-			name: "missing container returns empty",
-			docker: func(context.Context, ...string) (string, error) {
-				return "Error: No such container: cicada-buildkitd", errors.New("exit 1")
-			},
-			wantState: "",
-		},
-		{
-			name:    "docker not found",
-			lp:      func(string) (string, error) { return "", errors.New("not found") },
-			wantErr: ErrDockerNotFound,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			lp := tt.lp
-			if lp == nil {
-				lp = noopLookPath
-			}
-			docker := tt.docker
-			if docker == nil {
-				docker = noopDockerExec
-			}
-			mgr := &Manager{
-				dockerExec: docker,
-				bkDial:     noopBkDial,
-				lookPath:   lp,
-			}
-			state, err := mgr.Status(context.Background())
-			if tt.wantErr != nil {
-				require.Error(t, err)
-				assert.ErrorIs(t, err, tt.wantErr)
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, tt.wantState, state)
-		})
-	}
-}
-
-func TestContainerState(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		docker    func(ctx context.Context, args ...string) (string, error)
-		wantState string
-		wantErr   bool
-	}{
-		{
-			name: "running container",
-			docker: func(context.Context, ...string) (string, error) {
-				return "running\n", nil
-			},
-			wantState: "running",
-		},
-		{
-			name: "no such container",
-			docker: func(context.Context, ...string) (string, error) {
-				return "Error: No such container: cicada-buildkitd", errors.New("exit 1")
-			},
-			wantState: "",
-		},
-		{
-			name: "no such object",
-			docker: func(context.Context, ...string) (string, error) {
-				return "Error: No such object: cicada-buildkitd", errors.New("exit 1")
-			},
-			wantState: "",
-		},
-		{
-			name: "unexpected docker error",
-			docker: func(context.Context, ...string) (string, error) {
-				return "permission denied", errors.New("exit 1")
+			name: "runtime stop propagates error",
+			setup: func(m *mockRuntime) {
+				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateRunning, nil)
+				m.On("Stop", mock.Anything, _containerName).Return(errors.New("timeout"))
 			},
 			wantErr: true,
 		},
@@ -443,18 +233,294 @@ func TestContainerState(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			mgr := &Manager{
-				dockerExec: tt.docker,
-				bkDial:     noopBkDial,
-				lookPath:   noopLookPath,
+			rt := new(mockRuntime)
+			tt.setup(rt)
+			mgr := &Manager{rt: rt, bkDial: noopBkDial, health: _defaultHealthConfig}
+
+			err := mgr.Stop(context.Background())
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "stopping container")
+				return
 			}
-			state, err := mgr.containerState(context.Background())
+			require.NoError(t, err)
+			rt.AssertExpectations(t)
+		})
+	}
+}
+
+func TestRemove(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		setup   func(m *mockRuntime)
+		wantErr bool
+	}{
+		{
+			name: "existing container removed",
+			setup: func(m *mockRuntime) {
+				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateExited, nil)
+				m.On("Remove", mock.Anything, _containerName).Return(nil)
+			},
+		},
+		{
+			name: "missing container is no-op",
+			setup: func(m *mockRuntime) {
+				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateUnknown, runtime.ErrContainerNotFound)
+			},
+		},
+		{
+			name: "runtime rm propagates error",
+			setup: func(m *mockRuntime) {
+				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateExited, nil)
+				m.On("Remove", mock.Anything, _containerName).Return(errors.New("permission denied"))
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			rt := new(mockRuntime)
+			tt.setup(rt)
+			mgr := &Manager{rt: rt, bkDial: noopBkDial, health: _defaultHealthConfig}
+
+			err := mgr.Remove(context.Background())
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "removing container")
+				return
+			}
+			require.NoError(t, err)
+			rt.AssertExpectations(t)
+		})
+	}
+}
+
+func TestStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setup     func(m *mockRuntime)
+		wantState string
+		wantErr   bool
+	}{
+		{
+			name: "running container",
+			setup: func(m *mockRuntime) {
+				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateRunning, nil)
+			},
+			wantState: "running",
+		},
+		{
+			name: "exited container",
+			setup: func(m *mockRuntime) {
+				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateExited, nil)
+			},
+			wantState: "exited",
+		},
+		{
+			name: "missing container returns empty",
+			setup: func(m *mockRuntime) {
+				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateUnknown, runtime.ErrContainerNotFound)
+			},
+			wantState: "",
+		},
+		{
+			name: "inspect error propagates",
+			setup: func(m *mockRuntime) {
+				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateUnknown, errors.New("permission denied"))
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			rt := new(mockRuntime)
+			tt.setup(rt)
+			mgr := &Manager{rt: rt, bkDial: noopBkDial, health: _defaultHealthConfig}
+
+			state, err := mgr.Status(context.Background())
 			if tt.wantErr {
 				require.Error(t, err)
 				return
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantState, state)
+			rt.AssertExpectations(t)
 		})
 	}
+}
+
+func TestStart(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		setup   func(m *mockRuntime)
+		dial    func(ctx context.Context, addr string) (bool, error)
+		wantErr error
+	}{
+		{
+			name: "creates new container when none exists",
+			setup: func(m *mockRuntime) {
+				m.On("Type").Return(runtime.Docker)
+				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateUnknown, runtime.ErrContainerNotFound)
+				m.On("Run", mock.Anything, mock.AnythingOfType("runtime.RunConfig")).Return("container-id", nil)
+			},
+			dial: func(context.Context, string) (bool, error) { return true, nil },
+		},
+		{
+			name: "restarts exited container",
+			setup: func(m *mockRuntime) {
+				m.On("Type").Return(runtime.Docker)
+				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateExited, nil)
+				m.On("Start", mock.Anything, _containerName).Return(nil)
+			},
+			dial: func(context.Context, string) (bool, error) { return true, nil },
+		},
+		{
+			name: "already running skips create",
+			setup: func(m *mockRuntime) {
+				m.On("Type").Return(runtime.Docker)
+				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateRunning, nil)
+			},
+			dial: func(context.Context, string) (bool, error) { return true, nil },
+		},
+		{
+			name: "run failure returns ErrStartFailed",
+			setup: func(m *mockRuntime) {
+				m.On("Type").Return(runtime.Docker)
+				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateUnknown, runtime.ErrContainerNotFound)
+				m.On("Run", mock.Anything, mock.AnythingOfType("runtime.RunConfig")).Return("", errors.New("image not found"))
+			},
+			wantErr: ErrStartFailed,
+		},
+		{
+			name: "restart failure returns ErrStartFailed",
+			setup: func(m *mockRuntime) {
+				m.On("Type").Return(runtime.Docker)
+				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateExited, nil)
+				m.On("Start", mock.Anything, _containerName).Return(errors.New("cannot start"))
+			},
+			wantErr: ErrStartFailed,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			rt := new(mockRuntime)
+			tt.setup(rt)
+			dial := tt.dial
+			if dial == nil {
+				dial = noopBkDial
+			}
+			mgr := &Manager{rt: rt, bkDial: dial, health: _defaultHealthConfig}
+
+			addr, err := mgr.Start(context.Background())
+			if tt.wantErr != nil {
+				require.Error(t, err)
+				assert.ErrorIs(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, _defaultAddr, addr)
+			rt.AssertExpectations(t)
+		})
+	}
+}
+
+func TestWaitHealthy(t *testing.T) {
+	t.Parallel()
+
+	health := healthConfig{
+		timeout:     10 * time.Second,
+		interval:    1 * time.Second,
+		backoff:     2,
+		maxInterval: 4 * time.Second,
+	}
+
+	t.Run("succeeds on first probe", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			mgr := &Manager{
+				rt:     new(mockRuntime),
+				bkDial: func(context.Context, string) (bool, error) { return true, nil },
+				health: health,
+			}
+			require.NoError(t, mgr.waitHealthy(context.Background()))
+		})
+	})
+
+	t.Run("succeeds after retries with backoff", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			var calls atomic.Int32
+			mgr := &Manager{
+				rt: new(mockRuntime),
+				bkDial: func(context.Context, string) (bool, error) {
+					// Succeed on the 3rd attempt.
+					return calls.Add(1) >= 3, nil
+				},
+				health: health,
+			}
+			require.NoError(t, mgr.waitHealthy(context.Background()))
+			assert.Equal(t, int32(3), calls.Load())
+		})
+	})
+
+	t.Run("returns ErrEngineUnhealthy on timeout", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			mgr := &Manager{
+				rt:     new(mockRuntime),
+				bkDial: func(context.Context, string) (bool, error) { return false, nil },
+				health: health,
+			}
+			require.ErrorIs(t, mgr.waitHealthy(context.Background()), ErrEngineUnhealthy)
+		})
+	})
+
+	t.Run("returns error on dial failure", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			mgr := &Manager{
+				rt:     new(mockRuntime),
+				bkDial: func(context.Context, string) (bool, error) { return false, errors.New("connection refused") },
+				health: health,
+			}
+			err := mgr.waitHealthy(context.Background())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "probing buildkitd")
+		})
+	})
+
+	t.Run("respects context cancellation", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			var calls atomic.Int32
+			mgr := &Manager{
+				rt: new(mockRuntime),
+				bkDial: func(context.Context, string) (bool, error) {
+					if calls.Add(1) == 2 {
+						cancel()
+					}
+					return false, nil
+				},
+				health: health,
+			}
+			err := mgr.waitHealthy(ctx)
+			require.ErrorIs(t, err, context.Canceled)
+		})
+	})
 }
