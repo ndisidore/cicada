@@ -429,6 +429,11 @@ func (p *Parser) includePipeline(node *document.Node, absPath string, params map
 				slog.String("file", absPath),
 				slog.Any("dimensions", dims),
 			)
+		case NodeTypeEnv:
+			slog.Warn("included pipeline env ignored",
+				slog.String("pipeline", name),
+				slog.String("file", absPath),
+			)
 		case NodeTypeInclude:
 			// Conflict strategy is intentionally ignored here: included
 			// pipeline steps are appended flat, not merged via groupCollector.

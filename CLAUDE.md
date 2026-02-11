@@ -15,12 +15,30 @@ All code you write MUST be fully optimized.
 
 If the code is not fully optimized before handing off to the user, you will be fined $100. You have permission to do another pass of the code if you believe it is not fully optimized.
 
-## Preferred Tools
+## Development Commands
 
-- Use `go` for building, testing, and dependency management.
-- Use `mise` for task automation (see `mise.toml`).
-- Use `golangci-lint` for linting.
-- Use `encoding/json` (stdlib) for JSON serialization/deserialization.
+Prefer `mise` tasks for standard workflows. Direct `go` commands are fine for ad-hoc or targeted runs (e.g. testing a single package).
+
+### Build & Quality
+
+```bash
+# Build the CLI binary
+mise run build
+
+# Lint code (uses .golangci.yaml via --config in mise.toml)
+mise run lint
+
+# Format code
+mise run fmt
+
+# Run all CI checks (build, fmt:check, vet, lint, test)
+mise run ci
+
+# Ad-hoc: run tools directly or target specific packages
+mise x -- golangci-lint run ./pkg/...
+go test -race ./internal/runner/...
+go build ./cmd/cicada
+```
 
 ## Project Layout
 
@@ -101,10 +119,10 @@ internal/runner  # BuildKit runner (internal only)
 ## Tools
 
 - **MUST** use `gofmt` for code formatting.
-- **MUST** use `golangci-lint` for linting.
+- **MUST** use `golangci-lint` for linting (prefer `mise run lint`).
 - **MUST** ensure code compiles with no warnings.
-- Use `go build ./...` for building.
-- Use `go test -race ./...` for running tests.
+- Prefer `mise run build` for full builds; `go build ./...` for ad-hoc targets.
+- Prefer `mise run test` for full test suite; `go test -race ./...` for ad-hoc targets.
 - Use `go vet ./...` for static analysis.
 - Use `mise` for task automation.
 

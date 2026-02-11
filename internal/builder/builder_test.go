@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/client/llb/sourceresolver"
 	"github.com/moby/buildkit/solver/pb"
 	digest "github.com/opencontainers/go-digest"
@@ -55,6 +56,56 @@ func execMeta(t *testing.T, defBytes [][]byte) *pb.Meta {
 	}
 	t.Fatal("no ExecOp found in definition")
 	return nil
+}
+
+// lastExecMeta returns the Meta from the last ExecOp in the definition.
+// When a step has dependencies, its definition includes dependency ExecOps;
+// the step's own ExecOp is the last one in topological order.
+func lastExecMeta(t *testing.T, defBytes [][]byte) *pb.Meta {
+	t.Helper()
+	var last *pb.Meta
+	for _, raw := range defBytes {
+		var op pb.Op
+		require.NoError(t, op.UnmarshalVT(raw))
+		if exec := op.GetExec(); exec != nil {
+			last = exec.GetMeta()
+		}
+	}
+	require.NotNil(t, last, "no ExecOp found in definition")
+	return last
+}
+
+// lastExecMounts returns the mounts from the last ExecOp in the definition.
+func lastExecMounts(t *testing.T, defBytes [][]byte) []*pb.Mount {
+	t.Helper()
+	var last []*pb.Mount
+	for _, raw := range defBytes {
+		var op pb.Op
+		require.NoError(t, op.UnmarshalVT(raw))
+		if exec := op.GetExec(); exec != nil {
+			last = exec.GetMounts()
+		}
+	}
+	require.NotNil(t, last, "no ExecOp found in definition")
+	return last
+}
+
+// fileCopyActions returns all FileActionCopy ops found in the definition.
+func fileCopyActions(t *testing.T, defBytes [][]byte) []*pb.FileActionCopy {
+	t.Helper()
+	var copies []*pb.FileActionCopy
+	for _, raw := range defBytes {
+		var op pb.Op
+		require.NoError(t, op.UnmarshalVT(raw))
+		if fileOp := op.GetFile(); fileOp != nil {
+			for _, action := range fileOp.GetActions() {
+				if cp := action.GetCopy(); cp != nil {
+					copies = append(copies, cp)
+				}
+			}
+		}
+	}
+	return copies
 }
 
 func TestBuild(t *testing.T) {
@@ -313,6 +364,225 @@ func TestBuild(t *testing.T) {
 			},
 			wantErr: pipeline.ErrInvalidName,
 		},
+		{
+			name: "pipeline-level env vars applied",
+			p: pipeline.Pipeline{
+				Name: "env-test",
+				Env:  []pipeline.EnvVar{{Key: "CI", Value: "true"}},
+				Steps: []pipeline.Step{
+					{
+						Name:  "build",
+						Image: "alpine:latest",
+						Run:   []string{"echo hello"},
+					},
+				},
+			},
+			wantSteps: 1,
+			verify: func(t *testing.T, result Result) {
+				t.Helper()
+				meta := execMeta(t, result.Definitions[0].Def)
+				assert.Contains(t, meta.GetEnv(), "CI=true")
+			},
+		},
+		{
+			name: "step-level env vars override pipeline-level",
+			p: pipeline.Pipeline{
+				Name: "env-override",
+				Env:  []pipeline.EnvVar{{Key: "MODE", Value: "default"}},
+				Steps: []pipeline.Step{
+					{
+						Name:  "build",
+						Image: "alpine:latest",
+						Run:   []string{"echo hello"},
+						Env:   []pipeline.EnvVar{{Key: "MODE", Value: "custom"}},
+					},
+				},
+			},
+			wantSteps: 1,
+			verify: func(t *testing.T, result Result) {
+				t.Helper()
+				meta := execMeta(t, result.Definitions[0].Def)
+				assert.Contains(t, meta.GetEnv(), "MODE=custom")
+				assert.NotContains(t, meta.GetEnv(), "MODE=default")
+			},
+		},
+		{
+			name: "CICADA_OUTPUT always set",
+			p: pipeline.Pipeline{
+				Name: "output-test",
+				Steps: []pipeline.Step{
+					{
+						Name:  "build",
+						Image: "alpine:latest",
+						Run:   []string{"echo hello"},
+					},
+				},
+			},
+			wantSteps: 1,
+			verify: func(t *testing.T, result Result) {
+				t.Helper()
+				meta := execMeta(t, result.Definitions[0].Def)
+				assert.Contains(t, meta.GetEnv(), "CICADA_OUTPUT=/cicada/output")
+			},
+		},
+		{
+			name: "dependency output sourcing preamble added",
+			p: pipeline.Pipeline{
+				Name: "output-sourcing",
+				Steps: []pipeline.Step{
+					{
+						Name:  "version",
+						Image: "alpine:latest",
+						Run:   []string{"echo VERSION=1.0 >> $CICADA_OUTPUT"},
+					},
+					{
+						Name:      "build",
+						Image:     "alpine:latest",
+						DependsOn: []string{"version"},
+						Run:       []string{"echo $VERSION"},
+					},
+				},
+			},
+			wantSteps: 2,
+			verify: func(t *testing.T, result Result) {
+				t.Helper()
+				meta := lastExecMeta(t, result.Definitions[1].Def)
+				args := meta.GetArgs()
+				require.NotEmpty(t, args, "expected non-empty args")
+				assert.Contains(t, args[len(args)-1], "for __f in /cicada/deps/*/output")
+			},
+		},
+		{
+			name: "dep mounts use /cicada/deps/ by default",
+			p: pipeline.Pipeline{
+				Name: "dep-mounts",
+				Steps: []pipeline.Step{
+					{
+						Name:  "setup",
+						Image: "alpine:latest",
+						Run:   []string{"echo setup"},
+					},
+					{
+						Name:      "test",
+						Image:     "alpine:latest",
+						DependsOn: []string{"setup"},
+						Run:       []string{"echo test"},
+					},
+				},
+			},
+			wantSteps: 2,
+			verify: func(t *testing.T, result Result) {
+				t.Helper()
+				mounts := lastExecMounts(t, result.Definitions[1].Def)
+				var cicadaMount, legacyMount bool
+				for _, m := range mounts {
+					if m.GetDest() == "/cicada/deps/setup" {
+						cicadaMount = true
+					}
+					if m.GetDest() == "/deps/setup" {
+						legacyMount = true
+					}
+				}
+				assert.True(t, cicadaMount, "expected /cicada/deps/setup mount")
+				assert.False(t, legacyMount, "should not have /deps/setup mount without expose-deps")
+			},
+		},
+		{
+			name: "expose-deps adds legacy /deps/ mounts",
+			opts: BuildOpts{ExposeDeps: true},
+			p: pipeline.Pipeline{
+				Name: "legacy-deps",
+				Steps: []pipeline.Step{
+					{
+						Name:  "setup",
+						Image: "alpine:latest",
+						Run:   []string{"echo setup"},
+					},
+					{
+						Name:      "test",
+						Image:     "alpine:latest",
+						DependsOn: []string{"setup"},
+						Run:       []string{"echo test"},
+					},
+				},
+			},
+			wantSteps: 2,
+			verify: func(t *testing.T, result Result) {
+				t.Helper()
+				mounts := lastExecMounts(t, result.Definitions[1].Def)
+				var cicadaMount, legacyMount bool
+				for _, m := range mounts {
+					if m.GetDest() == "/cicada/deps/setup" {
+						cicadaMount = true
+					}
+					if m.GetDest() == "/deps/setup" {
+						legacyMount = true
+					}
+				}
+				assert.True(t, cicadaMount, "expected /cicada/deps/setup mount")
+				assert.True(t, legacyMount, "expected /deps/setup mount with expose-deps")
+			},
+		},
+		{
+			name: "artifact import copies from dependency",
+			p: pipeline.Pipeline{
+				Name: "artifact-test",
+				Steps: []pipeline.Step{
+					{
+						Name:  "build",
+						Image: "alpine:latest",
+						Run:   []string{"echo build"},
+					},
+					{
+						Name:      "test",
+						Image:     "alpine:latest",
+						DependsOn: []string{"build"},
+						Artifacts: []pipeline.Artifact{
+							{From: "build", Source: "/out/myapp", Target: "/usr/local/bin/myapp"},
+						},
+						Run: []string{"myapp --version"},
+					},
+				},
+			},
+			wantSteps: 2,
+			verify: func(t *testing.T, result Result) {
+				t.Helper()
+				copies := fileCopyActions(t, result.Definitions[1].Def)
+				require.NotEmpty(t, copies, "expected at least one FileActionCopy for artifact import")
+				found := false
+				for _, cp := range copies {
+					if cp.GetSrc() == "/out/myapp" && cp.GetDest() == "/usr/local/bin/myapp" {
+						found = true
+						break
+					}
+				}
+				assert.True(t, found, "expected Copy from /out/myapp to /usr/local/bin/myapp")
+			},
+		},
+		{
+			name: "step with export produces export definition",
+			p: pipeline.Pipeline{
+				Name: "export-test",
+				Steps: []pipeline.Step{
+					{
+						Name:  "build",
+						Image: "alpine:latest",
+						Run:   []string{"echo build"},
+						Exports: []pipeline.Export{
+							{Path: "/out/myapp", Local: "./bin/myapp"},
+						},
+					},
+				},
+			},
+			wantSteps: 1,
+			verify: func(t *testing.T, result Result) {
+				t.Helper()
+				require.Len(t, result.Exports, 1)
+				assert.Equal(t, "build", result.Exports[0].StepName)
+				assert.Equal(t, "./bin/myapp", result.Exports[0].Local)
+				assert.NotNil(t, result.Exports[0].Definition)
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -561,7 +831,7 @@ func TestBuildWithMetaResolver(t *testing.T) {
 				},
 			},
 			opts:    BuildOpts{MetaResolver: resolver},
-			wantEnv: []string{"PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "GOPATH=/go"},
+			wantEnv: []string{"PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "GOPATH=/go", "CICADA_OUTPUT=/cicada/output"},
 			wantCwd: "/go",
 		},
 		{
@@ -578,7 +848,7 @@ func TestBuildWithMetaResolver(t *testing.T) {
 				},
 			},
 			opts:    BuildOpts{MetaResolver: resolver},
-			wantEnv: []string{"PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "GOPATH=/go"},
+			wantEnv: []string{"PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "GOPATH=/go", "CICADA_OUTPUT=/cicada/output"},
 			wantCwd: "/src",
 		},
 		{
@@ -594,7 +864,7 @@ func TestBuildWithMetaResolver(t *testing.T) {
 				},
 			},
 			opts:    BuildOpts{},
-			wantEnv: nil,
+			wantEnv: []string{"CICADA_OUTPUT=/cicada/output"},
 			wantCwd: "/",
 		},
 	}
@@ -613,4 +883,103 @@ func TestBuildWithMetaResolver(t *testing.T) {
 			assert.Equal(t, tt.wantCwd, meta.GetCwd())
 		})
 	}
+}
+
+func TestBuildExportDef_invalidPaths(t *testing.T) {
+	t.Parallel()
+
+	st := llb.Image("alpine:latest")
+
+	tests := []struct {
+		name    string
+		path    string
+		wantErr string
+	}{
+		{name: "empty path", path: "", wantErr: "invalid export path"},
+		{name: "root path", path: "/", wantErr: "invalid export path"},
+		{name: "root with trailing slash", path: "///", wantErr: "invalid export path"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := buildExportDef(context.Background(), st, tt.path)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestBuildExportDef_fileExport(t *testing.T) {
+	t.Parallel()
+
+	st := llb.Image("alpine:latest").Run(llb.Args([]string{"touch", "/out/myapp"})).Root()
+	def, err := buildExportDef(context.Background(), st, "/out/myapp")
+	require.NoError(t, err)
+	require.NotNil(t, def)
+
+	meta := lastExecMeta(t, def.Def)
+	args := meta.GetArgs()
+	assert.Equal(t, []string{"cp", "-a", "/out/myapp", "/cicada/export/myapp"}, args)
+}
+
+func TestBuildExportDef_directoryExport(t *testing.T) {
+	t.Parallel()
+
+	st := llb.Image("alpine:latest").Run(llb.Args([]string{"mkdir", "-p", "/out/dist"})).Root()
+	def, err := buildExportDef(context.Background(), st, "/out/dist/")
+	require.NoError(t, err)
+	require.NotNil(t, def)
+
+	meta := lastExecMeta(t, def.Def)
+	args := meta.GetArgs()
+	assert.Equal(t, []string{"cp", "-a", "/out/dist/.", "/cicada/export/"}, args)
+}
+
+func TestBuild_directoryExportSetsDir(t *testing.T) {
+	t.Parallel()
+
+	p := pipeline.Pipeline{
+		Name: "dir-export-test",
+		Steps: []pipeline.Step{
+			{
+				Name:  "build",
+				Image: "alpine:latest",
+				Run:   []string{"mkdir -p /out/dist"},
+				Exports: []pipeline.Export{
+					{Path: "/out/dist/", Local: "./output/dist"},
+				},
+			},
+		},
+	}
+
+	result, err := Build(context.Background(), p, BuildOpts{})
+	require.NoError(t, err)
+	require.Len(t, result.Exports, 1)
+	assert.True(t, result.Exports[0].Dir, "directory export should have Dir=true")
+	assert.Equal(t, "./output/dist", result.Exports[0].Local)
+}
+
+func TestBuild_fileExportClearsDirFlag(t *testing.T) {
+	t.Parallel()
+
+	p := pipeline.Pipeline{
+		Name: "file-export-test",
+		Steps: []pipeline.Step{
+			{
+				Name:  "build",
+				Image: "alpine:latest",
+				Run:   []string{"echo build"},
+				Exports: []pipeline.Export{
+					{Path: "/out/myapp", Local: "./bin/myapp"},
+				},
+			},
+		},
+	}
+
+	result, err := Build(context.Background(), p, BuildOpts{})
+	require.NoError(t, err)
+	require.Len(t, result.Exports, 1)
+	assert.False(t, result.Exports[0].Dir, "file export should have Dir=false")
 }

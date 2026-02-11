@@ -42,6 +42,25 @@ var (
 	ErrPipelineNoParams = errors.New("pipeline does not accept parameters")
 )
 
+// Sentinel errors for env vars, exports, and artifacts.
+var (
+	ErrEmptyEnvKey            = errors.New("env key is empty")
+	ErrEmptyExportPath        = errors.New("export path is empty")
+	ErrDuplicateExport        = errors.New("duplicate export path")
+	ErrArtifactNoDep          = errors.New("artifact references step not in depends-on")
+	ErrDuplicateEnvKey        = errors.New("duplicate env key")
+	ErrDuplicateArtifact      = errors.New("duplicate artifact target path")
+	ErrRelativeExport         = errors.New("export path must be absolute")
+	ErrRelativeArtifact       = errors.New("artifact target must be absolute")
+	ErrRelativeArtifactSource = errors.New("artifact source must be absolute")
+	ErrEmptyArtifactFrom      = errors.New("artifact from is empty")
+	ErrEmptyArtifactSource    = errors.New("artifact source is empty")
+	ErrEmptyArtifactTarget    = errors.New("artifact target is empty")
+	ErrRootExport             = errors.New("export path must not be root")
+	ErrRootArtifact           = errors.New("artifact target must not be root")
+	ErrEmptyExportLocal       = errors.New("export local path is empty")
+)
+
 // ConflictStrategy determines behavior when step names collide during merge.
 type ConflictStrategy int
 
@@ -120,12 +139,32 @@ func (m Matrix) Combinations() ([]map[string]string, error) {
 	return combos, nil
 }
 
+// EnvVar represents a key-value environment variable.
+type EnvVar struct {
+	Key   string
+	Value string
+}
+
+// Export declares a container path that a step produces as output.
+type Export struct {
+	Path  string // absolute container path to export
+	Local string // host path for local export
+}
+
+// Artifact imports a file from a dependency step into this step's container.
+type Artifact struct {
+	From   string // dependency step name
+	Source string // path inside dependency container
+	Target string // absolute path inside this step's container
+}
+
 // Pipeline represents a CI/CD pipeline parsed from KDL.
 type Pipeline struct {
 	Name      string
 	Steps     []Step
-	Matrix    *Matrix // pipeline-level matrix; nil if not set
-	TopoOrder []int   // cached topological order from Validate; nil if not yet validated
+	Env       []EnvVar // pipeline-level env vars inherited by all steps
+	Matrix    *Matrix  // pipeline-level matrix; nil if not set
+	TopoOrder []int    // cached topological order from Validate; nil if not yet validated
 }
 
 // Step represents a single execution unit within a pipeline.
@@ -138,7 +177,10 @@ type Step struct {
 	DependsOn []string
 	Mounts    []Mount
 	Caches    []Cache
-	Matrix    *Matrix // step-level matrix; nil if not set
+	Env       []EnvVar   // step-level env vars (override pipeline-level)
+	Exports   []Export   // container paths this step produces
+	Artifacts []Artifact // files imported from dependency steps
+	Matrix    *Matrix    // step-level matrix; nil if not set
 }
 
 // Mount represents a bind mount from host to container.
@@ -160,6 +202,10 @@ type Cache struct {
 func (p *Pipeline) Validate() ([]int, error) {
 	if len(p.Steps) == 0 {
 		return nil, ErrEmptyPipeline
+	}
+
+	if err := validateEnvVars("pipeline", p.Env); err != nil {
+		return nil, err
 	}
 
 	g := stepGraph{
@@ -207,6 +253,94 @@ func validateStep(idx int, s *Step, g *stepGraph) error {
 		if strings.TrimSpace(cmd) == "" {
 			return fmt.Errorf("step %q: %w", s.Name, ErrMissingRun)
 		}
+	}
+	if err := validateEnvVars(fmt.Sprintf("step %q", s.Name), s.Env); err != nil {
+		return err
+	}
+	if err := validateExports(s.Name, s.Exports); err != nil {
+		return err
+	}
+	return validateArtifacts(s.Name, s.Artifacts, s.DependsOn)
+}
+
+// validateEnvVars checks env vars for empty keys and duplicates within a scope.
+func validateEnvVars(scope string, envs []EnvVar) error {
+	seen := make(map[string]struct{}, len(envs))
+	for _, e := range envs {
+		if e.Key == "" {
+			return fmt.Errorf("%s: %w", scope, ErrEmptyEnvKey)
+		}
+		if _, ok := seen[e.Key]; ok {
+			return fmt.Errorf("%s: env %q: %w", scope, e.Key, ErrDuplicateEnvKey)
+		}
+		seen[e.Key] = struct{}{}
+	}
+	return nil
+}
+
+// validateExports checks export paths are non-empty, absolute, not root, and
+// unique, and that Export.Local is present. Both file and directory paths
+// (trailing /) are valid. Export.Local format is intentionally not validated —
+// relative paths are resolved against the working directory at runtime by the
+// runner.
+func validateExports(stepName string, exports []Export) error {
+	seen := make(map[string]struct{}, len(exports))
+	for _, e := range exports {
+		if e.Path == "" {
+			return fmt.Errorf("step %q: %w", stepName, ErrEmptyExportPath)
+		}
+		if !strings.HasPrefix(e.Path, "/") {
+			return fmt.Errorf("step %q: export %q: %w", stepName, e.Path, ErrRelativeExport)
+		}
+		if strings.TrimRight(e.Path, "/") == "" {
+			return fmt.Errorf("step %q: export %q: %w", stepName, e.Path, ErrRootExport)
+		}
+		if e.Local == "" {
+			return fmt.Errorf("step %q: export %q: %w", stepName, e.Path, ErrEmptyExportLocal)
+		}
+		if _, ok := seen[e.Path]; ok {
+			return fmt.Errorf("step %q: export %q: %w", stepName, e.Path, ErrDuplicateExport)
+		}
+		seen[e.Path] = struct{}{}
+	}
+	return nil
+}
+
+// validateArtifacts checks artifact fields and that From references a dependency.
+//
+//revive:disable-next-line:cognitive-complexity validateArtifacts is a linear sequence of field checks; splitting it hurts readability.
+func validateArtifacts(stepName string, artifacts []Artifact, deps []string) error {
+	depSet := make(map[string]struct{}, len(deps))
+	for _, d := range deps {
+		depSet[d] = struct{}{}
+	}
+	targetSeen := make(map[string]struct{}, len(artifacts))
+	for _, a := range artifacts {
+		if a.From == "" {
+			return fmt.Errorf("step %q: %w", stepName, ErrEmptyArtifactFrom)
+		}
+		if a.Source == "" {
+			return fmt.Errorf("step %q: artifact from %q: %w", stepName, a.From, ErrEmptyArtifactSource)
+		}
+		if !strings.HasPrefix(a.Source, "/") {
+			return fmt.Errorf("step %q: artifact source %q: %w", stepName, a.Source, ErrRelativeArtifactSource)
+		}
+		if a.Target == "" {
+			return fmt.Errorf("step %q: artifact from %q: %w", stepName, a.From, ErrEmptyArtifactTarget)
+		}
+		if _, ok := depSet[a.From]; !ok {
+			return fmt.Errorf("step %q: artifact from %q: %w", stepName, a.From, ErrArtifactNoDep)
+		}
+		if !strings.HasPrefix(a.Target, "/") {
+			return fmt.Errorf("step %q: artifact target %q: %w", stepName, a.Target, ErrRelativeArtifact)
+		}
+		if strings.TrimRight(a.Target, "/") == "" {
+			return fmt.Errorf("step %q: artifact target %q: %w", stepName, a.Target, ErrRootArtifact)
+		}
+		if _, ok := targetSeen[a.Target]; ok {
+			return fmt.Errorf("step %q: artifact target %q: %w", stepName, a.Target, ErrDuplicateArtifact)
+		}
+		targetSeen[a.Target] = struct{}{}
 	}
 	return nil
 }

@@ -50,6 +50,7 @@ func expandPipeline(p Pipeline) (Pipeline, error) {
 	}
 	expanded := Pipeline{
 		Name:  p.Name,
+		Env:   p.Env,
 		Steps: make([]Step, 0, len(p.Steps)*len(combos)),
 	}
 
@@ -58,6 +59,7 @@ func expandPipeline(p Pipeline) (Pipeline, error) {
 			step := replicateStep(&p.Steps[i], combo)
 			step.Name = expandedStepName(p.Steps[i].Name, combo)
 			step.DependsOn = correlateDeps(p.Steps[i].DependsOn, combo)
+			correlateArtifactFroms(step.Artifacts, combo)
 			for j := range step.Caches {
 				step.Caches[j].ID = matrixCacheID(step.Caches[j].ID, step.Name)
 			}
@@ -114,12 +116,15 @@ func expandSteps(p Pipeline) (Pipeline, error) {
 	}
 
 	// Rewrite dependencies: if B depends on matrix step A, B depends on ALL variants of A.
+	// Also rewrite Artifact.From references to match expanded step names.
 	for i := range expanded {
 		expanded[i].DependsOn = rewriteDeps(expanded[i].DependsOn, expansionMap)
+		rewriteArtifactFroms(expanded[i].Artifacts, expansionMap)
 	}
 
 	return Pipeline{
 		Name:  p.Name,
+		Env:   p.Env,
 		Steps: expanded,
 	}, nil
 }
@@ -270,4 +275,31 @@ func rewriteDeps(deps []string, expansionMap map[string][]string) []string {
 		}
 		return []string{dep}
 	})
+}
+
+// correlateArtifactFroms rewrites Artifact.From fields to their correlated
+// (same-replica) names during pipeline-level matrix expansion.
+func correlateArtifactFroms(artifacts []Artifact, combo map[string]string) {
+	for i := range artifacts {
+		if artifacts[i].From == "" {
+			continue
+		}
+		artifacts[i].From = expandedStepName(artifacts[i].From, combo)
+	}
+}
+
+// rewriteArtifactFroms rewrites Artifact.From fields to match expanded step
+// names during step-level matrix expansion. Unlike deps (which fan out to all
+// variants), artifacts keep a 1:1 mapping. If From resolves to exactly one
+// variant, it is rewritten; otherwise it is left as-is (validation will catch
+// any issues).
+func rewriteArtifactFroms(artifacts []Artifact, expansionMap map[string][]string) {
+	for i := range artifacts {
+		if artifacts[i].From == "" {
+			continue
+		}
+		if variants, ok := expansionMap[artifacts[i].From]; ok && len(variants) == 1 {
+			artifacts[i].From = variants[0]
+		}
+	}
 }
