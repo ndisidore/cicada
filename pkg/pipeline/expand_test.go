@@ -566,7 +566,7 @@ func TestSubstituteVars(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := substituteVars(tt.input, tt.combo)
+			got := substituteVars(tt.input, tt.combo, "matrix.")
 			assert.Equal(t, tt.want, got)
 		})
 	}

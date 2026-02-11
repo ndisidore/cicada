@@ -1,0 +1,33 @@
+// Demonstrates modular pipeline composition using includes.
+//
+// - ./fragments/lint.kdl provides a single "lint" step
+// - ./fragments/go-test.kdl provides "unit-test" and "integration-test" steps
+//   with parameterized Go version and coverage threshold
+//
+// The "build" step depends on both includes via their aliases.
+// depends-on "lint"  -> resolves to the "lint" terminal step
+// depends-on "tests" -> resolves to the "integration-test" terminal step
+//   (unit-test is not terminal because integration-test depends on it)
+
+pipeline "ci" {
+    matrix {
+        platform "linux/amd64" "linux/arm64"
+    }
+
+    include "./fragments/lint.kdl"
+
+    include "./fragments/go-test.kdl" as="tests" {
+        go-version "1.25"
+        coverage-threshold "80"
+    }
+
+    step "build" {
+        depends-on "lint"
+        depends-on "tests"
+        image "golang:1.25"
+        platform "${matrix.platform}"
+        mount "." "/src"
+        workdir "/src"
+        run "go build -o /out/app ./cmd/app"
+    }
+}

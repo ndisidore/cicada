@@ -15,7 +15,15 @@ const (
 	NodeTypeWorkdir   NodeType = "workdir"
 	NodeTypeDependsOn NodeType = "depends-on"
 	NodeTypePlatform  NodeType = "platform"
+	NodeTypeInclude   NodeType = "include"
+	NodeTypeFragment  NodeType = "fragment"
+	NodeTypeParam     NodeType = "param"
 )
 
-// PropReadonly is the property key for mount read-only mode.
-const PropReadonly = "readonly"
+// Property keys.
+const (
+	PropReadonly   = "readonly"
+	PropOnConflict = "on-conflict"
+	PropDefault    = "default"
+	PropAs         = "as"
+)

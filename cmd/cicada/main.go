@@ -61,10 +61,11 @@ type app struct {
 }
 
 func main() {
+	p := &parser.Parser{Resolver: &parser.FileResolver{}}
 	a := &app{
 		engine:  daemon.NewManager(),
 		connect: defaultConnect,
-		parse:   parser.ParseFile,
+		parse:   p.ParseFile,
 		getwd:   os.Getwd,
 		stdout:  os.Stdout,
 		isTTY:   term.IsTerminal(int(os.Stdout.Fd())) && os.Getenv("CI") == "",

@@ -44,6 +44,7 @@ internal/runner  # BuildKit runner (internal only)
 - **CS-05**: Functions with >5 parameters **MUST** use an input struct.
 - **CS-06**: Underscore prefix for unexported package-level globals (e.g. `_defaultAddr`).
 - **CS-07**: **NEVER** use emoji, or unicode that emulates emoji (e.g. check marks, X marks). The only exception is when writing tests and testing the impact of multibyte characters.
+- **CS-08 (SHOULD)**: Prefer generics to eliminate duplicated logic across types; avoid when concrete types or interfaces are clearer.
 
 ## Logging & Observability (OBS)
 
@@ -66,6 +67,7 @@ internal/runner  # BuildKit runner (internal only)
 - **T-01**: **MUST** use table-driven tests with `t.Parallel()`.
 - **T-02**: **MUST** use `-race` flag when running tests.
 - **T-03 (SHOULD)** Avoid shared state between tests to enable parallel/race running.
+- **T-04 (SHOULD)**: Use [testing/synctest](https://pkg.go.dev/testing/synctest) when testing timing/concurrent code. Note: real network I/O requires fake implementations, and mutex-based synchronization has limitations.
 - **MUST** mock external dependencies (APIs, databases, file systems).
 - Follow the Arrange-Act-Assert pattern.
 - Do not commit commented-out tests.

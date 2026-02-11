@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
+	"path/filepath"
 	"strings"
 
 	kdl "github.com/sblinch/kdl-go"
@@ -24,37 +24,64 @@ var (
 	ErrDuplicateField    = errors.New("duplicate field")
 	ErrExtraArgs         = errors.New("too many arguments")
 	ErrTypeMismatch      = errors.New("argument type mismatch")
+	ErrUnknownProp       = errors.New("unknown property")
+	ErrAmbiguousFile     = errors.New("contains both pipeline and fragment nodes")
+	ErrEmptyInclude      = errors.New("no pipeline or fragment node found")
+	ErrNilResolver       = errors.New("Parser.Resolver is nil")
 )
 
+// Parser converts KDL documents into validated pipeline definitions.
+type Parser struct {
+	// Resolver opens include sources during parsing. Must be non-nil before
+	// calling ParseFile or ParseString.
+	Resolver Resolver
+}
+
 // ParseFile reads and parses a KDL pipeline file at the given path.
-func ParseFile(path string) (p pipeline.Pipeline, err error) {
-	f, err := os.Open(path)
+func (p *Parser) ParseFile(path string) (pipeline.Pipeline, error) {
+	if p.Resolver == nil {
+		return pipeline.Pipeline{}, ErrNilResolver
+	}
+	rc, resolved, err := p.Resolver.Resolve(path, "")
 	if err != nil {
 		return pipeline.Pipeline{}, fmt.Errorf("opening %s: %w", path, err)
 	}
-	defer func() {
-		if cerr := f.Close(); cerr != nil && err == nil {
-			err = fmt.Errorf("closing %s: %w", path, cerr)
-		}
-	}()
+	defer func() { _ = rc.Close() }()
 
-	return Parse(f, path)
+	return p.parse(rc, resolved)
 }
 
-// Parse parses KDL content from the reader into a Pipeline.
-func Parse(r io.Reader, filename string) (pipeline.Pipeline, error) {
-	doc, err := kdl.Parse(r)
+// _syntheticFilename identifies in-memory content for dirOf fallback.
+const _syntheticFilename = "<string>"
+
+// ParseString parses KDL content from a string into a Pipeline.
+// Includes are resolved relative to the current working directory.
+func (p *Parser) ParseString(content string) (pipeline.Pipeline, error) {
+	return p.parse(strings.NewReader(content), _syntheticFilename)
+}
+
+// parse is the core parse entry: detects top-level pipeline node and delegates.
+func (p *Parser) parse(r io.Reader, filename string) (pipeline.Pipeline, error) {
+	if p.Resolver == nil {
+		return pipeline.Pipeline{}, ErrNilResolver
+	}
+	doc, err := parseKDL(r, filename)
 	if err != nil {
-		return pipeline.Pipeline{}, fmt.Errorf("parsing %s: %w", filename, err)
+		return pipeline.Pipeline{}, err
 	}
 
 	var pipelineNode *document.Node
 	for _, node := range doc.Nodes {
-		if NodeType(node.Name.ValueString()) == NodeTypePipeline {
+		switch nt := NodeType(node.Name.ValueString()); nt {
+		case NodeTypePipeline:
 			if pipelineNode != nil {
 				return pipeline.Pipeline{}, fmt.Errorf("%s: %w", filename, ErrMultiplePipelines)
 			}
 			pipelineNode = node
+		default:
+			return pipeline.Pipeline{}, fmt.Errorf(
+				"%s: %w: %q (expected pipeline)", filename, ErrUnknownNode, string(nt),
+			)
 		}
 	}
 
@@ -62,15 +89,11 @@ func Parse(r io.Reader, filename string) (pipeline.Pipeline, error) {
 		return pipeline.Pipeline{}, fmt.Errorf("%s: %w", filename, ErrNoPipeline)
 	}
 
-	return parsePipeline(pipelineNode, filename)
+	return p.parsePipeline(pipelineNode, filename, newIncludeState())
 }
 
-// ParseString parses KDL content from a string into a Pipeline.
-func ParseString(content string) (pipeline.Pipeline, error) {
-	return Parse(strings.NewReader(content), "<string>")
-}
-
-func parsePipeline(node *document.Node, filename string) (pipeline.Pipeline, error) {
+// parsePipeline parses a pipeline node with include-aware child resolution.
+func (p *Parser) parsePipeline(node *document.Node, filename string, state *includeState) (pipeline.Pipeline, error) {
 	name, err := requireStringArg(node, filename, string(NodeTypePipeline))
 	if err != nil {
 		return pipeline.Pipeline{}, fmt.Errorf(
@@ -78,10 +101,8 @@ func parsePipeline(node *document.Node, filename string) (pipeline.Pipeline, err
 		)
 	}
 
-	p := pipeline.Pipeline{
-		Name:  name,
-		Steps: make([]pipeline.Step, 0, len(node.Children)),
-	}
+	gc := newGroupCollector(filename)
+	var mat *pipeline.Matrix
 
 	for _, child := range node.Children {
 		switch nt := NodeType(child.Name.ValueString()); nt {
@@ -90,32 +111,76 @@ func parsePipeline(node *document.Node, filename string) (pipeline.Pipeline, err
 			if err != nil {
 				return pipeline.Pipeline{}, err
 			}
-			p.Steps = append(p.Steps, step)
+			gc.addStep(step)
+
 		case NodeTypeMatrix:
 			m, err := parseMatrix(child, filename, "pipeline")
 			if err != nil {
 				return pipeline.Pipeline{}, err
 			}
-			if err := setOnce(&p.Matrix, &m, filename, "pipeline", string(NodeTypeMatrix)); err != nil {
+			if err := setOnce(&mat, &m, filename, "pipeline", string(NodeTypeMatrix)); err != nil {
 				return pipeline.Pipeline{}, err
 			}
+
+		case NodeTypeInclude:
+			steps, inc, err := p.resolveChildInclude(child, filename, state)
+			if err != nil {
+				return pipeline.Pipeline{}, err
+			}
+			gc.addInclude(steps, inc)
+
 		default:
 			return pipeline.Pipeline{}, fmt.Errorf(
-				"%s: %w: %q (expected step or matrix)", filename, ErrUnknownNode, string(nt),
+				"%s: %w: %q (expected step, matrix, or include)", filename, ErrUnknownNode, string(nt),
 			)
 		}
 	}
 
-	p, err = pipeline.Expand(p)
+	merged, err := gc.merge()
 	if err != nil {
 		return pipeline.Pipeline{}, fmt.Errorf("%s: %w", filename, err)
 	}
 
-	if _, err := p.Validate(); err != nil {
+	return finalizePipeline(name, merged, mat, state.aliases, filename)
+}
+
+// finalizePipeline expands aliases, applies matrix expansion, and validates.
+func finalizePipeline(name string, steps []pipeline.Step, mat *pipeline.Matrix, aliases map[string][]string, filename string) (pipeline.Pipeline, error) {
+	steps, err := pipeline.ExpandAliases(steps, aliases)
+	if err != nil {
 		return pipeline.Pipeline{}, fmt.Errorf("%s: %w", filename, err)
 	}
 
-	return p, nil
+	pl := pipeline.Pipeline{Name: name, Steps: steps, Matrix: mat}
+	pl, err = pipeline.Expand(pl)
+	if err != nil {
+		return pipeline.Pipeline{}, fmt.Errorf("%s: %w", filename, err)
+	}
+
+	if _, err := pl.Validate(); err != nil {
+		return pipeline.Pipeline{}, fmt.Errorf("%s: %w", filename, err)
+	}
+	return pl, nil
+}
+
+// --- KDL helpers (unchanged logic, extracted for reuse) ---
+
+// parseKDL wraps kdl.Parse with a filename context on errors.
+func parseKDL(r io.Reader, filename string) (*document.Document, error) {
+	doc, err := kdl.Parse(r)
+	if err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", filename, err)
+	}
+	return doc, nil
+}
+
+// dirOf returns the directory portion of a file path, suitable for resolving
+// relative includes. For synthetic filenames, returns ".".
+func dirOf(filename string) string {
+	if filename == _syntheticFilename {
+		return "."
+	}
+	return filepath.Dir(filename)
 }
 
 func parseStep(node *document.Node, filename string) (pipeline.Step, error) {

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"sort"
 	"strings"
 )
 
@@ -190,22 +189,7 @@ func checkDimCollisions(pm *Matrix, steps []Step) error {
 // Cache IDs are copied verbatim (including any namespace prefix from phase 1);
 // callers re-namespace IDs via matrixCacheID after replication.
 func replicateStep(s *Step, combo map[string]string) Step {
-	sub := func(v string) string { return substituteVars(v, combo) }
-	cp := Step{
-		Name:      s.Name,
-		Image:     sub(s.Image),
-		Workdir:   sub(s.Workdir),
-		Platform:  sub(s.Platform),
-		Matrix:    s.Matrix,
-		Run:       mapSlice(s.Run, sub),
-		DependsOn: mapSlice(s.DependsOn, func(d string) string { return d }),
-		Mounts: mapSlice(s.Mounts, func(m Mount) Mount {
-			return Mount{Source: sub(m.Source), Target: sub(m.Target), ReadOnly: m.ReadOnly}
-		}),
-		Caches: mapSlice(s.Caches, func(c Cache) Cache {
-			return Cache{ID: sub(c.ID), Target: sub(c.Target)}
-		}),
-	}
+	cp := substituteStepVars(*s, combo, "matrix.")
 	return cp
 }
 
@@ -238,7 +222,7 @@ func expandedStepName(base string, combo map[string]string) string {
 	for k := range existing {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 
 	var b strings.Builder
 	_, _ = fmt.Fprintf(&b, "%s[", name)
@@ -252,15 +236,15 @@ func expandedStepName(base string, combo map[string]string) string {
 	return b.String()
 }
 
-// substituteVars replaces all ${matrix.key} placeholders with their values
-// in a single pass to avoid chain-substitution when values contain placeholders.
-func substituteVars(s string, combo map[string]string) string {
+// substituteVars replaces ${<prefix>key} placeholders with their values in a
+// single pass to avoid chain-substitution when values contain placeholders.
+func substituteVars(s string, combo map[string]string, prefix string) string {
 	if len(combo) == 0 {
 		return s
 	}
 	pairs := make([]string, 0, len(combo)*2)
 	for k, v := range combo {
-		pairs = append(pairs, "${matrix."+k+"}", v)
+		pairs = append(pairs, "${"+prefix+k+"}", v)
 	}
 	return strings.NewReplacer(pairs...).Replace(s)
 }

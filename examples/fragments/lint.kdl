@@ -1,0 +1,8 @@
+fragment "lint" {
+    step "lint" {
+        image "golangci/golangci-lint:latest"
+        mount "." "/src"
+        workdir "/src"
+        run "golangci-lint run ./..."
+    }
+}

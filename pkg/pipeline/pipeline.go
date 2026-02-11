@@ -29,6 +29,42 @@ var (
 	ErrMatrixTooLarge = errors.New("matrix produces too many combinations")
 )
 
+// Sentinel errors for modular configuration (includes, fragments, params).
+var (
+	ErrCircularInclude  = errors.New("circular include detected")
+	ErrIncludeDepth     = errors.New("include depth limit exceeded")
+	ErrMissingParam     = errors.New("missing required parameter")
+	ErrUnknownParam     = errors.New("unknown parameter")
+	ErrDuplicateParam   = errors.New("duplicate parameter name")
+	ErrDuplicateAlias   = errors.New("duplicate include alias")
+	ErrAliasCollision   = errors.New("alias collides with step name")
+	ErrInvalidConflict  = errors.New("invalid on-conflict value")
+	ErrPipelineNoParams = errors.New("pipeline does not accept parameters")
+)
+
+// ConflictStrategy determines behavior when step names collide during merge.
+type ConflictStrategy int
+
+// ConflictStrategy values.
+const (
+	ConflictError ConflictStrategy = iota
+	ConflictSkip
+)
+
+// ParamDef defines a parameter accepted by a fragment.
+type ParamDef struct {
+	Name     string
+	Default  string
+	Required bool
+}
+
+// Fragment is a reusable collection of steps with optional parameters.
+type Fragment struct {
+	Name   string
+	Params []ParamDef
+	Steps  []Step
+}
+
 // _validName matches step names: alphanumeric base with an optional bracket
 // suffix for expanded matrix step names (e.g. "build[platform=linux/amd64]").
 // The bracket portion permits '/' and ':' for OCI platform specifiers; these

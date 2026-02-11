@@ -1,0 +1,20 @@
+fragment "go-test" {
+    param "go-version" default="1.24"
+    param "coverage-threshold"
+
+    step "unit-test" {
+        image "golang:${param.go-version}"
+        mount "." "/src"
+        workdir "/src"
+        run "go test -race -short ./..."
+    }
+
+    step "integration-test" {
+        depends-on "unit-test"
+        image "golang:${param.go-version}"
+        mount "." "/src"
+        workdir "/src"
+        run "go test -race -tags=integration -coverprofile=cover.out ./..."
+        run "go tool cover -func=cover.out | check-coverage ${param.coverage-threshold}"
+    }
+}
