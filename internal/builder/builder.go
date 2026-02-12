@@ -36,6 +36,8 @@ type Result struct {
 type BuildOpts struct {
 	// NoCache disables BuildKit cache for all operations when true.
 	NoCache bool
+	// NoCacheFilter selectively disables cache for specific steps by name.
+	NoCacheFilter map[string]struct{}
 	// ExcludePatterns are glob patterns to exclude from local context mounts.
 	ExcludePatterns []string
 	// MetaResolver resolves OCI image config (ENV, WORKDIR, platform) at build time.
@@ -51,6 +53,8 @@ type stepOpts struct {
 	excludePatterns []string
 	pipelineEnv     []pipeline.EnvVar
 	exposeDeps      bool
+	globalNoCache   bool
+	noCacheFilter   map[string]struct{}
 }
 
 // Build converts a pipeline to BuildKit LLB definitions.
@@ -69,6 +73,8 @@ func Build(ctx context.Context, p pipeline.Pipeline, opts BuildOpts) (Result, er
 		excludePatterns: opts.ExcludePatterns,
 		pipelineEnv:     p.Env,
 		exposeDeps:      opts.ExposeDeps,
+		globalNoCache:   opts.NoCache,
+		noCacheFilter:   opts.NoCacheFilter,
 	}
 	if opts.MetaResolver != nil {
 		so.imgOpts = append(so.imgOpts, llb.WithMetaResolver(opts.MetaResolver))
@@ -127,6 +133,23 @@ func validOrder(order []int, n int) bool {
 	return true
 }
 
+// stepCacheOpts returns per-step image and run options that disable caching
+// when the step is targeted by NoCacheFilter or has NoCache set. It
+// short-circuits when globalNoCache is already active to avoid redundant opts.
+func stepCacheOpts(step *pipeline.Step, opts stepOpts) ([]llb.ImageOption, []llb.RunOption) {
+	imgOpts := append([]llb.ImageOption(nil), opts.imgOpts...)
+	runOpts := append([]llb.RunOption(nil), opts.runOpts...)
+	if opts.globalNoCache {
+		return imgOpts, runOpts
+	}
+	_, filtered := opts.noCacheFilter[step.Name]
+	if filtered || step.NoCache {
+		imgOpts = append(imgOpts, llb.IgnoreCache)
+		runOpts = append(runOpts, llb.IgnoreCache)
+	}
+	return imgOpts, runOpts
+}
+
 //revive:disable-next-line:function-length,cognitive-complexity buildStep is a linear pipeline of LLB operations; splitting it further hurts readability.
 func buildStep(
 	ctx context.Context,
@@ -139,7 +162,8 @@ func buildStep(
 		return nil, llb.State{}, fmt.Errorf("step %q: %w", step.Name, pipeline.ErrMissingRun)
 	}
 
-	imgOpts := append([]llb.ImageOption(nil), opts.imgOpts...)
+	imgOpts, runOpts := stepCacheOpts(step, opts)
+
 	if step.Platform != "" {
 		plat, err := platforms.Parse(step.Platform)
 		if err != nil {
@@ -185,10 +209,10 @@ func buildStep(
 		cmd = preamble + cmd
 	}
 
-	runOpts := append([]llb.RunOption{
+	runOpts = append(runOpts,
 		llb.Args([]string{"/bin/sh", "-c", cmd}),
 		llb.WithCustomName(step.Name),
-	}, opts.runOpts...)
+	)
 
 	depMounts, err := depMountOpts(step, depStates, opts.exposeDeps)
 	if err != nil {

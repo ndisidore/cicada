@@ -12,10 +12,12 @@ import (
 
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb"
+	digest "github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/ndisidore/cicada/internal/builder"
+	"github.com/ndisidore/cicada/internal/cache"
 	"github.com/ndisidore/cicada/pkg/pipeline"
 )
 
@@ -864,5 +866,100 @@ func TestRun_exportErrorCancelsSiblings(t *testing.T) {
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "disk full")
+	})
+}
+
+func TestRun_cacheEntriesFlowToSolveOpt(t *testing.T) {
+	t.Parallel()
+
+	def, err := llb.Scratch().Marshal(context.Background())
+	require.NoError(t, err)
+
+	exports := []client.CacheOptionsEntry{{Type: "registry", Attrs: map[string]string{"ref": "ghcr.io/org/cache"}}}
+	imports := []client.CacheOptionsEntry{{Type: "local", Attrs: map[string]string{"src": "/tmp/cache"}}}
+
+	var capturedOpt atomic.Pointer[client.SolveOpt]
+	solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, opt client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+		capturedOpt.Store(&opt)
+		close(ch)
+		return &client.SolveResponse{}, nil
+	}}
+
+	err = Run(context.Background(), RunInput{
+		Solver:       solver,
+		Steps:        []Step{{Name: "build", Definition: def}},
+		Display:      &fakeDisplay{},
+		CacheExports: exports,
+		CacheImports: imports,
+	})
+	require.NoError(t, err)
+
+	opt := capturedOpt.Load()
+	require.NotNil(t, opt)
+	assert.Equal(t, exports, opt.CacheExports)
+	assert.Equal(t, imports, opt.CacheImports)
+}
+
+func TestTeeStatus_nilCollectorReturnsSource(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan *client.SolveStatus, 1)
+	result := teeStatus(context.Background(), ch, nil, "step")
+	// With nil collector, teeStatus returns the source channel directly.
+	assert.Equal(t, (<-chan *client.SolveStatus)(ch), result)
+}
+
+func TestTeeStatus_forwardsAndObserves(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	started := now.Add(-time.Second)
+	completed := now
+
+	collector := cache.NewCollector()
+	src := make(chan *client.SolveStatus, 2)
+	src <- &client.SolveStatus{
+		Vertexes: []*client.Vertex{
+			{Digest: digest.FromString("v1"), Name: "op1", Started: &started, Completed: &completed, Cached: true},
+		},
+	}
+	src <- &client.SolveStatus{
+		Vertexes: []*client.Vertex{
+			{Digest: digest.FromString("v2"), Name: "op2", Started: &started, Completed: &completed, Cached: false},
+		},
+	}
+	close(src)
+
+	out := teeStatus(context.Background(), src, collector, "build")
+
+	var received int
+	for range out {
+		received++
+	}
+	assert.Equal(t, 2, received)
+
+	r := collector.Report()
+	require.Len(t, r.Steps, 1)
+	assert.Equal(t, 2, r.Steps[0].TotalOps)
+	assert.Equal(t, 1, r.Steps[0].CachedOps)
+}
+
+func TestTeeStatus_contextCancellation(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		collector := cache.NewCollector()
+		src := make(chan *client.SolveStatus)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		out := teeStatus(ctx, src, collector, "step")
+
+		// Cancel; the tee goroutine exits the select loop and drains src.
+		cancel()
+		// Simulate the Solve goroutine closing src after context cancellation.
+		close(src)
+
+		// Drain out; should terminate within the synctest bubble.
+		for range out { //nolint:revive // drain remaining events
+		}
 	})
 }

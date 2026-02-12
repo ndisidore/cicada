@@ -21,6 +21,7 @@ const (
 	NodeTypeEnv       NodeType = "env"
 	NodeTypeExport    NodeType = "export"
 	NodeTypeArtifact  NodeType = "artifact"
+	NodeTypeNoCache   NodeType = "no-cache"
 )
 
 // Property keys.

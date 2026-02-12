@@ -181,6 +181,7 @@ type Step struct {
 	Exports   []Export   // container paths this step produces
 	Artifacts []Artifact // files imported from dependency steps
 	Matrix    *Matrix    // step-level matrix; nil if not set
+	NoCache   bool       // disable cache for this step
 }
 
 // Mount represents a bind mount from host to container.

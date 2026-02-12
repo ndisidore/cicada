@@ -56,7 +56,7 @@ internal/runner  # BuildKit runner (internal only)
 ## Code Style and Formatting (CS)
 
 - **CS-01**: **MUST** use `gofmt` for all formatting (tabs, not spaces).
-- **CS-02**: No name stutter. `pipeline.Pipeline` is fine; `pipeline.CicadaPipeline` is not.
+- **CS-02**: Lint-disable directives (`//revive:disable-next-line:<rulename(s)>`, `//nolint`) are acceptable when the fix would increase complexity (e.g. splitting a linear function solely to satisfy a complexity threshold). The directive MUST include a brief justification. Prefer refactoring over suppression in all other cases.
 - **CS-03**: **MUST** use meaningful, descriptive variable and function names.
 - **CS-04**: Follow [Effective Go](https://go.dev/doc/effective_go) and Go idioms.
 - **CS-05**: Functions with >5 parameters **MUST** use an input struct.
@@ -126,16 +126,6 @@ internal/runner  # BuildKit runner (internal only)
 - Use `go vet ./...` for static analysis.
 - Use `mise` for task automation.
 
-## Before Committing
-
-- [ ] All tests pass (`go test -race ./...`)
-- [ ] No compiler warnings (`go build ./...`)
-- [ ] Vet passes (`go vet ./...`)
-- [ ] Code is formatted (`gofmt`)
-- [ ] All exported items have doc comments
-- [ ] No commented-out code or debug statements
-- [ ] No hardcoded credentials
-
 ---
 
-**Remember:** Prioritize clarity and maintainability over cleverness.
+**Remember:** Prioritize clarity, readability and maintainability over cleverness.

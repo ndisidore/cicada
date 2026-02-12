@@ -17,6 +17,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/ndisidore/cicada/internal/builder"
+	"github.com/ndisidore/cicada/internal/cache"
 	"github.com/ndisidore/cicada/internal/daemon"
 	"github.com/ndisidore/cicada/internal/imagestore"
 	"github.com/ndisidore/cicada/internal/progress"
@@ -105,10 +106,11 @@ func main() {
 				Action:    a.validateAction,
 			},
 			{
-				Name:      "run",
-				Usage:     "run a KDL pipeline against BuildKit",
-				ArgsUsage: "<file>",
-				Before:    initEngine,
+				Name:               "run",
+				Usage:              "run a KDL pipeline against BuildKit",
+				ArgsUsage:          "<file>",
+				Before:             initEngine,
+				SliceFlagSeparator: ";",
 				Flags: append(buildkitFlags(),
 					&cli.BoolFlag{
 						Name:  "dry-run",
@@ -117,6 +119,10 @@ func main() {
 					&cli.BoolFlag{
 						Name:  "no-cache",
 						Usage: "disable BuildKit cache for all steps",
+					},
+					&cli.StringSliceFlag{
+						Name:  "no-cache-filter",
+						Usage: "disable cache for specific steps by name",
 					},
 					&cli.BoolFlag{
 						Name:  "offline",
@@ -135,6 +141,18 @@ func main() {
 					&cli.BoolFlag{
 						Name:  "expose-deps",
 						Usage: "mount full dependency root filesystems at /deps/{name}",
+					},
+					&cli.StringSliceFlag{
+						Name:  "cache-to",
+						Usage: "cache export destination (e.g. type=registry,ref=ghcr.io/user/cache)",
+					},
+					&cli.StringSliceFlag{
+						Name:  "cache-from",
+						Usage: "cache import source (e.g. type=registry,ref=ghcr.io/user/cache)",
+					},
+					&cli.BoolFlag{
+						Name:  "cache-stats",
+						Usage: "print cache hit/miss statistics after run",
 					},
 				),
 				Action: a.runAction,
@@ -237,6 +255,28 @@ func (a *app) validateAction(_ context.Context, cmd *cli.Command) error {
 	return nil
 }
 
+// buildNoCacheFilter converts CLI filter names into a set and warns about
+// names that don't match any pipeline step.
+func buildNoCacheFilter(ctx context.Context, filters []string, p pipeline.Pipeline) map[string]struct{} {
+	if len(filters) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(filters))
+	for _, name := range filters {
+		set[name] = struct{}{}
+	}
+	stepNames := make(map[string]struct{}, len(p.Steps))
+	for i := range p.Steps {
+		stepNames[p.Steps[i].Name] = struct{}{}
+	}
+	for name := range set {
+		if _, ok := stepNames[name]; !ok {
+			slog.WarnContext(ctx, "no-cache-filter: no step matches", slog.String("name", name))
+		}
+	}
+	return set
+}
+
 func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 	path := cmd.Args().First()
 	if path == "" {
@@ -262,8 +302,11 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("loading ignore patterns: %w", err)
 	}
 
+	noCacheFilter := buildNoCacheFilter(ctx, cmd.StringSlice("no-cache-filter"), p)
+
 	result, err := builder.Build(ctx, p, builder.BuildOpts{
 		NoCache:         cmd.Bool("no-cache"),
+		NoCacheFilter:   noCacheFilter,
 		ExcludePatterns: excludes,
 		MetaResolver:    imagemetaresolver.Default(),
 		ExposeDeps:      cmd.Bool("expose-deps"),
@@ -282,22 +325,45 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 		return nil
 	}
 
+	// Parse cache export/import specs.
+	cacheExports, err := cache.ParseSpecs(cmd.StringSlice("cache-to"))
+	if err != nil {
+		return fmt.Errorf("parsing --cache-to: %w", err)
+	}
+	cacheImports, err := cache.ParseSpecs(cmd.StringSlice("cache-from"))
+	if err != nil {
+		return fmt.Errorf("parsing --cache-from: %w", err)
+	}
+	cacheExports = cache.DetectGHA(cacheExports)
+	cacheImports = cache.DetectGHA(cacheImports)
+
+	var collector *cache.Collector
+	if cmd.Bool("cache-stats") {
+		collector = cache.NewCollector()
+	}
+
 	return a.executePipeline(ctx, cmd, pipelineRunParams{
-		path:    path,
-		pipe:    p,
-		steps:   steps,
-		exports: result.Exports,
-		cwd:     cwd,
+		path:           path,
+		pipe:           p,
+		steps:          steps,
+		exports:        result.Exports,
+		cwd:            cwd,
+		cacheExports:   cacheExports,
+		cacheImports:   cacheImports,
+		cacheCollector: collector,
 	})
 }
 
 // pipelineRunParams groups parameters for executePipeline.
 type pipelineRunParams struct {
-	path    string
-	pipe    pipeline.Pipeline
-	steps   []runner.Step
-	exports []builder.LocalExport
-	cwd     string
+	path           string
+	pipe           pipeline.Pipeline
+	steps          []runner.Step
+	exports        []builder.LocalExport
+	cwd            string
+	cacheExports   []bkclient.CacheOptionsEntry
+	cacheImports   []bkclient.CacheOptionsEntry
+	cacheCollector *cache.Collector
 }
 
 // executePipeline connects to BuildKit and runs the pipeline steps.
@@ -343,16 +409,29 @@ func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipe
 		return err
 	}
 
-	return runner.Run(ctx, runner.RunInput{
+	if err := runner.Run(ctx, runner.RunInput{
 		Solver: solver,
 		Steps:  params.steps,
 		LocalMounts: map[string]fsutil.FS{
 			"context": contextFS,
 		},
-		Display:     display,
-		Parallelism: parallelism,
-		Exports:     params.exports,
-	})
+		Display:        display,
+		Parallelism:    parallelism,
+		Exports:        params.exports,
+		CacheExports:   params.cacheExports,
+		CacheImports:   params.cacheImports,
+		CacheCollector: params.cacheCollector,
+	}); err != nil {
+		if params.cacheCollector != nil {
+			cache.PrintReport(a.stdout, params.cacheCollector.Report())
+		}
+		return fmt.Errorf("running pipeline: %w", err)
+	}
+
+	if params.cacheCollector != nil {
+		cache.PrintReport(a.stdout, params.cacheCollector.Report())
+	}
+	return nil
 }
 
 func (a *app) printDryRun(name string, steps []runner.Step) {
