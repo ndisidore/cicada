@@ -28,11 +28,11 @@ import (
 	"github.com/ndisidore/cicada/pkg/pipeline"
 )
 
-// errResultMismatch indicates builder.Result has mismatched Definitions and StepNames lengths.
-var errResultMismatch = errors.New("builder.Result: definitions/step-names length mismatch")
+// errResultMismatch indicates builder.Result has mismatched Definitions and JobNames lengths.
+var errResultMismatch = errors.New("builder.Result: definitions/job-names length mismatch")
 
-// errUnknownBuilderStep indicates a builder step name not found in the pipeline.
-var errUnknownBuilderStep = errors.New("builder step not found in pipeline")
+// errUnknownBuilderJob indicates a builder job name not found in the pipeline.
+var errUnknownBuilderJob = errors.New("builder job not found in pipeline")
 
 // errOfflineMissingImages indicates that offline mode was requested but some
 // pipeline images are not present in the BuildKit cache.
@@ -118,11 +118,11 @@ func main() {
 					},
 					&cli.BoolFlag{
 						Name:  "no-cache",
-						Usage: "disable BuildKit cache for all steps",
+						Usage: "disable BuildKit cache for all jobs",
 					},
 					&cli.StringSliceFlag{
 						Name:  "no-cache-filter",
-						Usage: "disable cache for specific steps by name",
+						Usage: "disable cache for specific jobs by name",
 					},
 					&cli.BoolFlag{
 						Name:  "offline",
@@ -135,7 +135,7 @@ func main() {
 					&cli.IntFlag{
 						Name:    "parallelism",
 						Aliases: []string{"j"},
-						Usage:   "max concurrent steps (0 = unlimited)",
+						Usage:   "max concurrent jobs (0 = unlimited)",
 						Value:   0,
 					},
 					&cli.BoolFlag{
@@ -144,11 +144,11 @@ func main() {
 					},
 					&cli.StringFlag{
 						Name:  "start-at",
-						Usage: "run from this step forward (includes downstream dependents)",
+						Usage: "run from this job (or job:step) forward",
 					},
 					&cli.StringFlag{
 						Name:  "stop-after",
-						Usage: "run up to and including this step (excludes downstream)",
+						Usage: "run up to and including this job (or job:step)",
 					},
 					&cli.StringSliceFlag{
 						Name:  "cache-to",
@@ -259,12 +259,12 @@ func (a *app) validateAction(_ context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("validating %s: %w", path, err)
 	}
 
-	a.printPipelineSummary(p.Name, p.Steps)
+	a.printPipelineSummary(p.Name, p.Jobs)
 	return nil
 }
 
 // buildNoCacheFilter converts CLI filter names into a set and warns about
-// names that don't match any pipeline step.
+// names that don't match any pipeline job.
 func buildNoCacheFilter(ctx context.Context, filters []string, p pipeline.Pipeline) map[string]struct{} {
 	if len(filters) == 0 {
 		return nil
@@ -273,13 +273,13 @@ func buildNoCacheFilter(ctx context.Context, filters []string, p pipeline.Pipeli
 	for _, name := range filters {
 		set[name] = struct{}{}
 	}
-	stepNames := make(map[string]struct{}, len(p.Steps))
-	for i := range p.Steps {
-		stepNames[p.Steps[i].Name] = struct{}{}
+	jobNames := make(map[string]struct{}, len(p.Jobs))
+	for i := range p.Jobs {
+		jobNames[p.Jobs[i].Name] = struct{}{}
 	}
 	for name := range set {
-		if _, ok := stepNames[name]; !ok {
-			slog.WarnContext(ctx, "no-cache-filter: no step matches", slog.String("name", name))
+		if _, ok := jobNames[name]; !ok {
+			slog.WarnContext(ctx, "no-cache-filter: no job matches", slog.String("name", name))
 		}
 	}
 	return set
@@ -304,9 +304,9 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 		StartAt:   cmd.String("start-at"),
 		StopAfter: cmd.String("stop-after"),
 	}
-	p.Steps, err = pipeline.FilterSteps(p.Steps, filterOpts)
+	p.Jobs, err = pipeline.FilterJobs(p.Jobs, filterOpts)
 	if err != nil {
-		return fmt.Errorf("filtering steps: %w", err)
+		return fmt.Errorf("filtering jobs: %w", err)
 	}
 	p.TopoOrder = nil
 
@@ -333,13 +333,13 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("building %s: %w", path, err)
 	}
 
-	steps, err := buildSteps(result, p)
+	jobs, err := buildRunnerJobs(result, p)
 	if err != nil {
 		return fmt.Errorf("converting build result: %w", err)
 	}
 
 	if cmd.Bool("dry-run") {
-		a.printDryRun(p.Name, steps)
+		a.printDryRun(p.Name, jobs)
 		return nil
 	}
 
@@ -363,7 +363,7 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 	return a.executePipeline(ctx, cmd, pipelineRunParams{
 		path:           path,
 		pipe:           p,
-		steps:          steps,
+		jobs:           jobs,
 		exports:        result.Exports,
 		cwd:            cwd,
 		cacheExports:   cacheExports,
@@ -376,7 +376,7 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 type pipelineRunParams struct {
 	path           string
 	pipe           pipeline.Pipeline
-	steps          []runner.Step
+	jobs           []runner.Job
 	exports        []builder.LocalExport
 	cwd            string
 	cacheExports   []bkclient.CacheOptionsEntry
@@ -384,7 +384,7 @@ type pipelineRunParams struct {
 	cacheCollector *cache.Collector
 }
 
-// executePipeline connects to BuildKit and runs the pipeline steps.
+// executePipeline connects to BuildKit and runs the pipeline jobs.
 func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipelineRunParams) error {
 	addr, err := a.resolveAddr(ctx, cmd)
 	if err != nil {
@@ -414,9 +414,9 @@ func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipe
 
 	parallelism := int(cmd.Int("parallelism"))
 
-	// Fall back to plain display when running steps in parallel (parallelism
+	// Fall back to plain display when running jobs in parallel (parallelism
 	// 0 = unlimited, >1 = bounded), since bubbletea cannot multiplex
-	// concurrent step displays.
+	// concurrent job displays.
 	progressMode := cmd.String("progress")
 	if parallelism != 1 && progressMode == "auto" && a.isTTY {
 		progressMode = "plain"
@@ -429,7 +429,7 @@ func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipe
 
 	if err := runner.Run(ctx, runner.RunInput{
 		Solver: solver,
-		Steps:  params.steps,
+		Jobs:   params.jobs,
 		LocalMounts: map[string]fsutil.FS{
 			"context": contextFS,
 		},
@@ -452,52 +452,52 @@ func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipe
 	return nil
 }
 
-func (a *app) printDryRun(name string, steps []runner.Step) {
+func (a *app) printDryRun(name string, jobs []runner.Job) {
 	_, _ = fmt.Fprintf(a.stdout, "Pipeline '%s' validated\n", name)
-	_, _ = fmt.Fprintf(a.stdout, "  Steps: %d\n", len(steps))
-	for _, step := range steps {
+	_, _ = fmt.Fprintf(a.stdout, "  Jobs: %d\n", len(jobs))
+	for _, j := range jobs {
 		ops := 0
-		if step.Definition != nil {
-			ops = len(step.Definition.Def)
+		if j.Definition != nil {
+			ops = len(j.Definition.Def)
 		}
-		if len(step.DependsOn) > 0 {
+		if len(j.DependsOn) > 0 {
 			_, _ = fmt.Fprintf(a.stdout, "    - %s (%d LLB ops, depends: %s)\n",
-				step.Name, ops, strings.Join(step.DependsOn, ", "))
+				j.Name, ops, strings.Join(j.DependsOn, ", "))
 		} else {
-			_, _ = fmt.Fprintf(a.stdout, "    - %s (%d LLB ops)\n", step.Name, ops)
+			_, _ = fmt.Fprintf(a.stdout, "    - %s (%d LLB ops)\n", j.Name, ops)
 		}
 	}
 }
 
-// buildSteps converts a builder.Result into a slice of runner.Step, carrying
-// dependency information from the pipeline. Dependencies are resolved by name
-// rather than positional index, so builder output ordering need not match
-// pipeline declaration order.
-func buildSteps(r builder.Result, p pipeline.Pipeline) ([]runner.Step, error) {
-	if len(r.Definitions) != len(r.StepNames) {
-		return nil, fmt.Errorf("%w: %d definitions, %d step names",
-			errResultMismatch, len(r.Definitions), len(r.StepNames))
+// buildRunnerJobs converts a builder.Result into a slice of runner.Job,
+// carrying dependency information from the pipeline. Dependencies are resolved
+// by name rather than positional index, so builder output ordering need not
+// match pipeline declaration order.
+func buildRunnerJobs(r builder.Result, p pipeline.Pipeline) ([]runner.Job, error) {
+	if len(r.Definitions) != len(r.JobNames) {
+		return nil, fmt.Errorf("%w: %d definitions, %d job names",
+			errResultMismatch, len(r.Definitions), len(r.JobNames))
 	}
 
-	// Index pipeline steps by name for name-based dependency lookup.
-	pipelineIdx := make(map[string][]string, len(p.Steps))
-	for i := range p.Steps {
-		pipelineIdx[p.Steps[i].Name] = p.Steps[i].DependsOn
+	// Index pipeline jobs by name for name-based dependency lookup.
+	pipelineIdx := make(map[string][]string, len(p.Jobs))
+	for i := range p.Jobs {
+		pipelineIdx[p.Jobs[i].Name] = p.Jobs[i].DependsOn
 	}
 
-	steps := make([]runner.Step, len(r.Definitions))
+	jobs := make([]runner.Job, len(r.Definitions))
 	for i := range r.Definitions {
-		deps, ok := pipelineIdx[r.StepNames[i]]
+		deps, ok := pipelineIdx[r.JobNames[i]]
 		if !ok {
-			return nil, fmt.Errorf("%w: %q", errUnknownBuilderStep, r.StepNames[i])
+			return nil, fmt.Errorf("%w: %q", errUnknownBuilderJob, r.JobNames[i])
 		}
-		steps[i] = runner.Step{
-			Name:       r.StepNames[i],
+		jobs[i] = runner.Job{
+			Name:       r.JobNames[i],
 			Definition: r.Definitions[i],
 			DependsOn:  deps,
 		}
 	}
-	return steps, nil
+	return jobs, nil
 }
 
 // resolveAddr returns the BuildKit daemon address, starting the daemon if needed.
@@ -607,15 +607,18 @@ func (a *app) engineStatusAction(ctx context.Context, _ *cli.Command) error {
 	return nil
 }
 
-func (a *app) printPipelineSummary(name string, steps []pipeline.Step) {
+func (a *app) printPipelineSummary(name string, jobs []pipeline.Job) {
 	_, _ = fmt.Fprintf(a.stdout, "Pipeline '%s' is valid\n", name)
-	_, _ = fmt.Fprintf(a.stdout, "  Steps: %d\n", len(steps))
-	for _, s := range steps {
-		if len(s.DependsOn) > 0 {
+	_, _ = fmt.Fprintf(a.stdout, "  Jobs: %d\n", len(jobs))
+	for _, j := range jobs {
+		if len(j.DependsOn) > 0 {
 			_, _ = fmt.Fprintf(a.stdout, "    - %s (image: %s, depends: %s)\n",
-				s.Name, s.Image, strings.Join(s.DependsOn, ", "))
+				j.Name, j.Image, strings.Join(j.DependsOn, ", "))
 		} else {
-			_, _ = fmt.Fprintf(a.stdout, "    - %s (image: %s)\n", s.Name, s.Image)
+			_, _ = fmt.Fprintf(a.stdout, "    - %s (image: %s)\n", j.Name, j.Image)
+		}
+		for _, s := range j.Steps {
+			_, _ = fmt.Fprintf(a.stdout, "      - %s\n", s.Name)
 		}
 	}
 }

@@ -82,7 +82,7 @@ internal/runner  # BuildKit runner (internal only)
 
 ## Testing (T)
 
-- **T-01**: **MUST** use table-driven tests with `t.Parallel()`.
+- **T-01**: **SHOULD** use table-driven tests with `t.Parallel()`. Where table-driven tests are not possible, use nested `t.Run`s (up to a depth of 4) grouped by concern.
 - **T-02**: **MUST** use `-race` flag when running tests.
 - **T-03 (SHOULD)** Avoid shared state between tests to enable parallel/race running.
 - **T-04 (SHOULD)**: Use [testing/synctest](https://pkg.go.dev/testing/synctest) when testing timing/concurrent code. Note: real network I/O requires fake implementations, and mutex-based synchronization has limitations.

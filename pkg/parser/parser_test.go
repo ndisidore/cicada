@@ -63,11 +63,11 @@ func TestParse(t *testing.T) {
 			}`,
 			want: pipeline.Pipeline{
 				Name: "hello",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "greet",
 						Image: "alpine:latest",
-						Run:   []string{"echo hello"},
+						Steps: []pipeline.Step{{Name: "greet", Run: []string{"echo hello"}}},
 					},
 				},
 				TopoOrder: []int{0},
@@ -88,17 +88,17 @@ func TestParse(t *testing.T) {
 			}`,
 			want: pipeline.Pipeline{
 				Name: "build",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "setup",
 						Image: "alpine:latest",
-						Run:   []string{"echo setup"},
+						Steps: []pipeline.Step{{Name: "setup", Run: []string{"echo setup"}}},
 					},
 					{
 						Name:      "test",
 						Image:     "golang:1.23",
 						DependsOn: []string{"setup"},
-						Run:       []string{"go test ./..."},
+						Steps:     []pipeline.Step{{Name: "test", Run: []string{"go test ./..."}}},
 					},
 				},
 				TopoOrder: []int{0, 1},
@@ -117,14 +117,14 @@ func TestParse(t *testing.T) {
 			}`,
 			want: pipeline.Pipeline{
 				Name: "full",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:    "build",
 						Image:   "rust:1.76",
 						Workdir: "/src",
-						Run:     []string{"cargo build"},
 						Mounts:  []pipeline.Mount{{Source: ".", Target: "/src"}},
 						Caches:  []pipeline.Cache{{ID: "cargo", Target: "/root/.cargo"}},
+						Steps:   []pipeline.Step{{Name: "build", Run: []string{"cargo build"}}},
 					},
 				},
 				TopoOrder: []int{0},
@@ -141,14 +141,14 @@ func TestParse(t *testing.T) {
 			}`,
 			want: pipeline.Pipeline{
 				Name: "ro",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "build",
 						Image: "rust:1.76",
-						Run:   []string{"cargo build"},
 						Mounts: []pipeline.Mount{
 							{Source: ".", Target: "/src", ReadOnly: true},
 						},
+						Steps: []pipeline.Step{{Name: "build", Run: []string{"cargo build"}}},
 					},
 				},
 				TopoOrder: []int{0},
@@ -176,11 +176,11 @@ func TestParse(t *testing.T) {
 			}`,
 			want: pipeline.Pipeline{
 				Name: "multi",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "info",
 						Image: "alpine:latest",
-						Run:   []string{"uname -a", "date"},
+						Steps: []pipeline.Step{{Name: "info", Run: []string{"uname -a", "date"}}},
 					},
 				},
 				TopoOrder: []int{0},
@@ -219,7 +219,7 @@ func TestParse(t *testing.T) {
 					run "echo 2"
 				}
 			}`,
-			wantErr: pipeline.ErrDuplicateStep,
+			wantErr: pipeline.ErrDuplicateJob,
 		},
 		{
 			name: "unknown dependency",
@@ -255,6 +255,19 @@ func TestParse(t *testing.T) {
 					image "alpine:latest"
 					run "echo hi"
 					foobar "wat"
+				}
+			}`,
+			wantErr: ErrUnknownNode,
+		},
+		{
+			name: "nested step in bare step",
+			input: `pipeline "bad" {
+				step "outer" {
+					image "alpine:latest"
+					run "echo outer"
+					step "inner" {
+						run "echo inner"
+					}
 				}
 			}`,
 			wantErr: ErrUnknownNode,
@@ -359,16 +372,16 @@ func TestParse(t *testing.T) {
 			}`,
 			want: pipeline.Pipeline{
 				Name: "ci",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "build[os=linux]",
 						Image: "golang:1.23",
-						Run:   []string{"GOOS=linux go build ./..."},
+						Steps: []pipeline.Step{{Name: "build", Run: []string{"GOOS=linux go build ./..."}}},
 					},
 					{
 						Name:  "build[os=darwin]",
 						Image: "golang:1.23",
-						Run:   []string{"GOOS=darwin go build ./..."},
+						Steps: []pipeline.Step{{Name: "build", Run: []string{"GOOS=darwin go build ./..."}}},
 					},
 				},
 				TopoOrder: []int{0, 1},
@@ -387,16 +400,16 @@ func TestParse(t *testing.T) {
 			}`,
 			want: pipeline.Pipeline{
 				Name: "test",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "test[go-version=1.21]",
 						Image: "golang:1.21",
-						Run:   []string{"go test ./..."},
+						Steps: []pipeline.Step{{Name: "test", Run: []string{"go test ./..."}}},
 					},
 					{
 						Name:  "test[go-version=1.22]",
 						Image: "golang:1.22",
-						Run:   []string{"go test ./..."},
+						Steps: []pipeline.Step{{Name: "test", Run: []string{"go test ./..."}}},
 					},
 				},
 				TopoOrder: []int{0, 1},
@@ -423,40 +436,40 @@ func TestParse(t *testing.T) {
 			}`,
 			want: pipeline.Pipeline{
 				Name: "ci",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "build[os=linux]",
 						Image: "golang:1.23",
-						Run:   []string{"GOOS=linux go build ./..."},
+						Steps: []pipeline.Step{{Name: "build", Run: []string{"GOOS=linux go build ./..."}}},
 					},
 					{
 						Name:      "test[go-version=1.21,os=linux]",
 						Image:     "golang:1.21",
-						Run:       []string{"GOOS=linux go test ./..."},
 						DependsOn: []string{"build[os=linux]"},
+						Steps:     []pipeline.Step{{Name: "test", Run: []string{"GOOS=linux go test ./..."}}},
 					},
 					{
 						Name:      "test[go-version=1.22,os=linux]",
 						Image:     "golang:1.22",
-						Run:       []string{"GOOS=linux go test ./..."},
 						DependsOn: []string{"build[os=linux]"},
+						Steps:     []pipeline.Step{{Name: "test", Run: []string{"GOOS=linux go test ./..."}}},
 					},
 					{
 						Name:  "build[os=darwin]",
 						Image: "golang:1.23",
-						Run:   []string{"GOOS=darwin go build ./..."},
+						Steps: []pipeline.Step{{Name: "build", Run: []string{"GOOS=darwin go build ./..."}}},
 					},
 					{
 						Name:      "test[go-version=1.21,os=darwin]",
 						Image:     "golang:1.21",
-						Run:       []string{"GOOS=darwin go test ./..."},
 						DependsOn: []string{"build[os=darwin]"},
+						Steps:     []pipeline.Step{{Name: "test", Run: []string{"GOOS=darwin go test ./..."}}},
 					},
 					{
 						Name:      "test[go-version=1.22,os=darwin]",
 						Image:     "golang:1.22",
-						Run:       []string{"GOOS=darwin go test ./..."},
 						DependsOn: []string{"build[os=darwin]"},
+						Steps:     []pipeline.Step{{Name: "test", Run: []string{"GOOS=darwin go test ./..."}}},
 					},
 				},
 				TopoOrder: []int{0, 1, 2, 3, 4, 5},
@@ -556,12 +569,12 @@ func TestParse(t *testing.T) {
 			}`,
 			want: pipeline.Pipeline{
 				Name: "plat",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:     "build",
 						Image:    "golang:1.23",
 						Platform: "linux/arm64",
-						Run:      []string{"go version"},
+						Steps:    []pipeline.Step{{Name: "build", Run: []string{"go version"}}},
 					},
 				},
 				TopoOrder: []int{0},
@@ -608,11 +621,11 @@ func TestParse(t *testing.T) {
 			want: pipeline.Pipeline{
 				Name: "ci",
 				Env:  []pipeline.EnvVar{{Key: "CI", Value: "true"}, {Key: "GOFLAGS", Value: "-mod=vendor"}},
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "build",
 						Image: "golang:1.23",
-						Run:   []string{"go build ./..."},
+						Steps: []pipeline.Step{{Name: "build", Run: []string{"go build ./..."}}},
 					},
 				},
 				TopoOrder: []int{0},
@@ -629,12 +642,12 @@ func TestParse(t *testing.T) {
 			}`,
 			want: pipeline.Pipeline{
 				Name: "ci",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "build",
 						Image: "golang:1.23",
 						Env:   []pipeline.EnvVar{{Key: "CGO_ENABLED", Value: "0"}},
-						Run:   []string{"go build ./..."},
+						Steps: []pipeline.Step{{Name: "build", Run: []string{"go build ./..."}}},
 					},
 				},
 				TopoOrder: []int{0},
@@ -673,12 +686,12 @@ func TestParse(t *testing.T) {
 			}`,
 			want: pipeline.Pipeline{
 				Name: "ci",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:    "build",
 						Image:   "golang:1.23",
-						Run:     []string{"go build -o /out/myapp ./..."},
 						Exports: []pipeline.Export{{Path: "/out/myapp", Local: "./bin/myapp"}},
+						Steps:   []pipeline.Step{{Name: "build", Run: []string{"go build -o /out/myapp ./..."}}},
 					},
 				},
 				TopoOrder: []int{0},
@@ -700,18 +713,18 @@ func TestParse(t *testing.T) {
 			}`,
 			want: pipeline.Pipeline{
 				Name: "ci",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "build",
 						Image: "golang:1.23",
-						Run:   []string{"go build -o /out/myapp ./..."},
+						Steps: []pipeline.Step{{Name: "build", Run: []string{"go build -o /out/myapp ./..."}}},
 					},
 					{
 						Name:      "deploy",
 						Image:     "alpine:latest",
 						DependsOn: []string{"build"},
 						Artifacts: []pipeline.Artifact{{From: "build", Source: "/out/myapp", Target: "/usr/local/bin/myapp"}},
-						Run:       []string{"echo deploying"},
+						Steps:     []pipeline.Step{{Name: "deploy", Run: []string{"echo deploying"}}},
 					},
 				},
 				TopoOrder: []int{0, 1},
@@ -781,12 +794,12 @@ func TestParse(t *testing.T) {
 			}`,
 			want: pipeline.Pipeline{
 				Name: "ci",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:    "test",
 						Image:   "golang:1.23",
-						Run:     []string{"go test ./..."},
 						NoCache: true,
+						Steps:   []pipeline.Step{{Name: "test", Run: []string{"go test ./..."}}},
 					},
 				},
 				TopoOrder: []int{0},
@@ -814,6 +827,79 @@ func TestParse(t *testing.T) {
 				}
 			}`,
 			wantErr: ErrExtraArgs,
+		},
+		{
+			name: "defaults with arguments rejected",
+			input: `pipeline "bad" {
+				defaults "extra" {
+					image "alpine:latest"
+				}
+				step "a" {
+					image "alpine:latest"
+					run "echo hi"
+				}
+			}`,
+			wantErr: ErrExtraArgs,
+		},
+		{
+			name: "defaults duplicate image rejected",
+			input: `pipeline "bad" {
+				defaults {
+					image "alpine:latest"
+					image "golang:1.23"
+				}
+				step "a" {
+					image "alpine:latest"
+					run "echo hi"
+				}
+			}`,
+			wantErr: ErrDuplicateField,
+		},
+		{
+			name: "defaults unknown child rejected",
+			input: `pipeline "bad" {
+				defaults {
+					image "alpine:latest"
+					bogus "value"
+				}
+				step "a" {
+					image "alpine:latest"
+					run "echo hi"
+				}
+			}`,
+			wantErr: ErrUnknownNode,
+		},
+		{
+			name: "multi-step job",
+			input: `pipeline "ci" {
+				job "quality" {
+					image "golang:1.23"
+					step "fmt" {
+						run "gofmt -l ."
+					}
+					step "vet" {
+						run "go vet ./..."
+					}
+					step "lint" {
+						run "golangci-lint run"
+					}
+				}
+			}`,
+			want: pipeline.Pipeline{
+				Name: "ci",
+				Jobs: []pipeline.Job{
+					{
+						Name:  "quality",
+						Image: "golang:1.23",
+						Steps: []pipeline.Step{
+							{Name: "fmt", Run: []string{"gofmt -l ."}},
+							{Name: "vet", Run: []string{"go vet ./..."}},
+							{Name: "lint", Run: []string{"golangci-lint run"}},
+						},
+					},
+				},
+				TopoOrder: []int{0},
+			},
 		},
 	}
 
@@ -866,17 +952,17 @@ func TestParseInclude(t *testing.T) {
 			entry: "/project/ci.kdl",
 			want: pipeline.Pipeline{
 				Name: "ci",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "lint",
 						Image: "golangci/golangci-lint:latest",
-						Run:   []string{"golangci-lint run"},
+						Steps: []pipeline.Step{{Name: "lint", Run: []string{"golangci-lint run"}}},
 					},
 					{
 						Name:      "build",
 						Image:     "golang:1.23",
 						DependsOn: []string{"lint"},
-						Run:       []string{"go build ./..."},
+						Steps:     []pipeline.Step{{Name: "build", Run: []string{"go build ./..."}}},
 					},
 				},
 				TopoOrder: []int{0, 1},
@@ -908,17 +994,17 @@ func TestParseInclude(t *testing.T) {
 			entry: "/project/ci.kdl",
 			want: pipeline.Pipeline{
 				Name: "ci",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "unit-test",
 						Image: "golang:1.23",
-						Run:   []string{"go test -coverprofile=cover.out ./..."},
+						Steps: []pipeline.Step{{Name: "unit-test", Run: []string{"go test -coverprofile=cover.out ./..."}}},
 					},
 					{
 						Name:      "check-coverage",
 						Image:     "golang:1.23",
 						DependsOn: []string{"unit-test"},
-						Run:       []string{"check-coverage 80"},
+						Steps:     []pipeline.Step{{Name: "check-coverage", Run: []string{"check-coverage 80"}}},
 					},
 				},
 				TopoOrder: []int{0, 1},
@@ -953,23 +1039,23 @@ func TestParseInclude(t *testing.T) {
 			entry: "/project/ci.kdl",
 			want: pipeline.Pipeline{
 				Name: "ci",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "unit-test",
 						Image: "golang:1.23",
-						Run:   []string{"go test -short ./..."},
+						Steps: []pipeline.Step{{Name: "unit-test", Run: []string{"go test -short ./..."}}},
 					},
 					{
 						Name:      "integration-test",
 						Image:     "golang:1.23",
 						DependsOn: []string{"unit-test"},
-						Run:       []string{"go test -tags=integration ./..."},
+						Steps:     []pipeline.Step{{Name: "integration-test", Run: []string{"go test -tags=integration ./..."}}},
 					},
 					{
 						Name:      "deploy",
 						Image:     "alpine:latest",
 						DependsOn: []string{"integration-test"},
-						Run:       []string{"echo deploy"},
+						Steps:     []pipeline.Step{{Name: "deploy", Run: []string{"echo deploy"}}},
 					},
 				},
 				TopoOrder: []int{0, 1, 2},
@@ -1004,22 +1090,22 @@ func TestParseInclude(t *testing.T) {
 			entry: "/project/ci.kdl",
 			want: pipeline.Pipeline{
 				Name: "ci",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "lint",
 						Image: "golangci/golangci-lint:latest",
-						Run:   []string{"golangci-lint run"},
+						Steps: []pipeline.Step{{Name: "lint", Run: []string{"golangci-lint run"}}},
 					},
 					{
 						Name:  "unit-test",
 						Image: "golang:1.23",
-						Run:   []string{"go test ./..."},
+						Steps: []pipeline.Step{{Name: "unit-test", Run: []string{"go test ./..."}}},
 					},
 					{
 						Name:      "deploy",
 						Image:     "alpine:latest",
 						DependsOn: []string{"lint", "unit-test"},
-						Run:       []string{"echo deploy"},
+						Steps:     []pipeline.Step{{Name: "deploy", Run: []string{"echo deploy"}}},
 					},
 				},
 				TopoOrder: []int{0, 1, 2},
@@ -1098,17 +1184,17 @@ func TestParseInclude(t *testing.T) {
 			entry: "/project/ci.kdl",
 			want: pipeline.Pipeline{
 				Name: "ci",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "s",
 						Image: "alpine:latest",
-						Run:   []string{"echo hello"},
+						Steps: []pipeline.Step{{Name: "s", Run: []string{"echo hello"}}},
 					},
 					{
 						Name:      "deploy",
 						Image:     "alpine:latest",
 						DependsOn: []string{"s"},
-						Run:       []string{"echo deploy"},
+						Steps:     []pipeline.Step{{Name: "deploy", Run: []string{"echo deploy"}}},
 					},
 				},
 				TopoOrder: []int{0, 1},
@@ -1161,16 +1247,16 @@ func TestParseInclude(t *testing.T) {
 			entry: "/project/ci.kdl",
 			want: pipeline.Pipeline{
 				Name: "ci",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "scan",
 						Image: "custom-scanner:latest",
-						Run:   []string{"custom-scan ."},
+						Steps: []pipeline.Step{{Name: "scan", Run: []string{"custom-scan ."}}},
 					},
 					{
 						Name:  "audit",
 						Image: "alpine:latest",
-						Run:   []string{"audit check"},
+						Steps: []pipeline.Step{{Name: "audit", Run: []string{"audit check"}}},
 					},
 				},
 				TopoOrder: []int{0, 1},
@@ -1194,7 +1280,7 @@ func TestParseInclude(t *testing.T) {
 				}`,
 			},
 			entry:   "/project/ci.kdl",
-			wantErr: pipeline.ErrDuplicateStep,
+			wantErr: pipeline.ErrDuplicateJob,
 		},
 		{
 			name: "param default used when not provided",
@@ -1213,11 +1299,11 @@ func TestParseInclude(t *testing.T) {
 			entry: "/project/ci.kdl",
 			want: pipeline.Pipeline{
 				Name: "ci",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "s",
 						Image: "golang:1.22",
-						Run:   []string{"go version"},
+						Steps: []pipeline.Step{{Name: "s", Run: []string{"go version"}}},
 					},
 				},
 				TopoOrder: []int{0},
@@ -1245,16 +1331,16 @@ func TestParseInclude(t *testing.T) {
 			entry: "/project/ci.kdl",
 			want: pipeline.Pipeline{
 				Name: "ci",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "test[os=linux]",
 						Image: "golang:1.23",
-						Run:   []string{"GOOS=linux go test ./..."},
+						Steps: []pipeline.Step{{Name: "test", Run: []string{"GOOS=linux go test ./..."}}},
 					},
 					{
 						Name:  "test[os=darwin]",
 						Image: "golang:1.23",
-						Run:   []string{"GOOS=darwin go test ./..."},
+						Steps: []pipeline.Step{{Name: "test", Run: []string{"GOOS=darwin go test ./..."}}},
 					},
 				},
 				TopoOrder: []int{0, 1},
@@ -1284,17 +1370,17 @@ func TestParseInclude(t *testing.T) {
 			entry: "/project/ci.kdl",
 			want: pipeline.Pipeline{
 				Name: "ci",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "scan",
 						Image: "trivy:latest",
-						Run:   []string{"trivy scan"},
+						Steps: []pipeline.Step{{Name: "scan", Run: []string{"trivy scan"}}},
 					},
 					{
 						Name:      "deploy",
 						Image:     "alpine:latest",
 						DependsOn: []string{"scan"},
-						Run:       []string{"echo deploy"},
+						Steps:     []pipeline.Step{{Name: "deploy", Run: []string{"echo deploy"}}},
 					},
 				},
 				TopoOrder: []int{0, 1},
@@ -1324,17 +1410,17 @@ func TestParseInclude(t *testing.T) {
 			entry: "/project/ci.kdl",
 			want: pipeline.Pipeline{
 				Name: "ci",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "b-step",
 						Image: "alpine:latest",
-						Run:   []string{"echo b"},
+						Steps: []pipeline.Step{{Name: "b-step", Run: []string{"echo b"}}},
 					},
 					{
 						Name:      "a-step",
 						Image:     "alpine:latest",
 						DependsOn: []string{"b-step"},
-						Run:       []string{"echo a"},
+						Steps:     []pipeline.Step{{Name: "a-step", Run: []string{"echo a"}}},
 					},
 				},
 				TopoOrder: []int{0, 1},
@@ -1419,17 +1505,17 @@ func TestParseInclude(t *testing.T) {
 			entry: "/project/ci.kdl",
 			want: pipeline.Pipeline{
 				Name: "ci",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "scan",
 						Image: "trivy:latest",
-						Run:   []string{"trivy scan"},
+						Steps: []pipeline.Step{{Name: "scan", Run: []string{"trivy scan"}}},
 					},
 					{
 						Name:      "deploy",
 						Image:     "alpine:latest",
 						DependsOn: []string{"scan"},
-						Run:       []string{"echo deploy"},
+						Steps:     []pipeline.Step{{Name: "deploy", Run: []string{"echo deploy"}}},
 					},
 				},
 				TopoOrder: []int{0, 1},
@@ -1456,17 +1542,17 @@ func TestParseInclude(t *testing.T) {
 			entry: "/project/ci.kdl",
 			want: pipeline.Pipeline{
 				Name: "ci",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "unit-test",
 						Image: "golang:1.23",
-						Run:   []string{"go test ./..."},
+						Steps: []pipeline.Step{{Name: "unit-test", Run: []string{"go test ./..."}}},
 					},
 					{
 						Name:      "deploy",
 						Image:     "alpine:latest",
 						DependsOn: []string{"unit-test"},
-						Run:       []string{"echo deploy"},
+						Steps:     []pipeline.Step{{Name: "deploy", Run: []string{"echo deploy"}}},
 					},
 				},
 				TopoOrder: []int{0, 1},

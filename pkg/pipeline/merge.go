@@ -2,84 +2,84 @@ package pipeline
 
 import "fmt"
 
-// StepGroup represents a collection of steps from a single source (inline or
+// JobGroup represents a collection of jobs from a single source (inline or
 // included file) along with the conflict resolution strategy to apply.
-type StepGroup struct {
-	Steps      []Step
+type JobGroup struct {
+	Jobs       []Job
 	Origin     string           // file path for error messages
 	OnConflict ConflictStrategy // how to handle name collisions with prior groups
 }
 
-// MergeSteps combines step groups in document order, applying per-group
-// conflict resolution. Steps from earlier groups take precedence when
+// MergeJobs combines job groups in document order, applying per-group
+// conflict resolution. Jobs from earlier groups take precedence when
 // on-conflict is ConflictSkip.
-func MergeSteps(groups []StepGroup) ([]Step, error) {
+func MergeJobs(groups []JobGroup) ([]Job, error) {
 	var n int
 	for i := range groups {
-		n += len(groups[i].Steps)
+		n += len(groups[i].Jobs)
 	}
 
-	merged := make([]Step, 0, n)
-	seen := make(map[string]string, n) // step name -> origin
+	merged := make([]Job, 0, n)
+	seen := make(map[string]string, n) // job name -> origin
 
 	for i := range groups {
 		g := &groups[i]
-		for j := range g.Steps {
-			name := g.Steps[j].Name
+		for j := range g.Jobs {
+			name := g.Jobs[j].Name
 			if origin, exists := seen[name]; exists {
 				switch g.OnConflict {
 				case ConflictSkip:
 					continue
 				default:
 					return nil, fmt.Errorf(
-						"step %q from %s conflicts with %s: %w",
-						name, g.Origin, origin, ErrDuplicateStep,
+						"job %q from %s conflicts with %s: %w",
+						name, g.Origin, origin, ErrDuplicateJob,
 					)
 				}
 			}
 			seen[name] = g.Origin
-			merged = append(merged, g.Steps[j])
+			merged = append(merged, g.Jobs[j])
 		}
 	}
 	return merged, nil
 }
 
-// TerminalSteps returns the names of steps that have no dependents within the
-// slice. A terminal step is one whose name does not appear in any other step's
+// TerminalJobs returns the names of jobs that have no dependents within the
+// slice. A terminal job is one whose name does not appear in any other job's
 // DependsOn list.
-func TerminalSteps(steps []Step) []string {
+func TerminalJobs(jobs []Job) []string {
 	depended := make(map[string]struct{})
-	for i := range steps {
-		for _, dep := range steps[i].DependsOn {
+	for i := range jobs {
+		for _, dep := range jobs[i].DependsOn {
 			depended[dep] = struct{}{}
 		}
 	}
 
 	var terminals []string
-	for i := range steps {
-		if _, ok := depended[steps[i].Name]; !ok {
-			terminals = append(terminals, steps[i].Name)
+	for i := range jobs {
+		if _, ok := depended[jobs[i].Name]; !ok {
+			terminals = append(terminals, jobs[i].Name)
 		}
 	}
 	return terminals
 }
 
 // ExpandAliases replaces alias references in DependsOn fields with the alias's
-// terminal step names. It returns an error if an alias name collides with a
-// step name in the merged pipeline.
-func ExpandAliases(steps []Step, aliases map[string][]string) ([]Step, error) {
+// terminal job names. It returns an error if an alias name collides with a
+// job name in the merged pipeline.
+func ExpandAliases(jobs []Job, aliases map[string][]string) ([]Job, error) {
 	if len(aliases) == 0 {
-		return steps, nil
+		return jobs, nil
 	}
 
-	// Validate: aliases must not collide with step names, unless the alias
-	// resolves to exactly itself (single-step fragment with matching name).
-	stepNames := make(map[string]struct{}, len(steps))
-	for i := range steps {
-		stepNames[steps[i].Name] = struct{}{}
+	// Validate: aliases must not collide with job names, unless the alias
+	// resolves to exactly itself (single-job fragment with matching name).
+	jobNames := make(map[string]struct{}, len(jobs))
+	for i := range jobs {
+		jobNames[jobs[i].Name] = struct{}{}
 	}
 	for alias, terminals := range aliases {
-		if _, ok := stepNames[alias]; ok {
+		if _, ok := jobNames[alias]; ok {
 			if len(terminals) == 1 && terminals[0] == alias {
 				continue // no-op alias, no collision
 			}
@@ -89,11 +89,11 @@ func ExpandAliases(steps []Step, aliases map[string][]string) ([]Step, error) {
 		}
 	}
 
-	result := make([]Step, len(steps))
-	for i := range steps {
-		result[i] = steps[i]
-		if len(steps[i].DependsOn) > 0 {
-			result[i].DependsOn = expandDeps(steps[i].DependsOn, aliases)
+	result := make([]Job, len(jobs))
+	for i := range jobs {
+		result[i] = jobs[i]
+		if len(jobs[i].DependsOn) > 0 {
+			result[i].DependsOn = expandDeps(jobs[i].DependsOn, aliases)
 		}
 	}
 	return result, nil

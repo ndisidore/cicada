@@ -17,18 +17,18 @@ import (
 // target host path for the local exporter.
 type LocalExport struct {
 	Definition *llb.Definition
-	StepName   string
+	JobName    string
 	Local      string // host path target
 	Dir        bool   // true when exporting a directory (trailing / on container path)
 }
 
-// Result holds the LLB definitions for a pipeline, one per step in topological order.
+// Result holds the LLB definitions for a pipeline, one per job in topological order.
 type Result struct {
-	// Definitions contains one LLB definition per step, ordered by dependency.
+	// Definitions contains one LLB definition per job, ordered by dependency.
 	Definitions []*llb.Definition
-	// StepNames maps each definition index to its step name.
-	StepNames []string
-	// Exports contains LLB definitions for steps with local export paths.
+	// JobNames maps each definition index to its job name.
+	JobNames []string
+	// Exports contains LLB definitions for jobs with local export paths.
 	Exports []LocalExport
 }
 
@@ -36,7 +36,7 @@ type Result struct {
 type BuildOpts struct {
 	// NoCache disables BuildKit cache for all operations when true.
 	NoCache bool
-	// NoCacheFilter selectively disables cache for specific steps by name.
+	// NoCacheFilter selectively disables cache for specific jobs by name.
 	NoCacheFilter map[string]struct{}
 	// ExcludePatterns are glob patterns to exclude from local context mounts.
 	ExcludePatterns []string
@@ -46,8 +46,8 @@ type BuildOpts struct {
 	ExposeDeps bool
 }
 
-// stepOpts holds pre-computed LLB options applied to every step.
-type stepOpts struct {
+// jobOpts holds pre-computed LLB options applied to every job.
+type jobOpts struct {
 	imgOpts         []llb.ImageOption
 	runOpts         []llb.RunOption
 	excludePatterns []string
@@ -61,7 +61,7 @@ type stepOpts struct {
 // It reuses a cached topological order when available, otherwise validates first.
 func Build(ctx context.Context, p pipeline.Pipeline, opts BuildOpts) (Result, error) {
 	order := p.TopoOrder
-	if !validOrder(order, len(p.Steps)) {
+	if !validOrder(order, len(p.Jobs)) {
 		var err error
 		order, err = p.Validate()
 		if err != nil {
@@ -69,7 +69,7 @@ func Build(ctx context.Context, p pipeline.Pipeline, opts BuildOpts) (Result, er
 		}
 	}
 
-	so := stepOpts{
+	jo := jobOpts{
 		excludePatterns: opts.ExcludePatterns,
 		pipelineEnv:     p.Env,
 		exposeDeps:      opts.ExposeDeps,
@@ -77,38 +77,39 @@ func Build(ctx context.Context, p pipeline.Pipeline, opts BuildOpts) (Result, er
 		noCacheFilter:   opts.NoCacheFilter,
 	}
 	if opts.MetaResolver != nil {
-		so.imgOpts = append(so.imgOpts, llb.WithMetaResolver(opts.MetaResolver))
+		jo.imgOpts = append(jo.imgOpts, llb.WithMetaResolver(opts.MetaResolver))
 	}
 	if opts.NoCache {
-		so.imgOpts = append(so.imgOpts, llb.IgnoreCache)
-		so.runOpts = append(so.runOpts, llb.IgnoreCache)
+		jo.imgOpts = append(jo.imgOpts, llb.IgnoreCache)
+		jo.runOpts = append(jo.runOpts, llb.IgnoreCache)
 	}
 
 	result := Result{
 		Definitions: make([]*llb.Definition, 0, len(order)),
-		StepNames:   make([]string, 0, len(order)),
+		JobNames:    make([]string, 0, len(order)),
 	}
 
 	states := make(map[string]llb.State, len(order))
 	for _, idx := range order {
-		step := &p.Steps[idx]
-		def, st, err := buildStep(ctx, step, states, so)
+		job := &p.Jobs[idx]
+		def, st, err := buildJob(ctx, job, states, jo)
 		if err != nil {
-			return Result{}, fmt.Errorf("building step %q: %w", step.Name, err)
+			return Result{}, fmt.Errorf("building job %q: %w", job.Name, err)
 		}
 		result.Definitions = append(result.Definitions, def)
-		result.StepNames = append(result.StepNames, step.Name)
-		states[step.Name] = st
+		result.JobNames = append(result.JobNames, job.Name)
+		states[job.Name] = st
 
-		// Build export definitions for steps with local exports.
-		for _, exp := range step.Exports {
+		// Collect exports from job-level and step-level, all from final state.
+		allExports := collectExports(job)
+		for _, exp := range allExports {
 			exportDef, err := buildExportDef(ctx, st, exp.Path)
 			if err != nil {
-				return Result{}, fmt.Errorf("building export for step %q: %w", step.Name, err)
+				return Result{}, fmt.Errorf("building export for job %q: %w", job.Name, err)
 			}
 			result.Exports = append(result.Exports, LocalExport{
 				Definition: exportDef,
-				StepName:   step.Name,
+				JobName:    job.Name,
 				Local:      exp.Local,
 				Dir:        strings.HasSuffix(exp.Path, "/"),
 			})
@@ -116,6 +117,23 @@ func Build(ctx context.Context, p pipeline.Pipeline, opts BuildOpts) (Result, er
 	}
 
 	return result, nil
+}
+
+// collectExports gathers all export declarations from a job (job-level + step-level).
+func collectExports(job *pipeline.Job) []pipeline.Export {
+	n := len(job.Exports)
+	for i := range job.Steps {
+		n += len(job.Steps[i].Exports)
+	}
+	if n == 0 {
+		return nil
+	}
+	exports := make([]pipeline.Export, 0, n)
+	exports = append(exports, job.Exports...)
+	for i := range job.Steps {
+		exports = append(exports, job.Steps[i].Exports...)
+	}
+	return exports
 }
 
 // validOrder checks that order is a complete, unique permutation of [0, n).
@@ -133,126 +151,177 @@ func validOrder(order []int, n int) bool {
 	return true
 }
 
-// stepCacheOpts returns per-step image and run options that disable caching
-// when the step is targeted by NoCacheFilter or has NoCache set. It
+// jobCacheOpts returns per-job image and run options that disable caching
+// when the job is targeted by NoCacheFilter or has NoCache set. It
 // short-circuits when globalNoCache is already active to avoid redundant opts.
-func stepCacheOpts(step *pipeline.Step, opts stepOpts) ([]llb.ImageOption, []llb.RunOption) {
+func jobCacheOpts(job *pipeline.Job, opts jobOpts) ([]llb.ImageOption, []llb.RunOption) {
 	imgOpts := append([]llb.ImageOption(nil), opts.imgOpts...)
 	runOpts := append([]llb.RunOption(nil), opts.runOpts...)
 	if opts.globalNoCache {
 		return imgOpts, runOpts
 	}
-	_, filtered := opts.noCacheFilter[step.Name]
-	if filtered || step.NoCache {
+	_, filtered := opts.noCacheFilter[job.Name]
+	if filtered || job.NoCache {
 		imgOpts = append(imgOpts, llb.IgnoreCache)
 		runOpts = append(runOpts, llb.IgnoreCache)
 	}
 	return imgOpts, runOpts
 }
 
-//revive:disable-next-line:function-length,cognitive-complexity buildStep is a linear pipeline of LLB operations; splitting it further hurts readability.
-func buildStep(
+// buildJob creates a single LLB definition for a job by chaining sequential
+// step Run operations. Each step produces a new ExecOp; .Root() returns the
+// output state for the next step.
+//
+//revive:disable-next-line:function-length,cognitive-complexity,cyclomatic buildJob is a linear pipeline of LLB operations; splitting it further hurts readability.
+func buildJob(
 	ctx context.Context,
-	step *pipeline.Step,
+	job *pipeline.Job,
 	depStates map[string]llb.State,
-	opts stepOpts,
+	opts jobOpts,
 ) (*llb.Definition, llb.State, error) {
-	cmd := strings.Join(step.Run, " && ")
-	if strings.TrimSpace(cmd) == "" {
-		return nil, llb.State{}, fmt.Errorf("step %q: %w", step.Name, pipeline.ErrMissingRun)
-	}
+	imgOpts, baseRunOpts := jobCacheOpts(job, opts)
 
-	imgOpts, runOpts := stepCacheOpts(step, opts)
-
-	if step.Platform != "" {
-		plat, err := platforms.Parse(step.Platform)
+	if job.Platform != "" {
+		plat, err := platforms.Parse(job.Platform)
 		if err != nil {
-			return nil, llb.State{}, fmt.Errorf("step %q: parsing platform %q: %w", step.Name, step.Platform, err)
+			return nil, llb.State{}, fmt.Errorf("job %q: parsing platform %q: %w", job.Name, job.Platform, err)
 		}
 		imgOpts = append(imgOpts, llb.Platform(plat))
 	}
-	st := llb.Image(step.Image, imgOpts...)
+	st := llb.Image(job.Image, imgOpts...)
 
-	if step.Workdir != "" {
-		st = st.Dir(step.Workdir)
+	if job.Workdir != "" {
+		st = st.Dir(job.Workdir)
 	}
 
-	// Apply env vars: pipeline-level first, then step-level (step overrides).
+	// Apply env vars: pipeline-level first, then job-level (job overrides).
 	for _, e := range opts.pipelineEnv {
 		st = st.AddEnv(e.Key, e.Value)
 	}
-	for _, e := range step.Env {
+	for _, e := range job.Env {
 		st = st.AddEnv(e.Key, e.Value)
 	}
 	st = st.File(llb.Mkdir("/cicada", 0o755))
-	// Set after user env vars so it cannot be overridden; the output sourcing
-	// preamble and dep mounts depend on this exact path.
+	// Set after user env vars so it cannot be overridden.
 	st = st.AddEnv("CICADA_OUTPUT", "/cicada/output")
 
-	// Import artifacts from dependency steps.
-	for _, art := range step.Artifacts {
+	// Import job-level artifacts from dependency jobs.
+	for _, art := range job.Artifacts {
 		depSt, ok := depStates[art.From]
 		if !ok {
 			return nil, llb.State{}, fmt.Errorf(
-				"step %q: missing dependency state for artifact from %q", step.Name, art.From,
+				"job %q: missing dependency state for artifact from %q", job.Name, art.From,
 			)
 		}
 		st = st.File(llb.Copy(depSt, art.Source, art.Target))
 	}
 
-	// For steps with dependencies, prepend output sourcing preamble so
-	// env vars exported by dependencies via $CICADA_OUTPUT are available.
-	// Dependency output files must contain valid shell KEY=VALUE pairs;
-	// malformed content will cause the source (.) command to fail.
-	if len(step.DependsOn) > 0 {
-		preamble := `for __f in /cicada/deps/*/output; do [ -f "$__f" ] && { set -a; . "$__f"; set +a; }; done` + "\n"
-		cmd = preamble + cmd
+	// Build dep output sourcing preamble (prepended to first step only).
+	var preamble string
+	if len(job.DependsOn) > 0 {
+		preamble = `for __f in /cicada/deps/*/output; do [ -f "$__f" ] && { set -a; . "$__f"; set +a; }; done` + "\n"
 	}
 
-	runOpts = append(runOpts,
-		llb.Args([]string{"/bin/sh", "-c", cmd}),
-		llb.WithCustomName(step.Name),
-	)
-
-	depMounts, err := depMountOpts(step, depStates, opts.exposeDeps)
+	// Build dep mount options (shared across all steps).
+	depMounts, err := depMountOpts(job, depStates, opts.exposeDeps)
 	if err != nil {
 		return nil, llb.State{}, err
 	}
-	runOpts = append(runOpts, depMounts...)
 
-	// All mounts share a single named local context ("context"). Each m.Source
-	// is a path within that shared context, not a distinct source directory.
+	// Build local context for bind mounts.
 	localOpts := []llb.LocalOption{llb.SharedKeyHint("context")}
 	if len(opts.excludePatterns) > 0 {
 		localOpts = append(localOpts, llb.ExcludePatterns(opts.excludePatterns))
 	}
 
-	for _, m := range step.Mounts {
+	// Pre-build job-level mount and cache run options (reused per step).
+	jobMountOpts := buildMountRunOpts(job.Mounts, job.Caches, localOpts)
+
+	// Execute steps sequentially, chaining state.
+	for i := range job.Steps {
+		step := &job.Steps[i]
+
+		// Step-level artifacts: insert Copy before this step's Run.
+		for _, art := range step.Artifacts {
+			depSt, ok := depStates[art.From]
+			if !ok {
+				return nil, llb.State{}, fmt.Errorf(
+					"job %q step %q: missing dependency state for artifact from %q",
+					job.Name, step.Name, art.From,
+				)
+			}
+			st = st.File(llb.Copy(depSt, art.Source, art.Target))
+		}
+
+		// Step workdir override.
+		if step.Workdir != "" {
+			st = st.Dir(step.Workdir)
+		}
+
+		// Step-scoped env (additive to job env already in state).
+		for _, e := range step.Env {
+			st = st.AddEnv(e.Key, e.Value)
+		}
+
+		cmd := strings.Join(step.Run, " && ")
+		if strings.TrimSpace(cmd) == "" {
+			return nil, llb.State{}, fmt.Errorf("job %q step %q: %w", job.Name, step.Name, pipeline.ErrMissingRun)
+		}
+		if i == 0 && preamble != "" {
+			cmd = preamble + cmd
+		}
+
+		runOpts := append([]llb.RunOption(nil), baseRunOpts...)
+		runOpts = append(runOpts,
+			llb.Args([]string{"/bin/sh", "-c", cmd}),
+			llb.WithCustomName(job.Name+"/"+step.Name),
+		)
+		runOpts = append(runOpts, depMounts...)
+		runOpts = append(runOpts, jobMountOpts...)
+
+		// Step-level mounts and caches.
+		runOpts = append(runOpts, buildMountRunOpts(step.Mounts, step.Caches, localOpts)...)
+
+		// Per-step no-cache (only if not already globally disabled).
+		if step.NoCache && !opts.globalNoCache {
+			runOpts = append(runOpts, llb.IgnoreCache)
+		}
+
+		st = st.Run(runOpts...).Root()
+	}
+
+	def, err := st.Marshal(ctx)
+	if err != nil {
+		return nil, llb.State{}, fmt.Errorf("marshaling: %w", err)
+	}
+	return def, st, nil
+}
+
+// buildMountRunOpts converts mount and cache slices into LLB run options.
+func buildMountRunOpts(mounts []pipeline.Mount, caches []pipeline.Cache, localOpts []llb.LocalOption) []llb.RunOption {
+	if len(mounts) == 0 && len(caches) == 0 {
+		return nil
+	}
+	opts := make([]llb.RunOption, 0, len(mounts)+len(caches))
+	for _, m := range mounts {
 		mountOpts := []llb.MountOption{llb.SourcePath(m.Source)}
 		if m.ReadOnly {
 			mountOpts = append(mountOpts, llb.Readonly)
 		}
-		runOpts = append(runOpts, llb.AddMount(
+		opts = append(opts, llb.AddMount(
 			m.Target,
 			llb.Local("context", localOpts...),
 			mountOpts...,
 		))
 	}
-
-	for _, c := range step.Caches {
-		runOpts = append(runOpts, llb.AddMount(
+	for _, c := range caches {
+		opts = append(opts, llb.AddMount(
 			c.Target,
 			llb.Scratch(),
 			llb.AsPersistentCacheDir(c.ID, llb.CacheMountShared),
 		))
 	}
-
-	execState := st.Run(runOpts...).Root()
-	def, err := execState.Marshal(ctx)
-	if err != nil {
-		return nil, llb.State{}, fmt.Errorf("marshaling: %w", err)
-	}
-	return def, execState, nil
+	return opts
 }
 
 // depMountOpts builds run options for dependency mounts: /cicada/deps/{name}
@@ -260,13 +329,13 @@ func buildStep(
 // (only when exposeDeps is true).
 //
 //revive:disable-next-line:flag-parameter exposeDeps controls a clear behavioral branch.
-func depMountOpts(step *pipeline.Step, depStates map[string]llb.State, exposeDeps bool) ([]llb.RunOption, error) {
+func depMountOpts(job *pipeline.Job, depStates map[string]llb.State, exposeDeps bool) ([]llb.RunOption, error) {
 	var opts []llb.RunOption
-	for _, dep := range step.DependsOn {
+	for _, dep := range job.DependsOn {
 		depSt, ok := depStates[dep]
 		if !ok {
 			return nil, fmt.Errorf(
-				"step %q: missing dependency state for %q", step.Name, dep,
+				"job %q: missing dependency state for %q", job.Name, dep,
 			)
 		}
 		opts = append(opts, llb.AddMount(
@@ -294,7 +363,7 @@ func depMountOpts(step *pipeline.Step, depStates map[string]llb.State, exposeDep
 // It uses a lightweight exec with GetMount rather than a FileOp Copy, because
 // Copy from Run().Root() in a separate solve session can resolve the exec's
 // input snapshot instead of its output.
-// The step image must provide cp (coreutils); scratch or distroless images
+// The job image must provide cp (coreutils); scratch or distroless images
 // that lack it will fail at solve time.
 func buildExportDef(ctx context.Context, execState llb.State, containerPath string) (*llb.Definition, error) {
 	cleaned := path.Clean(containerPath)

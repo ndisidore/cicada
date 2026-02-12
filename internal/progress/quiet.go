@@ -12,7 +12,7 @@ type Quiet struct{}
 
 // Run consumes SolveStatus events and returns the first vertex error encountered.
 // It returns when ch is closed or ctx is cancelled.
-func (*Quiet) Run(ctx context.Context, stepName string, ch <-chan *client.SolveStatus) error {
+func (*Quiet) Run(ctx context.Context, jobName string, ch <-chan *client.SolveStatus) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -23,7 +23,7 @@ func (*Quiet) Run(ctx context.Context, stepName string, ch <-chan *client.SolveS
 			}
 			for _, v := range status.Vertexes {
 				if v.Error != "" {
-					return fmt.Errorf("step %q vertex %q: %s", stepName, v.Name, v.Error)
+					return fmt.Errorf("job %q vertex %q: %s", jobName, v.Name, v.Error)
 				}
 			}
 		}

@@ -9,7 +9,7 @@ import (
 
 // Display renders BuildKit solve progress to the user.
 type Display interface {
-	// Run consumes SolveStatus events for a step and renders them.
+	// Run consumes SolveStatus events for a job and renders them.
 	// It returns when ch is closed or ctx is cancelled.
-	Run(ctx context.Context, stepName string, ch <-chan *client.SolveStatus) error
+	Run(ctx context.Context, jobName string, ch <-chan *client.SolveStatus) error
 }

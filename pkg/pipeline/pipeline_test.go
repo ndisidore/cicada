@@ -62,7 +62,7 @@ func TestMatrixCombinations(t *testing.T) {
 		{
 			name: "empty matrix",
 			m:    Matrix{},
-			want: nil,
+			want: []map[string]string{},
 		},
 		{
 			name: "single value dimension",
@@ -102,7 +102,7 @@ func TestCollectImages(t *testing.T) {
 		{
 			name: "unique images",
 			p: Pipeline{
-				Steps: []Step{
+				Jobs: []Job{
 					{Image: "alpine:latest"},
 					{Image: "golang:1.23"},
 					{Image: "rust:1.76"},
@@ -113,7 +113,7 @@ func TestCollectImages(t *testing.T) {
 		{
 			name: "deduplicates",
 			p: Pipeline{
-				Steps: []Step{
+				Jobs: []Job{
 					{Image: "alpine:latest"},
 					{Image: "alpine:latest"},
 					{Image: "golang:1.23"},
@@ -127,9 +127,9 @@ func TestCollectImages(t *testing.T) {
 			want: nil,
 		},
 		{
-			name: "single step",
+			name: "single job",
 			p: Pipeline{
-				Steps: []Step{
+				Jobs: []Job{
 					{Image: "ubuntu:22.04"},
 				},
 			},
@@ -138,7 +138,7 @@ func TestCollectImages(t *testing.T) {
 		{
 			name: "skips empty image refs",
 			p: Pipeline{
-				Steps: []Step{
+				Jobs: []Job{
 					{Image: "alpine:latest"},
 					{Image: ""},
 					{Image: "golang:1.23"},
@@ -196,12 +196,12 @@ func TestValidateEnvVars(t *testing.T) {
 			// Arrange
 			p := Pipeline{
 				Name: "test-pipeline",
-				Steps: []Step{
+				Jobs: []Job{
 					{
 						Name:  "build",
 						Image: "golang:1.23",
-						Run:   []string{"go build ./..."},
 						Env:   tt.env,
+						Steps: []Step{{Name: "build", Run: []string{"go build ./..."}}},
 					},
 				},
 			}
@@ -256,11 +256,11 @@ func TestValidatePipelineEnv(t *testing.T) {
 			p := Pipeline{
 				Name: "test-pipeline",
 				Env:  tt.env,
-				Steps: []Step{
+				Jobs: []Job{
 					{
 						Name:  "build",
 						Image: "alpine:latest",
-						Run:   []string{"echo hi"},
+						Steps: []Step{{Name: "build", Run: []string{"echo hi"}}},
 					},
 				},
 			}
@@ -348,12 +348,12 @@ func TestValidateExports(t *testing.T) {
 			// Arrange
 			p := Pipeline{
 				Name: "test-pipeline",
-				Steps: []Step{
+				Jobs: []Job{
 					{
 						Name:    "build",
 						Image:   "golang:1.23",
-						Run:     []string{"go build ./..."},
 						Exports: tt.exports,
+						Steps:   []Step{{Name: "build", Run: []string{"go build ./..."}}},
 					},
 				},
 			}
@@ -376,204 +376,204 @@ func TestValidateArtifacts(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		steps   []Step
+		jobs    []Job
 		wantErr error
 	}{
 		{
 			name: "valid artifact passes",
-			steps: []Step{
+			jobs: []Job{
 				{
 					Name:  "compile",
 					Image: "golang:1.23",
-					Run:   []string{"go build -o /out/app ./..."},
+					Steps: []Step{{Name: "compile", Run: []string{"go build -o /out/app ./..."}}},
 				},
 				{
 					Name:      "deploy",
 					Image:     "alpine:latest",
-					Run:       []string{"./deploy.sh"},
 					DependsOn: []string{"compile"},
 					Artifacts: []Artifact{
 						{From: "compile", Source: "/out/app", Target: "/app/bin"},
 					},
+					Steps: []Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
 				},
 			},
 		},
 		{
 			name: "empty artifact From returns ErrEmptyArtifactFrom",
-			steps: []Step{
+			jobs: []Job{
 				{
 					Name:  "compile",
 					Image: "golang:1.23",
-					Run:   []string{"go build ./..."},
+					Steps: []Step{{Name: "compile", Run: []string{"go build ./..."}}},
 				},
 				{
 					Name:      "deploy",
 					Image:     "alpine:latest",
-					Run:       []string{"./deploy.sh"},
 					DependsOn: []string{"compile"},
 					Artifacts: []Artifact{
 						{From: "", Source: "/out/app", Target: "/app/bin"},
 					},
+					Steps: []Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
 				},
 			},
 			wantErr: ErrEmptyArtifactFrom,
 		},
 		{
 			name: "empty artifact Source returns ErrEmptyArtifactSource",
-			steps: []Step{
+			jobs: []Job{
 				{
 					Name:  "compile",
 					Image: "golang:1.23",
-					Run:   []string{"go build ./..."},
+					Steps: []Step{{Name: "compile", Run: []string{"go build ./..."}}},
 				},
 				{
 					Name:      "deploy",
 					Image:     "alpine:latest",
-					Run:       []string{"./deploy.sh"},
 					DependsOn: []string{"compile"},
 					Artifacts: []Artifact{
 						{From: "compile", Source: "", Target: "/app/bin"},
 					},
+					Steps: []Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
 				},
 			},
 			wantErr: ErrEmptyArtifactSource,
 		},
 		{
 			name: "empty artifact Target returns ErrEmptyArtifactTarget",
-			steps: []Step{
+			jobs: []Job{
 				{
 					Name:  "compile",
 					Image: "golang:1.23",
-					Run:   []string{"go build ./..."},
+					Steps: []Step{{Name: "compile", Run: []string{"go build ./..."}}},
 				},
 				{
 					Name:      "deploy",
 					Image:     "alpine:latest",
-					Run:       []string{"./deploy.sh"},
 					DependsOn: []string{"compile"},
 					Artifacts: []Artifact{
 						{From: "compile", Source: "/out/app", Target: ""},
 					},
+					Steps: []Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
 				},
 			},
 			wantErr: ErrEmptyArtifactTarget,
 		},
 		{
 			name: "artifact From not in DependsOn returns ErrArtifactNoDep",
-			steps: []Step{
+			jobs: []Job{
 				{
 					Name:  "compile",
 					Image: "golang:1.23",
-					Run:   []string{"go build ./..."},
+					Steps: []Step{{Name: "compile", Run: []string{"go build ./..."}}},
 				},
 				{
 					Name:  "deploy",
 					Image: "alpine:latest",
-					Run:   []string{"./deploy.sh"},
 					Artifacts: []Artifact{
 						{From: "compile", Source: "/out/app", Target: "/app/bin"},
 					},
+					Steps: []Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
 				},
 			},
 			wantErr: ErrArtifactNoDep,
 		},
 		{
 			name: "relative artifact source returns ErrRelativeArtifactSource",
-			steps: []Step{
+			jobs: []Job{
 				{
 					Name:  "compile",
 					Image: "golang:1.23",
-					Run:   []string{"go build ./..."},
+					Steps: []Step{{Name: "compile", Run: []string{"go build ./..."}}},
 				},
 				{
 					Name:      "deploy",
 					Image:     "alpine:latest",
-					Run:       []string{"./deploy.sh"},
 					DependsOn: []string{"compile"},
 					Artifacts: []Artifact{
 						{From: "compile", Source: "out/app", Target: "/app/bin"},
 					},
+					Steps: []Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
 				},
 			},
 			wantErr: ErrRelativeArtifactSource,
 		},
 		{
 			name: "relative artifact target returns ErrRelativeArtifact",
-			steps: []Step{
+			jobs: []Job{
 				{
 					Name:  "compile",
 					Image: "golang:1.23",
-					Run:   []string{"go build ./..."},
+					Steps: []Step{{Name: "compile", Run: []string{"go build ./..."}}},
 				},
 				{
 					Name:      "deploy",
 					Image:     "alpine:latest",
-					Run:       []string{"./deploy.sh"},
 					DependsOn: []string{"compile"},
 					Artifacts: []Artifact{
 						{From: "compile", Source: "/out/app", Target: "app/bin"},
 					},
+					Steps: []Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
 				},
 			},
 			wantErr: ErrRelativeArtifact,
 		},
 		{
 			name: "root artifact target returns ErrRootArtifact",
-			steps: []Step{
+			jobs: []Job{
 				{
 					Name:  "compile",
 					Image: "golang:1.23",
-					Run:   []string{"go build ./..."},
+					Steps: []Step{{Name: "compile", Run: []string{"go build ./..."}}},
 				},
 				{
 					Name:      "deploy",
 					Image:     "alpine:latest",
-					Run:       []string{"./deploy.sh"},
 					DependsOn: []string{"compile"},
 					Artifacts: []Artifact{
 						{From: "compile", Source: "/out/app", Target: "/"},
 					},
+					Steps: []Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
 				},
 			},
 			wantErr: ErrRootArtifact,
 		},
 		{
 			name: "root with slashes artifact target returns ErrRootArtifact",
-			steps: []Step{
+			jobs: []Job{
 				{
 					Name:  "compile",
 					Image: "golang:1.23",
-					Run:   []string{"go build ./..."},
+					Steps: []Step{{Name: "compile", Run: []string{"go build ./..."}}},
 				},
 				{
 					Name:      "deploy",
 					Image:     "alpine:latest",
-					Run:       []string{"./deploy.sh"},
 					DependsOn: []string{"compile"},
 					Artifacts: []Artifact{
 						{From: "compile", Source: "/out/app", Target: "///"},
 					},
+					Steps: []Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
 				},
 			},
 			wantErr: ErrRootArtifact,
 		},
 		{
 			name: "duplicate artifact target returns ErrDuplicateArtifact",
-			steps: []Step{
+			jobs: []Job{
 				{
 					Name:  "compile",
 					Image: "golang:1.23",
-					Run:   []string{"go build ./..."},
+					Steps: []Step{{Name: "compile", Run: []string{"go build ./..."}}},
 				},
 				{
 					Name:      "deploy",
 					Image:     "alpine:latest",
-					Run:       []string{"./deploy.sh"},
 					DependsOn: []string{"compile"},
 					Artifacts: []Artifact{
 						{From: "compile", Source: "/out/app", Target: "/app/bin"},
 						{From: "compile", Source: "/out/lib", Target: "/app/bin"},
 					},
+					Steps: []Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
 				},
 			},
 			wantErr: ErrDuplicateArtifact,
@@ -586,8 +586,8 @@ func TestValidateArtifacts(t *testing.T) {
 
 			// Arrange
 			p := Pipeline{
-				Name:  "test-pipeline",
-				Steps: tt.steps,
+				Name: "test-pipeline",
+				Jobs: tt.jobs,
 			}
 
 			// Act
@@ -601,4 +601,151 @@ func TestValidateArtifacts(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+func TestValidateStepRun(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		jobs    []Job
+		wantErr error
+	}{
+		{
+			name: "step with nil Run rejected",
+			jobs: []Job{{
+				Name:  "build",
+				Image: "alpine",
+				Steps: []Step{
+					{Name: "setup", Run: nil},
+					{Name: "compile", Run: []string{"go build"}},
+				},
+			}},
+			wantErr: ErrMissingRun,
+		},
+		{
+			name: "step with empty Run slice rejected",
+			jobs: []Job{{
+				Name:  "build",
+				Image: "alpine",
+				Steps: []Step{
+					{Name: "setup", Run: []string{}},
+					{Name: "compile", Run: []string{"go build"}},
+				},
+			}},
+			wantErr: ErrMissingRun,
+		},
+		{
+			name: "all steps with valid Run passes",
+			jobs: []Job{{
+				Name:  "build",
+				Image: "alpine",
+				Steps: []Step{
+					{Name: "setup", Run: []string{"apk add git"}},
+					{Name: "compile", Run: []string{"go build"}},
+				},
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := Pipeline{Name: "test", Jobs: tt.jobs}
+			_, err := p.Validate()
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestApplyDefaults(t *testing.T) {
+	t.Parallel()
+
+	t.Run("matrix pointer is not aliased", func(t *testing.T) {
+		t.Parallel()
+
+		input := []Job{{
+			Name:  "test",
+			Image: "alpine",
+			Steps: []Step{{Name: "test", Run: []string{"echo hi"}}},
+			Matrix: &Matrix{Dimensions: []Dimension{
+				{Name: "go", Values: []string{"1.22", "1.23"}},
+			}},
+		}}
+		defaults := &Defaults{Image: "golang:1.23"}
+
+		result := ApplyDefaults(input, defaults)
+		require.NotNil(t, result[0].Matrix)
+		assert.NotSame(t, input[0].Matrix, result[0].Matrix,
+			"Matrix pointer must not alias the input")
+
+		result[0].Matrix = nil
+		assert.NotNil(t, input[0].Matrix,
+			"nilling result Matrix must not affect input")
+	})
+
+	t.Run("nil matrix preserved", func(t *testing.T) {
+		t.Parallel()
+
+		input := []Job{{
+			Name:  "test",
+			Image: "alpine",
+			Steps: []Step{{Name: "test", Run: []string{"echo hi"}}},
+		}}
+		defaults := &Defaults{Image: "golang:1.23"}
+
+		result := ApplyDefaults(input, defaults)
+		assert.Nil(t, result[0].Matrix)
+	})
+
+	t.Run("nil defaults clones slice", func(t *testing.T) {
+		t.Parallel()
+
+		input := []Job{{
+			Name:  "test",
+			Image: "alpine",
+			Steps: []Step{{Name: "test", Run: []string{"echo hi"}}},
+		}}
+
+		result := ApplyDefaults(input, nil)
+		require.Len(t, result, 1)
+		assert.Equal(t, input[0], result[0])
+
+		result[0].Name = "mutated"
+		assert.Equal(t, "test", input[0].Name,
+			"mutating result must not affect input when defaults is nil")
+	})
+
+	t.Run("env merge job wins on conflict", func(t *testing.T) {
+		t.Parallel()
+
+		input := []Job{{
+			Name:  "test",
+			Image: "alpine",
+			Steps: []Step{{Name: "test", Run: []string{"echo hi"}}},
+			Env: []EnvVar{
+				{Key: "SHARED", Value: "from-job"},
+				{Key: "JOB_ONLY", Value: "yes"},
+			},
+		}}
+		defaults := &Defaults{
+			Image: "alpine",
+			Env: []EnvVar{
+				{Key: "SHARED", Value: "from-defaults"},
+				{Key: "DEFAULT_ONLY", Value: "yes"},
+			},
+		}
+
+		result := ApplyDefaults(input, defaults)
+		require.Len(t, result, 1)
+		assert.Equal(t, []EnvVar{
+			{Key: "DEFAULT_ONLY", Value: "yes"},
+			{Key: "SHARED", Value: "from-job"},
+			{Key: "JOB_ONLY", Value: "yes"},
+		}, result[0].Env, "job env should override defaults on conflict")
+	})
 }

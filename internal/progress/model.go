@@ -12,7 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// stepStatus represents the current state of a pipeline step.
+// stepStatus represents the current state of a pipeline vertex.
 type stepStatus int
 
 const (
@@ -50,7 +50,7 @@ type stepState struct {
 // All methods use pointer receivers so mutations to the vertices map
 // (via applyStatus) operate on the same instance without copy aliasing.
 type model struct {
-	stepName string
+	jobName  string
 	vertices map[digest.Digest]*stepState
 	order    []digest.Digest // preserves vertex discovery order
 	logs     []string        // recent output lines (capped)
@@ -65,9 +65,9 @@ type model struct {
 // and keep the TUI viewport readable.
 const _maxLogs = 10
 
-func newModel(stepName string, boring bool) *model {
+func newModel(jobName string, boring bool) *model {
 	return &model{
-		stepName: stepName,
+		jobName:  jobName,
 		boring:   boring,
 		vertices: make(map[digest.Digest]*stepState),
 	}
@@ -163,7 +163,7 @@ var (
 func (m *model) View() string {
 	var b strings.Builder
 
-	_, _ = b.WriteString(_headerStyle.Render(fmt.Sprintf("Step: %s", m.stepName)))
+	_, _ = b.WriteString(_headerStyle.Render(fmt.Sprintf("Job: %s", m.jobName)))
 	_ = b.WriteByte('\n')
 
 	icons := _emojiIcons

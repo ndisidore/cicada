@@ -14,8 +14,8 @@ type TUI struct {
 }
 
 // Run starts a bubbletea program that displays solve progress.
-func (t *TUI) Run(ctx context.Context, stepName string, ch <-chan *client.SolveStatus) error {
-	m := newModel(stepName, t.Boring)
+func (t *TUI) Run(ctx context.Context, jobName string, ch <-chan *client.SolveStatus) error {
+	m := newModel(jobName, t.Boring)
 
 	p := tea.NewProgram(m, tea.WithContext(ctx))
 

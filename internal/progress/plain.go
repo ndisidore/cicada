@@ -27,7 +27,7 @@ type Plain struct {
 
 // Run consumes SolveStatus events and logs them via slog.
 // It returns when ch is closed or ctx is cancelled.
-func (p *Plain) Run(ctx context.Context, stepName string, ch <-chan *client.SolveStatus) error {
+func (p *Plain) Run(ctx context.Context, jobName string, ch <-chan *client.SolveStatus) error {
 	log := p.Log
 	if log == nil {
 		log = slog.Default()
@@ -44,16 +44,16 @@ func (p *Plain) Run(ctx context.Context, stepName string, ch <-chan *client.Solv
 				return nil
 			}
 			for _, v := range status.Vertexes {
-				if err := printVertex(ctx, log, stepName, v, seen); err != nil {
+				if err := printVertex(ctx, log, jobName, v, seen); err != nil {
 					return err
 				}
 			}
-			printLogs(ctx, log, stepName, status.Logs)
+			printLogs(ctx, log, jobName, status.Logs)
 		}
 	}
 }
 
-func printLogs(ctx context.Context, log *slog.Logger, stepName string, logs []*client.VertexLog) {
+func printLogs(ctx context.Context, log *slog.Logger, jobName string, logs []*client.VertexLog) {
 	for _, l := range logs {
 		if len(l.Data) == 0 {
 			continue
@@ -61,18 +61,18 @@ func printLogs(ctx context.Context, log *slog.Logger, stepName string, logs []*c
 		msg := strings.TrimSpace(string(l.Data))
 		if msg != "" {
 			log.LogAttrs(ctx, slog.LevelInfo, "output",
-				slog.String("step", stepName),
+				slog.String("job", jobName),
 				slog.String("data", msg),
 			)
 		}
 	}
 }
 
-func printVertex(ctx context.Context, log *slog.Logger, stepName string, v *client.Vertex, seen map[digest.Digest]vertexState) error {
+func printVertex(ctx context.Context, log *slog.Logger, jobName string, v *client.Vertex, seen map[digest.Digest]vertexState) error {
 	prev := seen[v.Digest]
 
 	attrs := []slog.Attr{
-		slog.String("step", stepName),
+		slog.String("job", jobName),
 		slog.String("vertex", v.Name),
 	}
 

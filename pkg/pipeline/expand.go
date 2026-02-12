@@ -8,11 +8,11 @@ import (
 )
 
 // Expand performs two-phase matrix expansion on a pipeline.
-// Phase 1 expands pipeline-level matrices (correlated deps across steps).
-// Phase 2 expands step-level matrices (all-variant deps).
+// Phase 1 expands pipeline-level matrices (correlated deps across jobs).
+// Phase 2 expands job-level matrices (all-variant deps).
 // Returns the original pipeline unchanged if no matrices are present.
 func Expand(p Pipeline) (Pipeline, error) {
-	if p.Matrix == nil && !slices.ContainsFunc(p.Steps, func(s Step) bool { return s.Matrix != nil }) {
+	if p.Matrix == nil && !slices.ContainsFunc(p.Jobs, func(j Job) bool { return j.Matrix != nil }) {
 		return p, nil
 	}
 
@@ -21,7 +21,7 @@ func Expand(p Pipeline) (Pipeline, error) {
 		return Pipeline{}, err
 	}
 
-	expanded, err = expandSteps(expanded)
+	expanded, err = expandJobs(expanded)
 	if err != nil {
 		return Pipeline{}, err
 	}
@@ -40,7 +40,7 @@ func expandPipeline(p Pipeline) (Pipeline, error) {
 		return Pipeline{}, fmt.Errorf("pipeline matrix: %w", err)
 	}
 
-	if err := checkDimCollisions(p.Matrix, p.Steps); err != nil {
+	if err := checkDimCollisions(p.Matrix, p.Jobs); err != nil {
 		return Pipeline{}, err
 	}
 
@@ -49,83 +49,98 @@ func expandPipeline(p Pipeline) (Pipeline, error) {
 		return Pipeline{}, fmt.Errorf("pipeline matrix: %w", err)
 	}
 	expanded := Pipeline{
-		Name:  p.Name,
-		Env:   p.Env,
-		Steps: make([]Step, 0, len(p.Steps)*len(combos)),
+		Name:     p.Name,
+		Env:      p.Env,
+		Defaults: p.Defaults,
+		Jobs:     make([]Job, 0, len(p.Jobs)*len(combos)),
 	}
 
 	for _, combo := range combos {
-		for i := range p.Steps {
-			step := replicateStep(&p.Steps[i], combo)
-			step.Name = expandedStepName(p.Steps[i].Name, combo)
-			step.DependsOn = correlateDeps(p.Steps[i].DependsOn, combo)
-			correlateArtifactFroms(step.Artifacts, combo)
-			for j := range step.Caches {
-				step.Caches[j].ID = matrixCacheID(step.Caches[j].ID, step.Name)
+		for i := range p.Jobs {
+			job := replicateJob(&p.Jobs[i], combo)
+			job.Name = expandedName(p.Jobs[i].Name, combo)
+			job.DependsOn = correlateDeps(p.Jobs[i].DependsOn, combo)
+			correlateArtifactFroms(job.Artifacts, combo)
+			for j := range job.Caches {
+				job.Caches[j].ID = matrixCacheID(job.Caches[j].ID, job.Name)
 			}
-			expanded.Steps = append(expanded.Steps, step)
+			// Correlate step-level artifact refs and namespace step-level caches.
+			for si := range job.Steps {
+				correlateArtifactFroms(job.Steps[si].Artifacts, combo)
+				for ci := range job.Steps[si].Caches {
+					job.Steps[si].Caches[ci].ID = matrixCacheID(job.Steps[si].Caches[ci].ID, job.Name)
+				}
+			}
+			expanded.Jobs = append(expanded.Jobs, job)
 		}
 	}
 
 	return expanded, nil
 }
 
-// expandSteps handles phase 2: step-level matrix expansion with
+// expandJobs handles phase 2: job-level matrix expansion with
 // all-variant dependency rewriting.
-func expandSteps(p Pipeline) (Pipeline, error) {
-	if !slices.ContainsFunc(p.Steps, func(s Step) bool { return s.Matrix != nil }) {
+//
+//revive:disable-next-line:cognitive-complexity expandJobs is a linear expansion pipeline; splitting it hurts readability.
+func expandJobs(p Pipeline) (Pipeline, error) {
+	if !slices.ContainsFunc(p.Jobs, func(j Job) bool { return j.Matrix != nil }) {
 		return p, nil
 	}
 
-	// Build expansion map: original step name -> all expanded variant names.
+	// Build expansion map: original job name -> all expanded variant names.
 	expansionMap := make(map[string][]string)
-	var expanded []Step
+	var expanded []Job
 
-	for i := range p.Steps {
-		step := &p.Steps[i]
-		if step.Matrix == nil {
-			expansionMap[step.Name] = []string{step.Name}
-			expanded = append(expanded, *step)
+	for i := range p.Jobs {
+		job := &p.Jobs[i]
+		if job.Matrix == nil {
+			expansionMap[job.Name] = []string{job.Name}
+			expanded = append(expanded, replicateJob(job, nil))
 			continue
 		}
 
-		if err := ValidateMatrix(step.Matrix); err != nil {
-			return Pipeline{}, fmt.Errorf("step %q matrix: %w", step.Name, err)
+		if err := ValidateMatrix(job.Matrix); err != nil {
+			return Pipeline{}, fmt.Errorf("job %q matrix: %w", job.Name, err)
 		}
 
-		combos, err := step.Matrix.Combinations()
+		combos, err := job.Matrix.Combinations()
 		if err != nil {
-			return Pipeline{}, fmt.Errorf("step %q matrix: %w", step.Name, err)
+			return Pipeline{}, fmt.Errorf("job %q matrix: %w", job.Name, err)
 		}
 		names := make([]string, 0, len(combos))
 		for _, combo := range combos {
-			variant := replicateStep(step, combo)
-			variant.Name = expandedStepName(step.Name, combo)
+			variant := replicateJob(job, combo)
+			variant.Name = expandedName(job.Name, combo)
 			variant.Matrix = nil
-			// step.Caches[j].ID may already carry a phase-1 namespace prefix
-			// (e.g. "gomod--test[os=linux]"). Applying matrixCacheID again
-			// compounds the prefix so each variant gets a unique cache ID
-			// (e.g. "gomod--test[os=linux]--test[go-version=1.21,os=linux]").
 			for j := range variant.Caches {
 				variant.Caches[j].ID = matrixCacheID(variant.Caches[j].ID, variant.Name)
+			}
+			for si := range variant.Steps {
+				for ci := range variant.Steps[si].Caches {
+					variant.Steps[si].Caches[ci].ID = matrixCacheID(variant.Steps[si].Caches[ci].ID, variant.Name)
+				}
 			}
 			names = append(names, variant.Name)
 			expanded = append(expanded, variant)
 		}
-		expansionMap[step.Name] = names
+		expansionMap[job.Name] = names
 	}
 
-	// Rewrite dependencies: if B depends on matrix step A, B depends on ALL variants of A.
-	// Also rewrite Artifact.From references to match expanded step names.
+	// Rewrite dependencies: if B depends on matrix job A, B depends on ALL variants of A.
+	// Also rewrite Artifact.From references to match expanded job names.
 	for i := range expanded {
 		expanded[i].DependsOn = rewriteDeps(expanded[i].DependsOn, expansionMap)
 		rewriteArtifactFroms(expanded[i].Artifacts, expansionMap)
+		for si := range expanded[i].Steps {
+			rewriteArtifactFroms(expanded[i].Steps[si].Artifacts, expansionMap)
+		}
 	}
 
 	return Pipeline{
-		Name:  p.Name,
-		Env:   p.Env,
-		Steps: expanded,
+		Name:     p.Name,
+		Env:      p.Env,
+		Defaults: p.Defaults,
+		Jobs:     expanded,
 	}, nil
 }
 
@@ -166,22 +181,22 @@ func ValidateMatrix(m *Matrix) error {
 }
 
 // checkDimCollisions ensures no dimension name appears in both the pipeline
-// matrix and any step matrix.
-func checkDimCollisions(pm *Matrix, steps []Step) error {
+// matrix and any job matrix.
+func checkDimCollisions(pm *Matrix, jobs []Job) error {
 	pipelineDims := make(map[string]struct{}, len(pm.Dimensions))
 	for i := range pm.Dimensions {
 		pipelineDims[pm.Dimensions[i].Name] = struct{}{}
 	}
-	for i := range steps {
-		if steps[i].Matrix == nil {
+	for i := range jobs {
+		if jobs[i].Matrix == nil {
 			continue
 		}
-		for j := range steps[i].Matrix.Dimensions {
-			name := steps[i].Matrix.Dimensions[j].Name
+		for j := range jobs[i].Matrix.Dimensions {
+			name := jobs[i].Matrix.Dimensions[j].Name
 			if _, ok := pipelineDims[name]; ok {
 				return fmt.Errorf(
-					"step %q dimension %q: %w (also in pipeline matrix)",
-					steps[i].Name, name, ErrDuplicateDim,
+					"job %q dimension %q: %w (also in pipeline matrix)",
+					jobs[i].Name, name, ErrDuplicateDim,
 				)
 			}
 		}
@@ -189,22 +204,19 @@ func checkDimCollisions(pm *Matrix, steps []Step) error {
 	return nil
 }
 
-// replicateStep creates a deep copy of a step with matrix variable substitution
-// applied to image, run, workdir, platform, mount source/target, and cache target.
-// Cache IDs are copied verbatim (including any namespace prefix from phase 1);
-// callers re-namespace IDs via matrixCacheID after replication.
-func replicateStep(s *Step, combo map[string]string) Step {
-	cp := substituteStepVars(*s, combo, "matrix.")
-	return cp
+// replicateJob creates a deep copy of a job with matrix variable substitution
+// applied to image, run, workdir, platform, mount source/target, cache target,
+// and step fields. Cache IDs are copied verbatim (including any namespace prefix
+// from phase 1); callers re-namespace IDs via matrixCacheID after replication.
+func replicateJob(j *Job, combo map[string]string) Job {
+	return substituteJobVars(*j, combo, "matrix.")
 }
 
-// expandedStepName produces a step name with sorted dimension key=value pairs
-// in brackets. For steps already carrying a bracket suffix (from phase 1),
+// expandedName produces a name with sorted dimension key=value pairs
+// in brackets. For names already carrying a bracket suffix (from phase 1),
 // new dims are merged and the suffix is regenerated.
-func expandedStepName(base string, combo map[string]string) string {
-	// Parse any existing bracket suffix. Validate() runs after Expand(), so
-	// base may contain an unmatched '[' without a closing ']'. Defensively
-	// require both brackets before parsing the suffix.
+func expandedName(base string, combo map[string]string) string {
+	// Parse any existing bracket suffix.
 	existing := make(map[string]string)
 	name := base
 	if idx := strings.IndexByte(base, '['); idx >= 0 {
@@ -254,20 +266,20 @@ func substituteVars(s string, combo map[string]string, prefix string) string {
 	return strings.NewReplacer(pairs...).Replace(s)
 }
 
-// matrixCacheID namespaces a cache ID with the expanded step name to prevent
+// matrixCacheID namespaces a cache ID with the expanded name to prevent
 // cross-variant cache collisions.
-func matrixCacheID(baseID, expandedName string) string {
-	return baseID + "--" + expandedName
+func matrixCacheID(baseID, expandedJobName string) string {
+	return baseID + "--" + expandedJobName
 }
 
 // correlateDeps rewrites dependencies to their same-replica (correlated) names.
 // Used in phase 1 where test[os=linux] should depend on build[os=linux].
 func correlateDeps(deps []string, combo map[string]string) []string {
-	return mapSlice(deps, func(dep string) string { return expandedStepName(dep, combo) })
+	return mapSlice(deps, func(dep string) string { return expandedName(dep, combo) })
 }
 
 // rewriteDeps replaces each dependency with all of its expanded variants.
-// Used in phase 2 where B depends on ALL variants of matrix step A.
+// Used in phase 2 where B depends on ALL variants of matrix job A.
 func rewriteDeps(deps []string, expansionMap map[string][]string) []string {
 	return flatMap(deps, func(dep string) []string {
 		if variants, ok := expansionMap[dep]; ok {
@@ -284,12 +296,12 @@ func correlateArtifactFroms(artifacts []Artifact, combo map[string]string) {
 		if artifacts[i].From == "" {
 			continue
 		}
-		artifacts[i].From = expandedStepName(artifacts[i].From, combo)
+		artifacts[i].From = expandedName(artifacts[i].From, combo)
 	}
 }
 
-// rewriteArtifactFroms rewrites Artifact.From fields to match expanded step
-// names during step-level matrix expansion. Unlike deps (which fan out to all
+// rewriteArtifactFroms rewrites Artifact.From fields to match expanded job
+// names during job-level matrix expansion. Unlike deps (which fan out to all
 // variants), artifacts keep a 1:1 mapping. If From resolves to exactly one
 // variant, it is rewritten; otherwise it is left as-is (validation will catch
 // any issues).

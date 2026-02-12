@@ -6,7 +6,9 @@ type NodeType string
 // Node types.
 const (
 	NodeTypePipeline  NodeType = "pipeline"
+	NodeTypeJob       NodeType = "job"
 	NodeTypeStep      NodeType = "step"
+	NodeTypeDefaults  NodeType = "defaults"
 	NodeTypeMatrix    NodeType = "matrix"
 	NodeTypeMount     NodeType = "mount"
 	NodeTypeCache     NodeType = "cache"

@@ -1,0 +1,30 @@
+// Fragment demonstrating multi-step jobs inside a reusable fragment.
+// Included pipelines get a "lint" job (single step) and a "test" job
+// (two sequential steps sharing the same Go image).
+
+fragment "go-quality" {
+    param "go-version" default="1.25"
+
+    job "lint" {
+        image "golangci/golangci-lint:latest"
+        mount "." "/src"
+        workdir "/src"
+        step "lint" {
+            run "golangci-lint run ./..."
+        }
+    }
+
+    job "test" {
+        image "golang:${param.go-version}"
+        mount "." "/src"
+        workdir "/src"
+        depends-on "lint"
+        step "vet" {
+            run "go vet ./..."
+        }
+        step "unit" {
+            cache "go-test" "/root/.cache/go-build"
+            run "go test -race ./..."
+        }
+    }
+}

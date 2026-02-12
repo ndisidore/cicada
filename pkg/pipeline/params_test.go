@@ -135,20 +135,23 @@ func TestSubstituteParams(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		steps  []Step
+		jobs   []Job
 		params map[string]string
-		want   []Step
+		want   []Job
 	}{
 		{
 			name: "substitution in all fields",
-			steps: []Step{{
+			jobs: []Job{{
 				Name:     "test",
 				Image:    "golang:${param.version}",
-				Run:      []string{"go test -cover=${param.threshold} ./..."},
 				Workdir:  "${param.workdir}",
 				Platform: "${param.platform}",
 				Mounts:   []Mount{{Source: "${param.src}", Target: "${param.dest}"}},
 				Caches:   []Cache{{ID: "mod", Target: "${param.cache-dir}"}},
+				Steps: []Step{{
+					Name: "test",
+					Run:  []string{"go test -cover=${param.threshold} ./..."},
+				}},
 			}},
 			params: map[string]string{
 				"version":   "1.23",
@@ -159,42 +162,93 @@ func TestSubstituteParams(t *testing.T) {
 				"dest":      "/app",
 				"cache-dir": "/go/pkg/mod",
 			},
-			want: []Step{{
+			want: []Job{{
 				Name:     "test",
 				Image:    "golang:1.23",
-				Run:      []string{"go test -cover=80 ./..."},
 				Workdir:  "/src",
 				Platform: "linux/amd64",
 				Mounts:   []Mount{{Source: ".", Target: "/app"}},
 				Caches:   []Cache{{ID: "mod", Target: "/go/pkg/mod"}},
+				Steps: []Step{{
+					Name: "test",
+					Run:  []string{"go test -cover=80 ./..."},
+				}},
 			}},
 		},
 		{
 			name: "matrix vars pass through",
-			steps: []Step{{
+			jobs: []Job{{
 				Name:  "test",
 				Image: "golang:${param.version}",
-				Run:   []string{"echo ${matrix.os}"},
+				Steps: []Step{{
+					Name: "test",
+					Run:  []string{"echo ${matrix.os}"},
+				}},
 			}},
 			params: map[string]string{"version": "1.23"},
-			want: []Step{{
+			want: []Job{{
 				Name:  "test",
 				Image: "golang:1.23",
-				Run:   []string{"echo ${matrix.os}"},
+				Steps: []Step{{
+					Name: "test",
+					Run:  []string{"echo ${matrix.os}"},
+				}},
 			}},
 		},
 		{
-			name:   "empty params is noop",
-			steps:  []Step{{Name: "a", Image: "${param.x}"}},
+			name: "substitution in job matrix dimensions",
+			jobs: []Job{{
+				Name:  "test",
+				Image: "alpine",
+				Matrix: &Matrix{Dimensions: []Dimension{
+					{Name: "go-version", Values: []string{"${param.min-go}", "${param.max-go}"}},
+				}},
+				Steps: []Step{{Name: "run", Run: []string{"go test"}}},
+			}},
+			params: map[string]string{"min-go": "1.22", "max-go": "1.23"},
+			want: []Job{{
+				Name:  "test",
+				Image: "alpine",
+				Matrix: &Matrix{Dimensions: []Dimension{
+					{Name: "go-version", Values: []string{"1.22", "1.23"}},
+				}},
+				Steps: []Step{{Name: "run", Run: []string{"go test"}}},
+			}},
+		},
+		{
+			name: "nil matrix preserved",
+			jobs: []Job{{
+				Name:  "test",
+				Image: "alpine",
+				Steps: []Step{{Name: "run", Run: []string{"echo hi"}}},
+			}},
+			params: map[string]string{"x": "y"},
+			want: []Job{{
+				Name:  "test",
+				Image: "alpine",
+				Steps: []Step{{Name: "run", Run: []string{"echo hi"}}},
+			}},
+		},
+		{
+			name: "empty params is noop",
+			jobs: []Job{{
+				Name:  "a",
+				Image: "${param.x}",
+				Steps: []Step{{Name: "a"}},
+			}},
 			params: map[string]string{},
-			want:   []Step{{Name: "a", Image: "${param.x}"}},
+			want: []Job{{
+				Name:  "a",
+				Image: "${param.x}",
+				Steps: []Step{{Name: "a"}},
+			}},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := SubstituteParams(tt.steps, tt.params)
+			got := SubstituteParams(tt.jobs, tt.params)
 			assert.Equal(t, tt.want, got)
 		})
 	}

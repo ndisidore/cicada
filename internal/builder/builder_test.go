@@ -59,8 +59,8 @@ func execMeta(t *testing.T, defBytes [][]byte) *pb.Meta {
 }
 
 // lastExecMeta returns the Meta from the last ExecOp in the definition.
-// When a step has dependencies, its definition includes dependency ExecOps;
-// the step's own ExecOp is the last one in topological order.
+// When a job has dependencies, its definition includes dependency ExecOps;
+// the job's own ExecOp is the last one in topological order.
 func lastExecMeta(t *testing.T, defBytes [][]byte) *pb.Meta {
 	t.Helper()
 	var last *pb.Meta
@@ -112,63 +112,63 @@ func TestBuild(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		p         pipeline.Pipeline
-		opts      BuildOpts
-		wantSteps int
-		wantErr   error
-		verify    func(t *testing.T, result Result)
+		name     string
+		p        pipeline.Pipeline
+		opts     BuildOpts
+		wantJobs int
+		wantErr  error
+		verify   func(t *testing.T, result Result)
 	}{
 		{
-			name: "single step",
+			name: "single job",
 			p: pipeline.Pipeline{
 				Name: "hello",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "greet",
 						Image: "alpine:latest",
-						Run:   []string{"echo hello"},
+						Steps: []pipeline.Step{{Name: "greet", Run: []string{"echo hello"}}},
 					},
 				},
 			},
-			wantSteps: 1,
+			wantJobs: 1,
 		},
 		{
-			name: "multi step with dependency",
+			name: "multi job with dependency",
 			p: pipeline.Pipeline{
 				Name: "build",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "setup",
 						Image: "alpine:latest",
-						Run:   []string{"echo setup"},
+						Steps: []pipeline.Step{{Name: "setup", Run: []string{"echo setup"}}},
 					},
 					{
 						Name:      "test",
 						Image:     "golang:1.23",
 						DependsOn: []string{"setup"},
-						Run:       []string{"go test ./..."},
+						Steps:     []pipeline.Step{{Name: "test", Run: []string{"go test ./..."}}},
 					},
 				},
 			},
-			wantSteps: 2,
+			wantJobs: 2,
 		},
 		{
-			name: "step with cache mount",
+			name: "job with cache mount",
 			p: pipeline.Pipeline{
 				Name: "cached",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "build",
 						Image: "golang:1.23",
-						Run:   []string{"go build ./..."},
 						Caches: []pipeline.Cache{
 							{ID: "go-build", Target: "/root/.cache/go-build"},
 						},
+						Steps: []pipeline.Step{{Name: "build", Run: []string{"go build ./..."}}},
 					},
 				},
 			},
-			wantSteps: 1,
+			wantJobs: 1,
 			verify: func(t *testing.T, result Result) {
 				t.Helper()
 				mounts := execMounts(t, result.Definitions[0].Def)
@@ -185,22 +185,22 @@ func TestBuild(t *testing.T) {
 			},
 		},
 		{
-			name: "step with bind mount read-write",
+			name: "job with bind mount read-write",
 			p: pipeline.Pipeline{
 				Name: "mounted",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:    "build",
 						Image:   "rust:1.76",
-						Run:     []string{"cargo build"},
 						Workdir: "/src",
 						Mounts: []pipeline.Mount{
 							{Source: ".", Target: "/src"},
 						},
+						Steps: []pipeline.Step{{Name: "build", Run: []string{"cargo build"}}},
 					},
 				},
 			},
-			wantSteps: 1,
+			wantJobs: 1,
 			verify: func(t *testing.T, result Result) {
 				t.Helper()
 				mounts := execMounts(t, result.Definitions[0].Def)
@@ -214,22 +214,22 @@ func TestBuild(t *testing.T) {
 			},
 		},
 		{
-			name: "step with bind mount readonly",
+			name: "job with bind mount readonly",
 			p: pipeline.Pipeline{
 				Name: "mounted-ro",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:    "build",
 						Image:   "rust:1.76",
-						Run:     []string{"cargo build"},
 						Workdir: "/src",
 						Mounts: []pipeline.Mount{
 							{Source: ".", Target: "/src", ReadOnly: true},
 						},
+						Steps: []pipeline.Step{{Name: "build", Run: []string{"cargo build"}}},
 					},
 				},
 			},
-			wantSteps: 1,
+			wantJobs: 1,
 			verify: func(t *testing.T, result Result) {
 				t.Helper()
 				mounts := execMounts(t, result.Definitions[0].Def)
@@ -246,50 +246,50 @@ func TestBuild(t *testing.T) {
 			name: "multiple run commands joined",
 			p: pipeline.Pipeline{
 				Name: "multi-cmd",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "info",
 						Image: "alpine:latest",
-						Run:   []string{"uname -a", "date"},
+						Steps: []pipeline.Step{{Name: "info", Run: []string{"uname -a", "date"}}},
 					},
 				},
 			},
-			wantSteps: 1,
+			wantJobs: 1,
 		},
 		{
 			name: "toposort ordering preserved",
 			p: pipeline.Pipeline{
 				Name: "ordered",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:      "second",
 						Image:     "alpine:latest",
 						DependsOn: []string{"first"},
-						Run:       []string{"echo second"},
+						Steps:     []pipeline.Step{{Name: "second", Run: []string{"echo second"}}},
 					},
 					{
 						Name:  "first",
 						Image: "alpine:latest",
-						Run:   []string{"echo first"},
+						Steps: []pipeline.Step{{Name: "first", Run: []string{"echo first"}}},
 					},
 				},
 			},
-			wantSteps: 2,
+			wantJobs: 2,
 		},
 		{
 			name: "no-cache sets IgnoreCache on all ops",
 			opts: BuildOpts{NoCache: true},
 			p: pipeline.Pipeline{
 				Name: "uncached",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "greet",
 						Image: "alpine:latest",
-						Run:   []string{"echo hello"},
+						Steps: []pipeline.Step{{Name: "greet", Run: []string{"echo hello"}}},
 					},
 				},
 			},
-			wantSteps: 1,
+			wantJobs: 1,
 			verify: func(t *testing.T, result Result) {
 				t.Helper()
 				def := result.Definitions[0]
@@ -309,31 +309,31 @@ func TestBuild(t *testing.T) {
 			},
 		},
 		{
-			name: "no-cache-filter applies IgnoreCache to matching step only",
+			name: "no-cache-filter applies IgnoreCache to matching job only",
 			opts: BuildOpts{NoCacheFilter: map[string]struct{}{"test": {}}},
 			p: pipeline.Pipeline{
 				Name: "selective",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "build",
 						Image: "alpine:latest",
-						Run:   []string{"echo build"},
+						Steps: []pipeline.Step{{Name: "build", Run: []string{"echo build"}}},
 					},
 					{
 						Name:      "test",
 						Image:     "alpine:latest",
 						DependsOn: []string{"build"},
-						Run:       []string{"echo test"},
+						Steps:     []pipeline.Step{{Name: "test", Run: []string{"echo test"}}},
 					},
 				},
 			},
-			wantSteps: 2,
+			wantJobs: 2,
 			verify: func(t *testing.T, result Result) {
 				t.Helper()
 				// "build" should NOT have IgnoreCache.
 				buildDef := result.Definitions[0]
 				for _, md := range buildDef.Metadata {
-					assert.False(t, md.IgnoreCache, "build step should not have IgnoreCache")
+					assert.False(t, md.IgnoreCache, "build job should not have IgnoreCache")
 				}
 				// "test" should have IgnoreCache on both image and exec.
 				testDef := result.Definitions[1]
@@ -353,19 +353,19 @@ func TestBuild(t *testing.T) {
 			},
 		},
 		{
-			name: "step NoCache field applies IgnoreCache",
+			name: "job NoCache field applies IgnoreCache",
 			p: pipeline.Pipeline{
-				Name: "step-nocache",
-				Steps: []pipeline.Step{
+				Name: "job-nocache",
+				Jobs: []pipeline.Job{
 					{
 						Name:    "test",
 						Image:   "alpine:latest",
-						Run:     []string{"echo test"},
 						NoCache: true,
+						Steps:   []pipeline.Step{{Name: "test", Run: []string{"echo test"}}},
 					},
 				},
 			},
-			wantSteps: 1,
+			wantJobs: 1,
 			verify: func(t *testing.T, result Result) {
 				t.Helper()
 				def := result.Definitions[0]
@@ -388,11 +388,11 @@ func TestBuild(t *testing.T) {
 			name: "empty run commands",
 			p: pipeline.Pipeline{
 				Name: "bad",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "empty",
 						Image: "alpine:latest",
-						Run:   nil,
+						Steps: []pipeline.Step{{Name: "empty", Run: nil}},
 					},
 				},
 			},
@@ -402,11 +402,11 @@ func TestBuild(t *testing.T) {
 			name: "empty string run commands",
 			p: pipeline.Pipeline{
 				Name: "bad",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "empty-str",
 						Image: "alpine:latest",
-						Run:   []string{""},
+						Steps: []pipeline.Step{{Name: "empty-str", Run: []string{""}}},
 					},
 				},
 			},
@@ -416,25 +416,25 @@ func TestBuild(t *testing.T) {
 			name: "whitespace-only run commands",
 			p: pipeline.Pipeline{
 				Name: "bad",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "whitespace",
 						Image: "alpine:latest",
-						Run:   []string{"  "},
+						Steps: []pipeline.Step{{Name: "whitespace", Run: []string{"  "}}},
 					},
 				},
 			},
 			wantErr: pipeline.ErrMissingRun,
 		},
 		{
-			name: "invalid step name rejected",
+			name: "invalid job name rejected",
 			p: pipeline.Pipeline{
 				Name: "bad",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "../escape",
 						Image: "alpine:latest",
-						Run:   []string{"echo bad"},
+						Steps: []pipeline.Step{{Name: "escape", Run: []string{"echo bad"}}},
 					},
 				},
 			},
@@ -445,15 +445,15 @@ func TestBuild(t *testing.T) {
 			p: pipeline.Pipeline{
 				Name: "env-test",
 				Env:  []pipeline.EnvVar{{Key: "CI", Value: "true"}},
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "build",
 						Image: "alpine:latest",
-						Run:   []string{"echo hello"},
+						Steps: []pipeline.Step{{Name: "build", Run: []string{"echo hello"}}},
 					},
 				},
 			},
-			wantSteps: 1,
+			wantJobs: 1,
 			verify: func(t *testing.T, result Result) {
 				t.Helper()
 				meta := execMeta(t, result.Definitions[0].Def)
@@ -461,20 +461,20 @@ func TestBuild(t *testing.T) {
 			},
 		},
 		{
-			name: "step-level env vars override pipeline-level",
+			name: "job-level env vars override pipeline-level",
 			p: pipeline.Pipeline{
 				Name: "env-override",
 				Env:  []pipeline.EnvVar{{Key: "MODE", Value: "default"}},
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "build",
 						Image: "alpine:latest",
-						Run:   []string{"echo hello"},
 						Env:   []pipeline.EnvVar{{Key: "MODE", Value: "custom"}},
+						Steps: []pipeline.Step{{Name: "build", Run: []string{"echo hello"}}},
 					},
 				},
 			},
-			wantSteps: 1,
+			wantJobs: 1,
 			verify: func(t *testing.T, result Result) {
 				t.Helper()
 				meta := execMeta(t, result.Definitions[0].Def)
@@ -486,15 +486,15 @@ func TestBuild(t *testing.T) {
 			name: "CICADA_OUTPUT always set",
 			p: pipeline.Pipeline{
 				Name: "output-test",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "build",
 						Image: "alpine:latest",
-						Run:   []string{"echo hello"},
+						Steps: []pipeline.Step{{Name: "build", Run: []string{"echo hello"}}},
 					},
 				},
 			},
-			wantSteps: 1,
+			wantJobs: 1,
 			verify: func(t *testing.T, result Result) {
 				t.Helper()
 				meta := execMeta(t, result.Definitions[0].Def)
@@ -505,21 +505,21 @@ func TestBuild(t *testing.T) {
 			name: "dependency output sourcing preamble added",
 			p: pipeline.Pipeline{
 				Name: "output-sourcing",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "version",
 						Image: "alpine:latest",
-						Run:   []string{"echo VERSION=1.0 >> $CICADA_OUTPUT"},
+						Steps: []pipeline.Step{{Name: "version", Run: []string{"echo VERSION=1.0 >> $CICADA_OUTPUT"}}},
 					},
 					{
 						Name:      "build",
 						Image:     "alpine:latest",
 						DependsOn: []string{"version"},
-						Run:       []string{"echo $VERSION"},
+						Steps:     []pipeline.Step{{Name: "build", Run: []string{"echo $VERSION"}}},
 					},
 				},
 			},
-			wantSteps: 2,
+			wantJobs: 2,
 			verify: func(t *testing.T, result Result) {
 				t.Helper()
 				meta := lastExecMeta(t, result.Definitions[1].Def)
@@ -532,21 +532,21 @@ func TestBuild(t *testing.T) {
 			name: "dep mounts use /cicada/deps/ by default",
 			p: pipeline.Pipeline{
 				Name: "dep-mounts",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "setup",
 						Image: "alpine:latest",
-						Run:   []string{"echo setup"},
+						Steps: []pipeline.Step{{Name: "setup", Run: []string{"echo setup"}}},
 					},
 					{
 						Name:      "test",
 						Image:     "alpine:latest",
 						DependsOn: []string{"setup"},
-						Run:       []string{"echo test"},
+						Steps:     []pipeline.Step{{Name: "test", Run: []string{"echo test"}}},
 					},
 				},
 			},
-			wantSteps: 2,
+			wantJobs: 2,
 			verify: func(t *testing.T, result Result) {
 				t.Helper()
 				mounts := lastExecMounts(t, result.Definitions[1].Def)
@@ -568,21 +568,21 @@ func TestBuild(t *testing.T) {
 			opts: BuildOpts{ExposeDeps: true},
 			p: pipeline.Pipeline{
 				Name: "legacy-deps",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "setup",
 						Image: "alpine:latest",
-						Run:   []string{"echo setup"},
+						Steps: []pipeline.Step{{Name: "setup", Run: []string{"echo setup"}}},
 					},
 					{
 						Name:      "test",
 						Image:     "alpine:latest",
 						DependsOn: []string{"setup"},
-						Run:       []string{"echo test"},
+						Steps:     []pipeline.Step{{Name: "test", Run: []string{"echo test"}}},
 					},
 				},
 			},
-			wantSteps: 2,
+			wantJobs: 2,
 			verify: func(t *testing.T, result Result) {
 				t.Helper()
 				mounts := lastExecMounts(t, result.Definitions[1].Def)
@@ -603,11 +603,11 @@ func TestBuild(t *testing.T) {
 			name: "artifact import copies from dependency",
 			p: pipeline.Pipeline{
 				Name: "artifact-test",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "build",
 						Image: "alpine:latest",
-						Run:   []string{"echo build"},
+						Steps: []pipeline.Step{{Name: "build", Run: []string{"echo build"}}},
 					},
 					{
 						Name:      "test",
@@ -616,11 +616,11 @@ func TestBuild(t *testing.T) {
 						Artifacts: []pipeline.Artifact{
 							{From: "build", Source: "/out/myapp", Target: "/usr/local/bin/myapp"},
 						},
-						Run: []string{"myapp --version"},
+						Steps: []pipeline.Step{{Name: "test", Run: []string{"myapp --version"}}},
 					},
 				},
 			},
-			wantSteps: 2,
+			wantJobs: 2,
 			verify: func(t *testing.T, result Result) {
 				t.Helper()
 				copies := fileCopyActions(t, result.Definitions[1].Def)
@@ -636,25 +636,26 @@ func TestBuild(t *testing.T) {
 			},
 		},
 		{
-			name: "step with export produces export definition",
+			name: "job with export produces export definition",
 			p: pipeline.Pipeline{
 				Name: "export-test",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "build",
 						Image: "alpine:latest",
-						Run:   []string{"echo build"},
-						Exports: []pipeline.Export{
-							{Path: "/out/myapp", Local: "./bin/myapp"},
-						},
+						Steps: []pipeline.Step{{
+							Name:    "build",
+							Run:     []string{"echo build"},
+							Exports: []pipeline.Export{{Path: "/out/myapp", Local: "./bin/myapp"}},
+						}},
 					},
 				},
 			},
-			wantSteps: 1,
+			wantJobs: 1,
 			verify: func(t *testing.T, result Result) {
 				t.Helper()
 				require.Len(t, result.Exports, 1)
-				assert.Equal(t, "build", result.Exports[0].StepName)
+				assert.Equal(t, "build", result.Exports[0].JobName)
 				assert.Equal(t, "./bin/myapp", result.Exports[0].Local)
 				assert.NotNil(t, result.Exports[0].Definition)
 			},
@@ -671,8 +672,8 @@ func TestBuild(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			assert.Len(t, result.Definitions, tt.wantSteps)
-			assert.Len(t, result.StepNames, tt.wantSteps)
+			assert.Len(t, result.Definitions, tt.wantJobs)
+			assert.Len(t, result.JobNames, tt.wantJobs)
 			for i, def := range result.Definitions {
 				require.NotNilf(t, def, "definition[%d] is nil", i)
 				assert.NotEmptyf(t, def.Def, "definition[%d] has no operations", i)
@@ -689,21 +690,21 @@ func TestBuildWithPresetTopoOrder(t *testing.T) {
 
 	p := pipeline.Pipeline{
 		Name: "cached",
-		Steps: []pipeline.Step{
+		Jobs: []pipeline.Job{
 			{
 				Name:  "a",
 				Image: "alpine:latest",
-				Run:   []string{"echo a"},
+				Steps: []pipeline.Step{{Name: "a", Run: []string{"echo a"}}},
 			},
 			{
 				Name:  "b",
 				Image: "alpine:latest",
-				Run:   []string{"echo b"},
+				Steps: []pipeline.Step{{Name: "b", Run: []string{"echo b"}}},
 			},
 			{
 				Name:  "c",
 				Image: "alpine:latest",
-				Run:   []string{"echo c"},
+				Steps: []pipeline.Step{{Name: "c", Run: []string{"echo c"}}},
 			},
 		},
 		TopoOrder: []int{0, 1, 2},
@@ -711,29 +712,31 @@ func TestBuildWithPresetTopoOrder(t *testing.T) {
 
 	result, err := Build(context.Background(), p, BuildOpts{})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"a", "b", "c"}, result.StepNames)
+	assert.Equal(t, []string{"a", "b", "c"}, result.JobNames)
 	assert.Len(t, result.Definitions, 3)
 }
 
 func TestBuildWithInvalidTopoOrder(t *testing.T) {
 	t.Parallel()
 
-	steps := []pipeline.Step{
-		{
-			Name:  "a",
-			Image: "alpine:latest",
-			Run:   []string{"echo a"},
-		},
-		{
-			Name:  "b",
-			Image: "alpine:latest",
-			Run:   []string{"echo b"},
-		},
-		{
-			Name:  "c",
-			Image: "alpine:latest",
-			Run:   []string{"echo c"},
-		},
+	makeJobs := func() []pipeline.Job {
+		return []pipeline.Job{
+			{
+				Name:  "a",
+				Image: "alpine:latest",
+				Steps: []pipeline.Step{{Name: "a", Run: []string{"echo a"}}},
+			},
+			{
+				Name:  "b",
+				Image: "alpine:latest",
+				Steps: []pipeline.Step{{Name: "b", Run: []string{"echo b"}}},
+			},
+			{
+				Name:  "c",
+				Image: "alpine:latest",
+				Steps: []pipeline.Step{{Name: "c", Run: []string{"echo c"}}},
+			},
+		}
 	}
 
 	tests := []struct {
@@ -753,13 +756,13 @@ func TestBuildWithInvalidTopoOrder(t *testing.T) {
 
 			p := pipeline.Pipeline{
 				Name:      "fallback",
-				Steps:     steps,
+				Jobs:      makeJobs(),
 				TopoOrder: tt.order,
 			}
 
 			result, err := Build(context.Background(), p, BuildOpts{})
 			require.NoError(t, err, "Build should fall back to Validate when TopoOrder is invalid")
-			assert.Equal(t, []string{"a", "b", "c"}, result.StepNames)
+			assert.Equal(t, []string{"a", "b", "c"}, result.JobNames)
 			assert.Len(t, result.Definitions, 3)
 		})
 	}
@@ -770,30 +773,30 @@ func TestBuildTopoSortOrder(t *testing.T) {
 
 	p := pipeline.Pipeline{
 		Name: "ordered",
-		Steps: []pipeline.Step{
+		Jobs: []pipeline.Job{
 			{
 				Name:      "c",
 				Image:     "alpine:latest",
 				DependsOn: []string{"b"},
-				Run:       []string{"echo c"},
+				Steps:     []pipeline.Step{{Name: "c", Run: []string{"echo c"}}},
 			},
 			{
 				Name:      "b",
 				Image:     "alpine:latest",
 				DependsOn: []string{"a"},
-				Run:       []string{"echo b"},
+				Steps:     []pipeline.Step{{Name: "b", Run: []string{"echo b"}}},
 			},
 			{
 				Name:  "a",
 				Image: "alpine:latest",
-				Run:   []string{"echo a"},
+				Steps: []pipeline.Step{{Name: "a", Run: []string{"echo a"}}},
 			},
 		},
 	}
 
 	result, err := Build(context.Background(), p, BuildOpts{})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"a", "b", "c"}, result.StepNames)
+	assert.Equal(t, []string{"a", "b", "c"}, result.JobNames)
 }
 
 func TestBuildWithPlatform(t *testing.T) {
@@ -825,12 +828,12 @@ func TestBuildWithPlatform(t *testing.T) {
 
 			p := pipeline.Pipeline{
 				Name: "plat",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:     "build",
 						Image:    "golang:1.23",
 						Platform: tt.platform,
-						Run:      []string{"go version"},
+						Steps:    []pipeline.Step{{Name: "build", Run: []string{"go version"}}},
 					},
 				},
 			}
@@ -860,12 +863,12 @@ func TestBuildWithInvalidPlatform(t *testing.T) {
 
 	p := pipeline.Pipeline{
 		Name: "bad",
-		Steps: []pipeline.Step{
+		Jobs: []pipeline.Job{
 			{
 				Name:     "build",
 				Image:    "alpine:latest",
 				Platform: "not/a/valid/platform/string",
-				Run:      []string{"echo hi"},
+				Steps:    []pipeline.Step{{Name: "build", Run: []string{"echo hi"}}},
 			},
 		},
 	}
@@ -898,11 +901,11 @@ func TestBuildWithMetaResolver(t *testing.T) {
 			name: "image env and workdir propagated",
 			p: pipeline.Pipeline{
 				Name: "go-build",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "build",
 						Image: "golang:1.23",
-						Run:   []string{"go version"},
+						Steps: []pipeline.Step{{Name: "build", Run: []string{"go version"}}},
 					},
 				},
 			},
@@ -911,15 +914,15 @@ func TestBuildWithMetaResolver(t *testing.T) {
 			wantCwd: "/go",
 		},
 		{
-			name: "step workdir overrides image workdir",
+			name: "job workdir overrides image workdir",
 			p: pipeline.Pipeline{
 				Name: "go-build",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:    "build",
 						Image:   "golang:1.23",
-						Run:     []string{"go version"},
 						Workdir: "/src",
+						Steps:   []pipeline.Step{{Name: "build", Run: []string{"go version"}}},
 					},
 				},
 			},
@@ -931,11 +934,11 @@ func TestBuildWithMetaResolver(t *testing.T) {
 			name: "no resolver omits image config",
 			p: pipeline.Pipeline{
 				Name: "plain",
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{
 						Name:  "build",
 						Image: "golang:1.23",
-						Run:   []string{"echo hello"},
+						Steps: []pipeline.Step{{Name: "build", Run: []string{"echo hello"}}},
 					},
 				},
 			},
@@ -1018,14 +1021,15 @@ func TestBuild_directoryExportSetsDir(t *testing.T) {
 
 	p := pipeline.Pipeline{
 		Name: "dir-export-test",
-		Steps: []pipeline.Step{
+		Jobs: []pipeline.Job{
 			{
 				Name:  "build",
 				Image: "alpine:latest",
-				Run:   []string{"mkdir -p /out/dist"},
-				Exports: []pipeline.Export{
-					{Path: "/out/dist/", Local: "./output/dist"},
-				},
+				Steps: []pipeline.Step{{
+					Name:    "build",
+					Run:     []string{"mkdir -p /out/dist"},
+					Exports: []pipeline.Export{{Path: "/out/dist/", Local: "./output/dist"}},
+				}},
 			},
 		},
 	}
@@ -1042,14 +1046,15 @@ func TestBuild_fileExportClearsDirFlag(t *testing.T) {
 
 	p := pipeline.Pipeline{
 		Name: "file-export-test",
-		Steps: []pipeline.Step{
+		Jobs: []pipeline.Job{
 			{
 				Name:  "build",
 				Image: "alpine:latest",
-				Run:   []string{"echo build"},
-				Exports: []pipeline.Export{
-					{Path: "/out/myapp", Local: "./bin/myapp"},
-				},
+				Steps: []pipeline.Step{{
+					Name:    "build",
+					Run:     []string{"echo build"},
+					Exports: []pipeline.Export{{Path: "/out/myapp", Local: "./bin/myapp"}},
+				}},
 			},
 		},
 	}

@@ -92,6 +92,13 @@ func (p *Parser) parse(r io.Reader, filename string) (pipeline.Pipeline, error) 
 	return p.parsePipeline(pipelineNode, filename, newIncludeState())
 }
 
+// pipelineAcc accumulates pipeline-level fields parsed from child nodes.
+type pipelineAcc struct {
+	Matrix   *pipeline.Matrix
+	Defaults *pipeline.Defaults
+	Env      []pipeline.EnvVar
+}
+
 // parsePipeline parses a pipeline node with include-aware child resolution.
 func (p *Parser) parsePipeline(node *document.Node, filename string, state *includeState) (pipeline.Pipeline, error) {
 	name, err := requireStringArg(node, filename, string(NodeTypePipeline))
@@ -102,11 +109,10 @@ func (p *Parser) parsePipeline(node *document.Node, filename string, state *incl
 	}
 
 	gc := newGroupCollector(filename)
-	var mat *pipeline.Matrix
-	var envVars []pipeline.EnvVar
+	var acc pipelineAcc
 
 	for _, child := range node.Children {
-		if err := p.parsePipelineChild(child, filename, state, gc, &mat, &envVars); err != nil {
+		if err := p.parsePipelineChild(child, filename, state, gc, &acc); err != nil {
 			return pipeline.Pipeline{}, err
 		}
 	}
@@ -116,31 +122,56 @@ func (p *Parser) parsePipeline(node *document.Node, filename string, state *incl
 		return pipeline.Pipeline{}, fmt.Errorf("%s: %w", filename, err)
 	}
 
-	return finalizePipeline(name, merged, envVars, mat, state.aliases, filename)
+	return finalizePipeline(finalizePipelineInput{
+		Name:     name,
+		Jobs:     merged,
+		Env:      acc.Env,
+		Matrix:   acc.Matrix,
+		Defaults: acc.Defaults,
+		Aliases:  state.aliases,
+		Filename: filename,
+	})
 }
 
 // parsePipelineChild dispatches a single child node of a pipeline block.
+//
+//revive:disable-next-line:cognitive-complexity parsePipelineChild is a flat switch dispatch; splitting it hurts readability.
 func (p *Parser) parsePipelineChild(
 	child *document.Node,
 	filename string,
 	state *includeState,
 	gc *groupCollector,
-	mat **pipeline.Matrix,
-	envVars *[]pipeline.EnvVar,
+	acc *pipelineAcc,
 ) error {
 	switch nt := NodeType(child.Name.ValueString()); nt {
 	case NodeTypeStep:
-		step, err := parseStep(child, filename)
+		// Bare step sugar: desugar into a single-step job.
+		job, err := parseBareStep(child, filename)
 		if err != nil {
 			return err
 		}
-		gc.addStep(step)
+		gc.addJob(job)
+	case NodeTypeJob:
+		job, err := parseJob(child, filename)
+		if err != nil {
+			return err
+		}
+		gc.addJob(job)
+	case NodeTypeDefaults:
+		if acc.Defaults != nil {
+			return fmt.Errorf("%s: pipeline: %w: %q", filename, ErrDuplicateField, string(nt))
+		}
+		d, err := parseDefaults(child, filename)
+		if err != nil {
+			return err
+		}
+		acc.Defaults = &d
 	case NodeTypeMatrix:
 		m, err := parseMatrix(child, filename, "pipeline")
 		if err != nil {
 			return err
 		}
-		if err := setOnce(mat, &m, filename, "pipeline", string(NodeTypeMatrix)); err != nil {
+		if err := setOnce(&acc.Matrix, &m, filename, "pipeline", string(nt)); err != nil {
 			return err
 		}
 	case NodeTypeEnv:
@@ -148,41 +179,365 @@ func (p *Parser) parsePipelineChild(
 		if err != nil {
 			return err
 		}
-		*envVars = append(*envVars, ev)
+		acc.Env = append(acc.Env, ev)
 	case NodeTypeInclude:
-		steps, inc, err := p.resolveChildInclude(child, filename, state)
+		jobs, inc, err := p.resolveChildInclude(child, filename, state)
 		if err != nil {
 			return err
 		}
-		gc.addInclude(steps, inc)
+		gc.addInclude(jobs, inc)
 	default:
 		return fmt.Errorf(
-			"%s: %w: %q (expected step, matrix, env, or include)", filename, ErrUnknownNode, string(nt),
+			"%s: %w: %q (expected job, step, defaults, matrix, env, or include)", filename, ErrUnknownNode, string(nt),
 		)
 	}
 	return nil
 }
 
-// finalizePipeline expands aliases, applies matrix expansion, and validates.
-func finalizePipeline(name string, steps []pipeline.Step, env []pipeline.EnvVar, mat *pipeline.Matrix, aliases map[string][]string, filename string) (pipeline.Pipeline, error) {
-	steps, err := pipeline.ExpandAliases(steps, aliases)
+// finalizePipelineInput groups parameters for finalizePipeline.
+type finalizePipelineInput struct {
+	Name     string
+	Jobs     []pipeline.Job
+	Env      []pipeline.EnvVar
+	Matrix   *pipeline.Matrix
+	Defaults *pipeline.Defaults
+	Aliases  map[string][]string
+	Filename string
+}
+
+// finalizePipeline applies defaults, expands aliases and matrices, then validates.
+func finalizePipeline(in finalizePipelineInput) (pipeline.Pipeline, error) {
+	jobs, err := pipeline.ExpandAliases(in.Jobs, in.Aliases)
 	if err != nil {
-		return pipeline.Pipeline{}, fmt.Errorf("%s: %w", filename, err)
+		return pipeline.Pipeline{}, fmt.Errorf("%s: %w", in.Filename, err)
 	}
 
-	pl := pipeline.Pipeline{Name: name, Steps: steps, Env: env, Matrix: mat}
+	// Apply defaults before expansion and validation.
+	jobs = pipeline.ApplyDefaults(jobs, in.Defaults)
+
+	pl := pipeline.Pipeline{Name: in.Name, Jobs: jobs, Env: in.Env, Matrix: in.Matrix, Defaults: in.Defaults}
 	pl, err = pipeline.Expand(pl)
 	if err != nil {
-		return pipeline.Pipeline{}, fmt.Errorf("%s: %w", filename, err)
+		return pipeline.Pipeline{}, fmt.Errorf("%s: %w", in.Filename, err)
 	}
 
 	if _, err := pl.Validate(); err != nil {
-		return pipeline.Pipeline{}, fmt.Errorf("%s: %w", filename, err)
+		return pipeline.Pipeline{}, fmt.Errorf("%s: %w", in.Filename, err)
 	}
 	return pl, nil
 }
 
-// --- KDL helpers (unchanged logic, extracted for reuse) ---
+// --- Job parsing ---
+
+// parseJob parses a job KDL node into a pipeline.Job.
+func parseJob(node *document.Node, filename string) (pipeline.Job, error) {
+	name, err := requireStringArg(node, filename, string(NodeTypeJob))
+	if err != nil {
+		return pipeline.Job{}, fmt.Errorf(
+			"%s: job missing name: %w: %w", filename, ErrMissingField, err,
+		)
+	}
+
+	j := pipeline.Job{Name: name}
+	for _, child := range node.Children {
+		if err := applyJobField(&j, child, filename); err != nil {
+			return pipeline.Job{}, err
+		}
+	}
+	return j, nil
+}
+
+// applyJobField dispatches a single child node of a job block.
+//
+//revive:disable-next-line:cognitive-complexity,cyclomatic,function-length applyJobField is a flat switch dispatch; splitting it hurts readability.
+func applyJobField(j *pipeline.Job, node *document.Node, filename string) error {
+	nt := NodeType(node.Name.ValueString())
+	scope := fmt.Sprintf("job %q", j.Name)
+	switch nt {
+	case NodeTypeImage:
+		v, err := requireStringArg(node, filename, string(nt))
+		if err != nil {
+			return err
+		}
+		return setOnce(&j.Image, v, filename, scope, string(nt))
+	case NodeTypeWorkdir:
+		v, err := requireStringArg(node, filename, string(nt))
+		if err != nil {
+			return err
+		}
+		return setOnce(&j.Workdir, v, filename, scope, string(nt))
+	case NodeTypePlatform:
+		v, err := requireStringArg(node, filename, string(nt))
+		if err != nil {
+			return err
+		}
+		return setOnce(&j.Platform, v, filename, scope, string(nt))
+	case NodeTypeDependsOn:
+		v, err := requireStringArg(node, filename, string(nt))
+		if err != nil {
+			return err
+		}
+		j.DependsOn = append(j.DependsOn, v)
+	case NodeTypeRun:
+		return fmt.Errorf(
+			"%s: %s: %w: %q (run must be inside a step)", filename, scope, ErrUnknownNode, string(nt),
+		)
+	case NodeTypeMount:
+		m, err := stringArgs2(node, filename, string(nt))
+		if err != nil {
+			return err
+		}
+		ro, err := prop[bool](node, PropReadonly)
+		if err != nil {
+			return fmt.Errorf("%s: %s: mount: %w", filename, scope, err)
+		}
+		j.Mounts = append(j.Mounts, pipeline.Mount{Source: m[0], Target: m[1], ReadOnly: ro})
+	case NodeTypeCache:
+		c, err := stringArgs2(node, filename, string(nt))
+		if err != nil {
+			return err
+		}
+		j.Caches = append(j.Caches, pipeline.Cache{ID: c[0], Target: c[1]})
+	case NodeTypeEnv:
+		ev, err := parseEnvNode(node, filename, scope)
+		if err != nil {
+			return err
+		}
+		j.Env = append(j.Env, ev)
+	case NodeTypeExport:
+		exp, err := parseExportNode(node, filename, j.Name)
+		if err != nil {
+			return err
+		}
+		j.Exports = append(j.Exports, exp)
+	case NodeTypeArtifact:
+		art, err := parseArtifactNode(node, filename, j.Name)
+		if err != nil {
+			return err
+		}
+		j.Artifacts = append(j.Artifacts, art)
+	case NodeTypeMatrix:
+		m, err := parseMatrix(node, filename, scope)
+		if err != nil {
+			return err
+		}
+		if err := setOnce(&j.Matrix, &m, filename, scope, string(nt)); err != nil {
+			return err
+		}
+	case NodeTypeNoCache:
+		if len(node.Arguments) > 0 {
+			return fmt.Errorf("%s: %s: no-cache takes no arguments: %w", filename, scope, ErrExtraArgs)
+		}
+		if j.NoCache {
+			return fmt.Errorf("%s: %s: %w: %q", filename, scope, ErrDuplicateField, string(nt))
+		}
+		j.NoCache = true
+	case NodeTypeStep:
+		step, err := parseJobStep(node, filename, j.Name)
+		if err != nil {
+			return err
+		}
+		j.Steps = append(j.Steps, step)
+	default:
+		return fmt.Errorf(
+			"%s: %s: %w: %q", filename, scope, ErrUnknownNode, string(nt),
+		)
+	}
+	return nil
+}
+
+// --- Step parsing (within a job) ---
+
+// parseJobStep parses a step KDL node within a job into a pipeline.Step.
+func parseJobStep(node *document.Node, filename, jobName string) (pipeline.Step, error) {
+	name, err := requireStringArg(node, filename, string(NodeTypeStep))
+	if err != nil {
+		return pipeline.Step{}, fmt.Errorf(
+			"%s: job %q: step missing name: %w: %w", filename, jobName, ErrMissingField, err,
+		)
+	}
+
+	s := pipeline.Step{Name: name}
+	for _, child := range node.Children {
+		if err := applyJobStepField(&s, child, filename, jobName); err != nil {
+			return pipeline.Step{}, err
+		}
+	}
+	return s, nil
+}
+
+// applyJobStepField dispatches a single child node of a step block within a job.
+//
+//revive:disable-next-line:cognitive-complexity,cyclomatic applyJobStepField is a flat switch dispatch over node types; splitting it hurts readability.
+func applyJobStepField(s *pipeline.Step, node *document.Node, filename, jobName string) error {
+	nt := NodeType(node.Name.ValueString())
+	scope := fmt.Sprintf("job %q step %q", jobName, s.Name)
+	switch nt {
+	case NodeTypeRun:
+		v, err := requireStringArg(node, filename, string(nt))
+		if err != nil {
+			return err
+		}
+		s.Run = append(s.Run, v)
+	case NodeTypeEnv:
+		ev, err := parseEnvNode(node, filename, scope)
+		if err != nil {
+			return err
+		}
+		s.Env = append(s.Env, ev)
+	case NodeTypeWorkdir:
+		v, err := requireStringArg(node, filename, string(nt))
+		if err != nil {
+			return err
+		}
+		return setOnce(&s.Workdir, v, filename, scope, string(nt))
+	case NodeTypeMount:
+		m, err := stringArgs2(node, filename, string(nt))
+		if err != nil {
+			return err
+		}
+		ro, err := prop[bool](node, PropReadonly)
+		if err != nil {
+			return fmt.Errorf("%s: %s: mount: %w", filename, scope, err)
+		}
+		s.Mounts = append(s.Mounts, pipeline.Mount{Source: m[0], Target: m[1], ReadOnly: ro})
+	case NodeTypeCache:
+		c, err := stringArgs2(node, filename, string(nt))
+		if err != nil {
+			return err
+		}
+		s.Caches = append(s.Caches, pipeline.Cache{ID: c[0], Target: c[1]})
+	case NodeTypeExport:
+		exp, err := parseExportNode(node, filename, scope)
+		if err != nil {
+			return err
+		}
+		s.Exports = append(s.Exports, exp)
+	case NodeTypeArtifact:
+		art, err := parseArtifactNode(node, filename, scope)
+		if err != nil {
+			return err
+		}
+		s.Artifacts = append(s.Artifacts, art)
+	case NodeTypeNoCache:
+		if len(node.Arguments) > 0 {
+			return fmt.Errorf("%s: %s: no-cache takes no arguments: %w", filename, scope, ErrExtraArgs)
+		}
+		if s.NoCache {
+			return fmt.Errorf("%s: %s: %w: %q", filename, scope, ErrDuplicateField, string(nt))
+		}
+		s.NoCache = true
+	default:
+		return fmt.Errorf(
+			"%s: %s: %w: %q", filename, scope, ErrUnknownNode, string(nt),
+		)
+	}
+	return nil
+}
+
+// --- Bare step desugaring ---
+
+// parseBareStep parses a step node directly under a pipeline into a single-step
+// Job. Job-level fields (image, platform, depends-on, etc.) go to the Job;
+// run commands go to the inner Step.
+//
+//revive:disable-next-line:cognitive-complexity,cyclomatic parseBareStep is a flat switch dispatch over node types; splitting it hurts readability.
+func parseBareStep(node *document.Node, filename string) (pipeline.Job, error) {
+	name, err := requireStringArg(node, filename, string(NodeTypeStep))
+	if err != nil {
+		return pipeline.Job{}, fmt.Errorf(
+			"%s: step missing name: %w: %w", filename, ErrMissingField, err,
+		)
+	}
+
+	j := pipeline.Job{Name: name}
+	s := pipeline.Step{Name: name}
+
+	for _, child := range node.Children {
+		nt := NodeType(child.Name.ValueString())
+		switch nt {
+		case NodeTypeRun:
+			// run goes to the inner step.
+			v, err := requireStringArg(child, filename, string(nt))
+			if err != nil {
+				return pipeline.Job{}, err
+			}
+			s.Run = append(s.Run, v)
+		case NodeTypeStep:
+			return pipeline.Job{}, fmt.Errorf(
+				"%s: step %q: %w: nested %q (use job for multi-step)",
+				filename, name, ErrUnknownNode, string(nt),
+			)
+		default:
+			// All other fields go to the job.
+			if err := applyJobField(&j, child, filename); err != nil {
+				return pipeline.Job{}, err
+			}
+		}
+	}
+
+	j.Steps = []pipeline.Step{s}
+	return j, nil
+}
+
+// --- Defaults parsing ---
+
+// parseDefaults parses a defaults KDL node into a pipeline.Defaults.
+//
+//revive:disable-next-line:cognitive-complexity parseDefaults is a flat switch dispatch over child node types; splitting it hurts readability.
+func parseDefaults(node *document.Node, filename string) (pipeline.Defaults, error) {
+	if len(node.Arguments) > 0 {
+		return pipeline.Defaults{}, fmt.Errorf(
+			"%s: defaults takes no arguments: %w", filename, ErrExtraArgs,
+		)
+	}
+	var d pipeline.Defaults
+	for _, child := range node.Children {
+		nt := NodeType(child.Name.ValueString())
+		switch nt {
+		case NodeTypeImage:
+			v, err := requireStringArg(child, filename, string(nt))
+			if err != nil {
+				return pipeline.Defaults{}, err
+			}
+			if err := setOnce(&d.Image, v, filename, "defaults", string(nt)); err != nil {
+				return pipeline.Defaults{}, err
+			}
+		case NodeTypeWorkdir:
+			v, err := requireStringArg(child, filename, string(nt))
+			if err != nil {
+				return pipeline.Defaults{}, err
+			}
+			if err := setOnce(&d.Workdir, v, filename, "defaults", string(nt)); err != nil {
+				return pipeline.Defaults{}, err
+			}
+		case NodeTypeMount:
+			m, err := stringArgs2(child, filename, string(nt))
+			if err != nil {
+				return pipeline.Defaults{}, err
+			}
+			ro, err := prop[bool](child, PropReadonly)
+			if err != nil {
+				return pipeline.Defaults{}, fmt.Errorf("%s: defaults: mount: %w", filename, err)
+			}
+			d.Mounts = append(d.Mounts, pipeline.Mount{Source: m[0], Target: m[1], ReadOnly: ro})
+		case NodeTypeEnv:
+			ev, err := parseEnvNode(child, filename, "defaults")
+			if err != nil {
+				return pipeline.Defaults{}, err
+			}
+			d.Env = append(d.Env, ev)
+		default:
+			return pipeline.Defaults{}, fmt.Errorf(
+				"%s: defaults: %w: %q (expected image, workdir, mount, or env)",
+				filename, ErrUnknownNode, string(nt),
+			)
+		}
+	}
+	return d, nil
+}
+
+// --- KDL helpers ---
 
 // parseKDL wraps kdl.Parse with a filename context on errors.
 func parseKDL(r io.Reader, filename string) (*document.Document, error) {
@@ -200,112 +555,6 @@ func dirOf(filename string) string {
 		return "."
 	}
 	return filepath.Dir(filename)
-}
-
-func parseStep(node *document.Node, filename string) (pipeline.Step, error) {
-	name, err := requireStringArg(node, filename, string(NodeTypeStep))
-	if err != nil {
-		return pipeline.Step{}, fmt.Errorf(
-			"%s: step missing name: %w: %w", filename, ErrMissingField, err,
-		)
-	}
-
-	s := pipeline.Step{Name: name}
-	for _, child := range node.Children {
-		if err := applyStepField(&s, child, filename); err != nil {
-			return pipeline.Step{}, err
-		}
-	}
-	return s, nil
-}
-
-//revive:disable-next-line:cognitive-complexity,cyclomatic applyStepField is a flat switch dispatch over node types; splitting it hurts readability.
-func applyStepField(s *pipeline.Step, node *document.Node, filename string) error {
-	nt := NodeType(node.Name.ValueString())
-	switch nt {
-	case NodeTypeImage, NodeTypeWorkdir, NodeTypeRun, NodeTypeDependsOn, NodeTypePlatform:
-		return applyStringField(s, nt, node, filename)
-	case NodeTypeMount:
-		m, err := stringArgs2(node, filename, string(nt))
-		if err != nil {
-			return err
-		}
-		ro, err := prop[bool](node, PropReadonly)
-		if err != nil {
-			return fmt.Errorf("%s: step %q: mount: %w", filename, s.Name, err)
-		}
-		s.Mounts = append(s.Mounts, pipeline.Mount{Source: m[0], Target: m[1], ReadOnly: ro})
-	case NodeTypeCache:
-		c, err := stringArgs2(node, filename, string(nt))
-		if err != nil {
-			return err
-		}
-		s.Caches = append(s.Caches, pipeline.Cache{ID: c[0], Target: c[1]})
-	case NodeTypeEnv:
-		ev, err := parseEnvNode(node, filename, fmt.Sprintf("step %q", s.Name))
-		if err != nil {
-			return err
-		}
-		s.Env = append(s.Env, ev)
-	case NodeTypeExport:
-		exp, err := parseExportNode(node, filename, s.Name)
-		if err != nil {
-			return err
-		}
-		s.Exports = append(s.Exports, exp)
-	case NodeTypeArtifact:
-		art, err := parseArtifactNode(node, filename, s.Name)
-		if err != nil {
-			return err
-		}
-		s.Artifacts = append(s.Artifacts, art)
-	case NodeTypeMatrix:
-		m, err := parseMatrix(node, filename, fmt.Sprintf("step %q", s.Name))
-		if err != nil {
-			return err
-		}
-		if err := setOnce(&s.Matrix, &m, filename, fmt.Sprintf("step %q", s.Name), string(nt)); err != nil {
-			return err
-		}
-	case NodeTypeNoCache:
-		if len(node.Arguments) > 0 {
-			return fmt.Errorf("%s: step %q: no-cache takes no arguments: %w", filename, s.Name, ErrExtraArgs)
-		}
-		if s.NoCache {
-			return fmt.Errorf("%s: step %q: %w: %q", filename, s.Name, ErrDuplicateField, string(nt))
-		}
-		s.NoCache = true
-	default:
-		return fmt.Errorf(
-			"%s: step %q: %w: %q", filename, s.Name, ErrUnknownNode, string(nt),
-		)
-	}
-	return nil
-}
-
-func applyStringField(s *pipeline.Step, nt NodeType, node *document.Node, filename string) error {
-	v, err := requireStringArg(node, filename, string(nt))
-	if err != nil {
-		return err
-	}
-	scope := fmt.Sprintf("step %q", s.Name)
-	switch nt {
-	case NodeTypeImage:
-		return setOnce(&s.Image, v, filename, scope, string(nt))
-	case NodeTypeWorkdir:
-		return setOnce(&s.Workdir, v, filename, scope, string(nt))
-	case NodeTypePlatform:
-		return setOnce(&s.Platform, v, filename, scope, string(nt))
-	case NodeTypeRun:
-		s.Run = append(s.Run, v)
-	case NodeTypeDependsOn:
-		s.DependsOn = append(s.DependsOn, v)
-	default:
-		return fmt.Errorf(
-			"%s: step %q: %w: %q", filename, s.Name, ErrUnknownNode, string(nt),
-		)
-	}
-	return nil
 }
 
 // parseMatrix parses a matrix block into a pipeline.Matrix. Each child node
@@ -351,34 +600,34 @@ func parseEnvNode(node *document.Node, filename, scope string) (pipeline.EnvVar,
 }
 
 // parseExportNode extracts an export path and required local property.
-func parseExportNode(node *document.Node, filename, stepName string) (pipeline.Export, error) {
+func parseExportNode(node *document.Node, filename, scopeName string) (pipeline.Export, error) {
 	if len(node.Arguments) > 1 {
 		return pipeline.Export{}, fmt.Errorf(
-			"%s: step %q: export requires exactly one argument, got %d: %w",
-			filename, stepName, len(node.Arguments), ErrExtraArgs,
+			"%s: %q: export requires exactly one argument, got %d: %w",
+			filename, scopeName, len(node.Arguments), ErrExtraArgs,
 		)
 	}
 	path, err := requireStringArg(node, filename, string(NodeTypeExport))
 	if err != nil {
-		return pipeline.Export{}, fmt.Errorf("%s: step %q: export: %w", filename, stepName, err)
+		return pipeline.Export{}, fmt.Errorf("%s: %q: export: %w", filename, scopeName, err)
 	}
 	local, err := prop[string](node, PropLocal)
 	if err != nil {
-		return pipeline.Export{}, fmt.Errorf("%s: step %q: export: %w", filename, stepName, err)
+		return pipeline.Export{}, fmt.Errorf("%s: %q: export: %w", filename, scopeName, err)
 	}
 	if local == "" {
 		return pipeline.Export{}, fmt.Errorf(
-			"%s: step %q: export: local property: %w", filename, stepName, ErrMissingField,
+			"%s: %q: export: local property: %w", filename, scopeName, ErrMissingField,
 		)
 	}
 	return pipeline.Export{Path: path, Local: local}, nil
 }
 
 // parseArtifactNode extracts an artifact definition (three string args: from, source, target).
-func parseArtifactNode(node *document.Node, filename, stepName string) (pipeline.Artifact, error) {
+func parseArtifactNode(node *document.Node, filename, scopeName string) (pipeline.Artifact, error) {
 	args, err := stringArgs3(node, string(NodeTypeArtifact))
 	if err != nil {
-		return pipeline.Artifact{}, fmt.Errorf("%s: step %q: %w", filename, stepName, err)
+		return pipeline.Artifact{}, fmt.Errorf("%s: %q: %w", filename, scopeName, err)
 	}
 	return pipeline.Artifact{From: args[0], Source: args[1], Target: args[2]}, nil
 }

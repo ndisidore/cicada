@@ -7,66 +7,66 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestMergeSteps(t *testing.T) {
+func TestMergeJobs(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name    string
-		groups  []StepGroup
-		want    []Step
+		groups  []JobGroup
+		want    []Job
 		wantErr error
 	}{
 		{
 			name: "no conflicts",
-			groups: []StepGroup{
-				{Steps: []Step{{Name: "a"}}, Origin: "a.kdl"},
-				{Steps: []Step{{Name: "b"}}, Origin: "b.kdl"},
+			groups: []JobGroup{
+				{Jobs: []Job{{Name: "a"}}, Origin: "a.kdl"},
+				{Jobs: []Job{{Name: "b"}}, Origin: "b.kdl"},
 			},
-			want: []Step{{Name: "a"}, {Name: "b"}},
+			want: []Job{{Name: "a"}, {Name: "b"}},
 		},
 		{
 			name: "error on duplicate",
-			groups: []StepGroup{
-				{Steps: []Step{{Name: "a"}}, Origin: "a.kdl"},
-				{Steps: []Step{{Name: "a"}}, Origin: "b.kdl", OnConflict: ConflictError},
+			groups: []JobGroup{
+				{Jobs: []Job{{Name: "a"}}, Origin: "a.kdl"},
+				{Jobs: []Job{{Name: "a"}}, Origin: "b.kdl", OnConflict: ConflictError},
 			},
-			wantErr: ErrDuplicateStep,
+			wantErr: ErrDuplicateJob,
 		},
 		{
 			name: "skip on duplicate",
-			groups: []StepGroup{
-				{Steps: []Step{{Name: "a", Image: "first"}}, Origin: "a.kdl"},
-				{Steps: []Step{{Name: "a", Image: "second"}}, Origin: "b.kdl", OnConflict: ConflictSkip},
+			groups: []JobGroup{
+				{Jobs: []Job{{Name: "a", Image: "first"}}, Origin: "a.kdl"},
+				{Jobs: []Job{{Name: "a", Image: "second"}}, Origin: "b.kdl", OnConflict: ConflictSkip},
 			},
-			want: []Step{{Name: "a", Image: "first"}},
+			want: []Job{{Name: "a", Image: "first"}},
 		},
 		{
 			name: "multiple groups with mixed strategies",
-			groups: []StepGroup{
-				{Steps: []Step{{Name: "a"}, {Name: "b"}}, Origin: "inline"},
-				{Steps: []Step{{Name: "c"}, {Name: "a"}}, Origin: "inc.kdl", OnConflict: ConflictSkip},
+			groups: []JobGroup{
+				{Jobs: []Job{{Name: "a"}, {Name: "b"}}, Origin: "inline"},
+				{Jobs: []Job{{Name: "c"}, {Name: "a"}}, Origin: "inc.kdl", OnConflict: ConflictSkip},
 			},
-			want: []Step{{Name: "a"}, {Name: "b"}, {Name: "c"}},
+			want: []Job{{Name: "a"}, {Name: "b"}, {Name: "c"}},
 		},
 		{
 			name:   "empty groups",
-			groups: []StepGroup{},
-			want:   []Step{},
+			groups: []JobGroup{},
+			want:   []Job{},
 		},
 		{
 			name: "ordering preserved across groups",
-			groups: []StepGroup{
-				{Steps: []Step{{Name: "c"}, {Name: "a"}}, Origin: "first"},
-				{Steps: []Step{{Name: "b"}, {Name: "d"}}, Origin: "second"},
+			groups: []JobGroup{
+				{Jobs: []Job{{Name: "c"}, {Name: "a"}}, Origin: "first"},
+				{Jobs: []Job{{Name: "b"}, {Name: "d"}}, Origin: "second"},
 			},
-			want: []Step{{Name: "c"}, {Name: "a"}, {Name: "b"}, {Name: "d"}},
+			want: []Job{{Name: "c"}, {Name: "a"}, {Name: "b"}, {Name: "d"}},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := MergeSteps(tt.groups)
+			got, err := MergeJobs(tt.groups)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
 				return
@@ -77,22 +77,22 @@ func TestMergeSteps(t *testing.T) {
 	}
 }
 
-func TestTerminalSteps(t *testing.T) {
+func TestTerminalJobs(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name  string
-		steps []Step
-		want  []string
+		name string
+		jobs []Job
+		want []string
 	}{
 		{
-			name:  "single step",
-			steps: []Step{{Name: "a"}},
-			want:  []string{"a"},
+			name: "single job",
+			jobs: []Job{{Name: "a"}},
+			want: []string{"a"},
 		},
 		{
 			name: "chain returns last",
-			steps: []Step{
+			jobs: []Job{
 				{Name: "a"},
 				{Name: "b", DependsOn: []string{"a"}},
 				{Name: "c", DependsOn: []string{"b"}},
@@ -101,7 +101,7 @@ func TestTerminalSteps(t *testing.T) {
 		},
 		{
 			name: "diamond DAG returns single terminal",
-			steps: []Step{
+			jobs: []Job{
 				{Name: "a"},
 				{Name: "b", DependsOn: []string{"a"}},
 				{Name: "c", DependsOn: []string{"a"}},
@@ -110,8 +110,8 @@ func TestTerminalSteps(t *testing.T) {
 			want: []string{"d"},
 		},
 		{
-			name: "independent steps are all terminal",
-			steps: []Step{
+			name: "independent jobs are all terminal",
+			jobs: []Job{
 				{Name: "a"},
 				{Name: "b"},
 				{Name: "c"},
@@ -120,7 +120,7 @@ func TestTerminalSteps(t *testing.T) {
 		},
 		{
 			name: "multiple terminals in partial DAG",
-			steps: []Step{
+			jobs: []Job{
 				{Name: "a"},
 				{Name: "b", DependsOn: []string{"a"}},
 				{Name: "c", DependsOn: []string{"a"}},
@@ -132,7 +132,7 @@ func TestTerminalSteps(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := TerminalSteps(tt.steps)
+			got := TerminalJobs(tt.jobs)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -143,32 +143,32 @@ func TestExpandAliases(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		steps   []Step
+		jobs    []Job
 		aliases map[string][]string
-		want    []Step
+		want    []Job
 		wantErr error
 	}{
 		{
-			name: "single alias to single step",
-			steps: []Step{
+			name: "single alias to single job",
+			jobs: []Job{
 				{Name: "lint-step"},
 				{Name: "build", DependsOn: []string{"lint"}},
 			},
 			aliases: map[string][]string{"lint": {"lint-step"}},
-			want: []Step{
+			want: []Job{
 				{Name: "lint-step"},
 				{Name: "build", DependsOn: []string{"lint-step"}},
 			},
 		},
 		{
-			name: "alias to multiple terminal steps",
-			steps: []Step{
+			name: "alias to multiple terminal jobs",
+			jobs: []Job{
 				{Name: "unit-test"},
 				{Name: "integration-test"},
 				{Name: "build", DependsOn: []string{"tests"}},
 			},
 			aliases: map[string][]string{"tests": {"integration-test", "unit-test"}},
-			want: []Step{
+			want: []Job{
 				{Name: "unit-test"},
 				{Name: "integration-test"},
 				{Name: "build", DependsOn: []string{"integration-test", "unit-test"}},
@@ -176,19 +176,19 @@ func TestExpandAliases(t *testing.T) {
 		},
 		{
 			name: "no aliases passthrough",
-			steps: []Step{
+			jobs: []Job{
 				{Name: "a"},
 				{Name: "b", DependsOn: []string{"a"}},
 			},
 			aliases: map[string][]string{},
-			want: []Step{
+			want: []Job{
 				{Name: "a"},
 				{Name: "b", DependsOn: []string{"a"}},
 			},
 		},
 		{
-			name: "alias collides with step name",
-			steps: []Step{
+			name: "alias collides with job name",
+			jobs: []Job{
 				{Name: "lint"},
 				{Name: "build", DependsOn: []string{"lint"}},
 			},
@@ -197,13 +197,13 @@ func TestExpandAliases(t *testing.T) {
 		},
 		{
 			name: "mixed alias and direct deps",
-			steps: []Step{
+			jobs: []Job{
 				{Name: "lint-step"},
 				{Name: "unit-test"},
 				{Name: "build", DependsOn: []string{"lint", "unit-test"}},
 			},
 			aliases: map[string][]string{"lint": {"lint-step"}},
-			want: []Step{
+			want: []Job{
 				{Name: "lint-step"},
 				{Name: "unit-test"},
 				{Name: "build", DependsOn: []string{"lint-step", "unit-test"}},
@@ -214,7 +214,7 @@ func TestExpandAliases(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := ExpandAliases(tt.steps, tt.aliases)
+			got, err := ExpandAliases(tt.jobs, tt.aliases)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
 				return

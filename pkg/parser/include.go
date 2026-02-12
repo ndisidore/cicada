@@ -16,7 +16,7 @@ import (
 const _maxIncludeDepth = 64
 
 // includeState tracks ancestry for cycle detection, caches resolved fragments
-// for diamond deduplication, and accumulates alias -> terminal step mappings.
+// for diamond deduplication, and accumulates alias -> terminal job mappings.
 type includeState struct {
 	ancestors   []string
 	ancestorSet map[string]struct{}
@@ -56,7 +56,7 @@ func (s *includeState) pop() {
 	delete(s.ancestorSet, last)
 }
 
-// registerAlias records an alias -> terminal steps mapping, returning
+// registerAlias records an alias -> terminal jobs mapping, returning
 // ErrDuplicateAlias if the alias is already registered.
 func (s *includeState) registerAlias(alias, fromFile, source string, terminals []string) error {
 	if _, exists := s.aliases[alias]; exists {
@@ -90,11 +90,11 @@ type includeDirective struct {
 	params     map[string]string
 }
 
-// groupCollector accumulates step groups in document order, flushing inline
-// steps as a group boundary when an include is encountered.
+// groupCollector accumulates job groups in document order, flushing inline
+// jobs as a group boundary when an include is encountered.
 type groupCollector struct {
-	inline []pipeline.Step
-	groups []pipeline.StepGroup
+	inline []pipeline.Job
+	groups []pipeline.JobGroup
 	origin string
 }
 
@@ -102,14 +102,14 @@ func newGroupCollector(origin string) *groupCollector {
 	return &groupCollector{origin: origin}
 }
 
-func (gc *groupCollector) addStep(s pipeline.Step) {
-	gc.inline = append(gc.inline, s)
+func (gc *groupCollector) addJob(j pipeline.Job) {
+	gc.inline = append(gc.inline, j)
 }
 
-func (gc *groupCollector) addInclude(steps []pipeline.Step, inc includeDirective) {
+func (gc *groupCollector) addInclude(jobs []pipeline.Job, inc includeDirective) {
 	gc.flush()
-	gc.groups = append(gc.groups, pipeline.StepGroup{
-		Steps:      steps,
+	gc.groups = append(gc.groups, pipeline.JobGroup{
+		Jobs:       jobs,
 		Origin:     inc.source,
 		OnConflict: inc.onConflict,
 	})
@@ -117,17 +117,17 @@ func (gc *groupCollector) addInclude(steps []pipeline.Step, inc includeDirective
 
 func (gc *groupCollector) flush() {
 	if len(gc.inline) > 0 {
-		gc.groups = append(gc.groups, pipeline.StepGroup{
-			Steps:  gc.inline,
+		gc.groups = append(gc.groups, pipeline.JobGroup{
+			Jobs:   gc.inline,
 			Origin: gc.origin,
 		})
 		gc.inline = nil
 	}
 }
 
-func (gc *groupCollector) merge() ([]pipeline.Step, error) {
+func (gc *groupCollector) merge() ([]pipeline.Job, error) {
 	gc.flush()
-	return pipeline.MergeSteps(gc.groups)
+	return pipeline.MergeJobs(gc.groups)
 }
 
 // parseIncludeNode extracts include properties from a KDL node.
@@ -187,6 +187,8 @@ func parseIncludeNode(node *document.Node, filename string) (includeDirective, e
 }
 
 // parseFragmentNode parses a fragment KDL node into a pipeline.Fragment.
+//
+//revive:disable-next-line:cognitive-complexity parseFragmentNode is a flat switch dispatch over child node types; splitting it hurts readability.
 func (p *Parser) parseFragmentNode(node *document.Node, filename string, state *includeState) (pipeline.Fragment, error) {
 	name, err := requireStringArg(node, filename, string(NodeTypeFragment))
 	if err != nil {
@@ -211,20 +213,27 @@ func (p *Parser) parseFragmentNode(node *document.Node, filename string, state *
 			}
 			frag.Params = append(frag.Params, pd)
 		case NodeTypeStep:
-			step, err := parseStep(child, filename)
+			// Bare step sugar within fragment.
+			job, err := parseBareStep(child, filename)
 			if err != nil {
 				return pipeline.Fragment{}, err
 			}
-			gc.addStep(step)
+			gc.addJob(job)
+		case NodeTypeJob:
+			job, err := parseJob(child, filename)
+			if err != nil {
+				return pipeline.Fragment{}, err
+			}
+			gc.addJob(job)
 		case NodeTypeInclude:
-			steps, inc, err := p.resolveChildInclude(child, filename, state)
+			jobs, inc, err := p.resolveChildInclude(child, filename, state)
 			if err != nil {
 				return pipeline.Fragment{}, err
 			}
-			gc.addInclude(steps, inc)
+			gc.addInclude(jobs, inc)
 		default:
 			return pipeline.Fragment{}, fmt.Errorf(
-				"%s: fragment %q: %w: %q (expected param, step, or include)",
+				"%s: fragment %q: %w: %q (expected param, step, job, or include)",
 				filename, name, ErrUnknownNode, string(nt),
 			)
 		}
@@ -234,7 +243,7 @@ func (p *Parser) parseFragmentNode(node *document.Node, filename string, state *
 	if err != nil {
 		return pipeline.Fragment{}, fmt.Errorf("%s: fragment %q: %w", filename, name, err)
 	}
-	frag.Steps = merged
+	frag.Jobs = merged
 	return frag, nil
 }
 
@@ -273,23 +282,23 @@ func checkDuplicateParam(defs []pipeline.ParamDef, name, filename, fragName stri
 }
 
 // resolveChildInclude parses an include child node and resolves it.
-func (p *Parser) resolveChildInclude(child *document.Node, filename string, state *includeState) ([]pipeline.Step, includeDirective, error) {
+func (p *Parser) resolveChildInclude(child *document.Node, filename string, state *includeState) ([]pipeline.Job, includeDirective, error) {
 	inc, err := parseIncludeNode(child, filename)
 	if err != nil {
 		return nil, includeDirective{}, err
 	}
 	// Pointer so resolveInclude can fill inc.alias from the included name.
-	steps, err := p.resolveInclude(&inc, filename, state)
+	jobs, err := p.resolveInclude(&inc, filename, state)
 	if err != nil {
 		return nil, includeDirective{}, err
 	}
-	return steps, inc, nil
+	return jobs, inc, nil
 }
 
-// resolveInclude resolves a single include directive into a slice of steps,
+// resolveInclude resolves a single include directive into a slice of jobs,
 // handling fragment params, cycle detection, and diamond dedup. The alias
 // field of inc is filled from the included file's name when left empty.
-func (p *Parser) resolveInclude(inc *includeDirective, fromFile string, state *includeState) ([]pipeline.Step, error) {
+func (p *Parser) resolveInclude(inc *includeDirective, fromFile string, state *includeState) ([]pipeline.Job, error) {
 	basePath := dirOf(fromFile)
 	rc, absPath, err := p.Resolver.Resolve(inc.source, basePath)
 	if err != nil {
@@ -308,13 +317,13 @@ func (p *Parser) resolveInclude(inc *includeDirective, fromFile string, state *i
 		if inc.alias == "" {
 			inc.alias = cached.Name
 		}
-		if err := state.registerAlias(inc.alias, fromFile, inc.source, pipeline.TerminalSteps(cached.Steps)); err != nil {
+		if err := state.registerAlias(inc.alias, fromFile, inc.source, pipeline.TerminalJobs(cached.Jobs)); err != nil {
 			return nil, err
 		}
-		return cached.Steps, nil
+		return cached.Jobs, nil
 	}
 
-	name, steps, err := p.parseIncludedFile(rc, absPath, inc.params, state)
+	name, jobs, err := p.parseIncludedFile(rc, absPath, inc.params, state)
 	if err != nil {
 		return nil, fmt.Errorf("%s: include %q: %w", fromFile, inc.source, err)
 	}
@@ -322,15 +331,15 @@ func (p *Parser) resolveInclude(inc *includeDirective, fromFile string, state *i
 	if inc.alias == "" {
 		inc.alias = name
 	}
-	if err := state.registerAlias(inc.alias, fromFile, inc.source, pipeline.TerminalSteps(steps)); err != nil {
+	if err := state.registerAlias(inc.alias, fromFile, inc.source, pipeline.TerminalJobs(jobs)); err != nil {
 		return nil, err
 	}
-	return steps, nil
+	return jobs, nil
 }
 
 // parseIncludedFile parses an included file (either pipeline or fragment) and
-// returns the fragment/pipeline name along with its steps (params substituted).
-func (p *Parser) parseIncludedFile(rc io.Reader, absPath string, params map[string]string, state *includeState) (string, []pipeline.Step, error) {
+// returns the fragment/pipeline name along with its jobs (params substituted).
+func (p *Parser) parseIncludedFile(rc io.Reader, absPath string, params map[string]string, state *includeState) (string, []pipeline.Job, error) {
 	doc, err := parseKDL(rc, absPath)
 	if err != nil {
 		return "", nil, err
@@ -368,7 +377,7 @@ func (p *Parser) parseIncludedFile(rc io.Reader, absPath string, params map[stri
 }
 
 // includeFragment resolves a fragment node from an included file.
-func (p *Parser) includeFragment(node *document.Node, absPath string, params map[string]string, state *includeState) (string, []pipeline.Step, error) {
+func (p *Parser) includeFragment(node *document.Node, absPath string, params map[string]string, state *includeState) (string, []pipeline.Job, error) {
 	frag, err := p.parseFragmentNode(node, absPath, state)
 	if err != nil {
 		return "", nil, err
@@ -377,13 +386,13 @@ func (p *Parser) includeFragment(node *document.Node, absPath string, params map
 	if err != nil {
 		return "", nil, fmt.Errorf("fragment %q: %w", frag.Name, err)
 	}
-	steps := pipeline.SubstituteParams(frag.Steps, resolved)
+	jobs := pipeline.SubstituteParams(frag.Jobs, resolved)
 	state.cache[cacheKey(absPath, params)] = pipeline.Fragment{
 		Name:   frag.Name,
 		Params: frag.Params,
-		Steps:  steps,
+		Jobs:   jobs,
 	}
-	return frag.Name, steps, nil
+	return frag.Name, jobs, nil
 }
 
 // parseConflictStrategy converts a string to a ConflictStrategy, returning
@@ -399,9 +408,11 @@ func parseConflictStrategy(s string) (pipeline.ConflictStrategy, error) {
 	}
 }
 
-// includePipeline extracts steps from an included pipeline file, ignoring its
-// pipeline-level matrix.
-func (p *Parser) includePipeline(node *document.Node, absPath string, params map[string]string, state *includeState) (string, []pipeline.Step, error) {
+// includePipeline extracts jobs from an included pipeline file, ignoring its
+// pipeline-level matrix and defaults.
+//
+//revive:disable-next-line:cognitive-complexity includePipeline is a flat switch dispatch; splitting it hurts readability.
+func (p *Parser) includePipeline(node *document.Node, absPath string, params map[string]string, state *includeState) (string, []pipeline.Job, error) {
 	name, err := requireStringArg(node, absPath, string(NodeTypePipeline))
 	if err != nil {
 		return "", nil, fmt.Errorf("%s: %w", absPath, err)
@@ -410,15 +421,22 @@ func (p *Parser) includePipeline(node *document.Node, absPath string, params map
 		return "", nil, fmt.Errorf("pipeline %q: %w", name, pipeline.ErrPipelineNoParams)
 	}
 
-	var steps []pipeline.Step
+	gc := newGroupCollector(absPath)
 	for _, child := range node.Children {
 		switch nt := NodeType(child.Name.ValueString()); nt {
 		case NodeTypeStep:
-			step, err := parseStep(child, absPath)
+			// Bare step sugar.
+			job, err := parseBareStep(child, absPath)
 			if err != nil {
 				return "", nil, err
 			}
-			steps = append(steps, step)
+			gc.addJob(job)
+		case NodeTypeJob:
+			job, err := parseJob(child, absPath)
+			if err != nil {
+				return "", nil, err
+			}
+			gc.addJob(job)
 		case NodeTypeMatrix:
 			dims := make([]string, len(child.Children))
 			for i, d := range child.Children {
@@ -434,21 +452,28 @@ func (p *Parser) includePipeline(node *document.Node, absPath string, params map
 				slog.String("pipeline", name),
 				slog.String("file", absPath),
 			)
+		case NodeTypeDefaults:
+			slog.Warn("included pipeline defaults ignored",
+				slog.String("pipeline", name),
+				slog.String("file", absPath),
+			)
 		case NodeTypeInclude:
-			// Conflict strategy is intentionally ignored here: included
-			// pipeline steps are appended flat, not merged via groupCollector.
-			incSteps, _, err := p.resolveChildInclude(child, absPath, state)
+			incJobs, inc, err := p.resolveChildInclude(child, absPath, state)
 			if err != nil {
 				return "", nil, err
 			}
-			steps = append(steps, incSteps...)
+			gc.addInclude(incJobs, inc)
 		default:
 			return "", nil, fmt.Errorf("%s: %w: %q", absPath, ErrUnknownNode, string(nt))
 		}
 	}
-	state.cache[cacheKey(absPath, params)] = pipeline.Fragment{
-		Name:  name,
-		Steps: steps,
+	jobs, err := gc.merge()
+	if err != nil {
+		return "", nil, fmt.Errorf("%s: pipeline %q: %w", absPath, name, err)
 	}
-	return name, steps, nil
+	state.cache[cacheKey(absPath, params)] = pipeline.Fragment{
+		Name: name,
+		Jobs: jobs,
+	}
+	return name, jobs, nil
 }

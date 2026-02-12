@@ -62,31 +62,35 @@ func TestRun(t *testing.T) {
 	def, err := llb.Scratch().Marshal(context.Background())
 	require.NoError(t, err)
 
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
 	tests := []struct {
 		name         string
+		ctx          context.Context // if nil, context.Background() is used
 		input        RunInput
 		wantErr      string
 		wantSentinel error
 	}{
 		{
-			name: "single step solves successfully",
+			name: "single job solves successfully",
 			input: RunInput{
 				Solver: &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 					close(ch)
 					return &client.SolveResponse{}, nil
 				}},
-				Steps:   []Step{{Name: "build", Definition: def}},
+				Jobs:    []Job{{Name: "build", Definition: def}},
 				Display: &fakeDisplay{},
 			},
 		},
 		{
-			name: "multi-step execution",
+			name: "multi-job execution",
 			input: RunInput{
 				Solver: &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 					close(ch)
 					return &client.SolveResponse{}, nil
 				}},
-				Steps: []Step{
+				Jobs: []Job{
 					{Name: "first", Definition: def},
 					{Name: "second", Definition: def},
 					{Name: "third", Definition: def},
@@ -95,16 +99,16 @@ func TestRun(t *testing.T) {
 			},
 		},
 		{
-			name: "solve error wraps with step name",
+			name: "solve error wraps with job name",
 			input: RunInput{
 				Solver: &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 					close(ch)
 					return nil, errors.New("connection refused")
 				}},
-				Steps:   []Step{{Name: "deploy", Definition: def}},
+				Jobs:    []Job{{Name: "deploy", Definition: def}},
 				Display: &fakeDisplay{},
 			},
-			wantErr: `step "deploy"`,
+			wantErr: `job "deploy"`,
 		},
 		{
 			name: "display error propagates",
@@ -113,7 +117,7 @@ func TestRun(t *testing.T) {
 					close(ch)
 					return &client.SolveResponse{}, nil
 				}},
-				Steps: []Step{{Name: "render", Definition: def}},
+				Jobs: []Job{{Name: "render", Definition: def}},
 				Display: &fakeDisplay{runFn: func(_ context.Context, _ string, ch <-chan *client.SolveStatus) error {
 					for s := range ch {
 						_ = s
@@ -124,10 +128,10 @@ func TestRun(t *testing.T) {
 			wantErr: "displaying progress",
 		},
 		{
-			name: "empty steps is a no-op",
+			name: "empty jobs is a no-op",
 			input: RunInput{
 				Solver:  &fakeSolver{},
-				Steps:   []Step{},
+				Jobs:    []Job{},
 				Display: &fakeDisplay{},
 			},
 		},
@@ -135,7 +139,7 @@ func TestRun(t *testing.T) {
 			name: "nil solver returns error",
 			input: RunInput{
 				Solver:  nil,
-				Steps:   []Step{{Name: "x", Definition: def}},
+				Jobs:    []Job{{Name: "x", Definition: def}},
 				Display: &fakeDisplay{},
 			},
 			wantSentinel: ErrNilSolver,
@@ -144,7 +148,7 @@ func TestRun(t *testing.T) {
 			name: "nil display returns error",
 			input: RunInput{
 				Solver:  &fakeSolver{},
-				Steps:   []Step{{Name: "x", Definition: def}},
+				Jobs:    []Job{{Name: "x", Definition: def}},
 				Display: nil,
 			},
 			wantSentinel: ErrNilDisplay,
@@ -153,28 +157,28 @@ func TestRun(t *testing.T) {
 			name: "unknown dependency",
 			input: RunInput{
 				Solver:  &fakeSolver{},
-				Steps:   []Step{{Name: "a", Definition: def, DependsOn: []string{"nonexistent"}}},
+				Jobs:    []Job{{Name: "a", Definition: def, DependsOn: []string{"nonexistent"}}},
 				Display: &fakeDisplay{},
 			},
 			wantSentinel: ErrUnknownDep,
 		},
 		{
-			name: "duplicate step name",
+			name: "duplicate job name",
 			input: RunInput{
 				Solver: &fakeSolver{},
-				Steps: []Step{
+				Jobs: []Job{
 					{Name: "a", Definition: def},
 					{Name: "a", Definition: def},
 				},
 				Display: &fakeDisplay{},
 			},
-			wantSentinel: ErrDuplicateStep,
+			wantSentinel: ErrDuplicateJob,
 		},
 		{
 			name: "mutual cycle",
 			input: RunInput{
 				Solver: &fakeSolver{},
-				Steps: []Step{
+				Jobs: []Job{
 					{Name: "a", Definition: def, DependsOn: []string{"b"}},
 					{Name: "b", Definition: def, DependsOn: []string{"a"}},
 				},
@@ -186,19 +190,45 @@ func TestRun(t *testing.T) {
 			name: "self cycle",
 			input: RunInput{
 				Solver: &fakeSolver{},
-				Steps: []Step{
+				Jobs: []Job{
 					{Name: "a", Definition: def, DependsOn: []string{"a"}},
 				},
 				Display: &fakeDisplay{},
 			},
 			wantSentinel: ErrCycleDetected,
 		},
+		{
+			name: "nil definition returns error",
+			input: RunInput{
+				Solver:  &fakeSolver{},
+				Jobs:    []Job{{Name: "bad", Definition: nil}},
+				Display: &fakeDisplay{},
+			},
+			wantSentinel: ErrNilDefinition,
+		},
+		{
+			name: "context cancellation propagates",
+			ctx:  cancelledCtx,
+			input: RunInput{
+				Solver: &fakeSolver{solveFn: func(ctx context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+					close(ch)
+					return nil, ctx.Err()
+				}},
+				Jobs:    []Job{{Name: "cancelled", Definition: def}},
+				Display: &fakeDisplay{},
+			},
+			wantSentinel: context.Canceled,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := Run(context.Background(), tt.input)
+			ctx := tt.ctx
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			err := Run(ctx, tt.input)
 			if tt.wantSentinel != nil {
 				require.ErrorIs(t, err, tt.wantSentinel)
 				return
@@ -213,383 +243,385 @@ func TestRun(t *testing.T) {
 	}
 }
 
-func TestRun_contextCancellation(t *testing.T) {
+func TestRun_ordering(t *testing.T) {
 	t.Parallel()
 
 	def, err := llb.Scratch().Marshal(context.Background())
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel immediately
+	t.Run("linear chain", func(t *testing.T) {
+		t.Parallel()
 
-	err = Run(ctx, RunInput{
-		Solver: &fakeSolver{solveFn: func(ctx context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
-			close(ch)
-			return nil, ctx.Err()
-		}},
-		Steps:   []Step{{Name: "cancelled", Definition: def}},
-		Display: &fakeDisplay{},
-	})
-	require.ErrorIs(t, err, context.Canceled)
-}
-
-func TestRun_dagOrdering(t *testing.T) {
-	t.Parallel()
-
-	def, err := llb.Scratch().Marshal(context.Background())
-	require.NoError(t, err)
-
-	var mu sync.Mutex
-	var order []string
-
-	solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
-		close(ch)
-		return &client.SolveResponse{}, nil
-	}}
-	display := &fakeDisplay{runFn: func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
-		mu.Lock()
-		order = append(order, name)
-		mu.Unlock()
-		for s := range ch {
-			_ = s
-		}
-		return nil
-	}}
-
-	// Chain a -> b -> c so they must run in order.
-	err = Run(context.Background(), RunInput{
-		Solver: solver,
-		Steps: []Step{
-			{Name: "a", Definition: def},
-			{Name: "b", Definition: def, DependsOn: []string{"a"}},
-			{Name: "c", Definition: def, DependsOn: []string{"b"}},
-		},
-		Display: display,
-	})
-	require.NoError(t, err)
-	require.Len(t, order, 3)
-	idxA, idxB, idxC := indexOf(order, "a"), indexOf(order, "b"), indexOf(order, "c")
-	assert.Less(t, idxA, idxB, "a must run before b")
-	assert.Less(t, idxB, idxC, "b must run before c")
-}
-
-func TestRun_diamondDAG(t *testing.T) {
-	t.Parallel()
-
-	def, err := llb.Scratch().Marshal(context.Background())
-	require.NoError(t, err)
-
-	var mu sync.Mutex
-	completed := make(map[string]bool)
-
-	solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
-		close(ch)
-		return &client.SolveResponse{}, nil
-	}}
-	display := &fakeDisplay{runFn: func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
-		// Check that all deps completed before us.
-		mu.Lock()
-		switch name {
-		case "b", "c":
-			assert.True(t, completed["a"], "%s should run after a", name)
-		case "d":
-			assert.True(t, completed["b"], "d should run after b")
-			assert.True(t, completed["c"], "d should run after c")
-		default:
-		}
-		completed[name] = true
-		mu.Unlock()
-		for s := range ch {
-			_ = s
-		}
-		return nil
-	}}
-
-	// Diamond: a -> {b, c} -> d
-	err = Run(context.Background(), RunInput{
-		Solver: solver,
-		Steps: []Step{
-			{Name: "a", Definition: def},
-			{Name: "b", Definition: def, DependsOn: []string{"a"}},
-			{Name: "c", Definition: def, DependsOn: []string{"a"}},
-			{Name: "d", Definition: def, DependsOn: []string{"b", "c"}},
-		},
-		Display: display,
-	})
-	require.NoError(t, err)
-	assert.Len(t, completed, 4)
-}
-
-func TestRun_parallelIndependentSteps(t *testing.T) {
-	t.Parallel()
-	synctest.Test(t, func(t *testing.T) {
-		def, err := llb.Scratch().Marshal(t.Context())
-		require.NoError(t, err)
-
-		var concurrent, maxConcurrent atomic.Int64
+		var mu sync.Mutex
+		var order []string
 
 		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
-			cur := concurrent.Add(1)
-			for {
-				old := maxConcurrent.Load()
-				if cur <= old || maxConcurrent.CompareAndSwap(old, cur) {
-					break
-				}
+			close(ch)
+			return &client.SolveResponse{}, nil
+		}}
+		display := &fakeDisplay{runFn: func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
+			mu.Lock()
+			order = append(order, name)
+			mu.Unlock()
+			for s := range ch {
+				_ = s
 			}
-			time.Sleep(10 * time.Millisecond)
-			concurrent.Add(-1)
+			return nil
+		}}
+
+		// Chain a -> b -> c so they must run in order.
+		err := Run(context.Background(), RunInput{
+			Solver: solver,
+			Jobs: []Job{
+				{Name: "a", Definition: def},
+				{Name: "b", Definition: def, DependsOn: []string{"a"}},
+				{Name: "c", Definition: def, DependsOn: []string{"b"}},
+			},
+			Display: display,
+		})
+		require.NoError(t, err)
+		require.Len(t, order, 3)
+		idxA, idxB, idxC := indexOf(order, "a"), indexOf(order, "b"), indexOf(order, "c")
+		require.NotEqual(t, -1, idxA, "a must appear in order")
+		require.NotEqual(t, -1, idxB, "b must appear in order")
+		require.NotEqual(t, -1, idxC, "c must appear in order")
+		assert.Less(t, idxA, idxB, "a must run before b")
+		assert.Less(t, idxB, idxC, "b must run before c")
+	})
+
+	t.Run("diamond", func(t *testing.T) {
+		t.Parallel()
+
+		var mu sync.Mutex
+		completed := make(map[string]bool)
+
+		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			close(ch)
+			return &client.SolveResponse{}, nil
+		}}
+		display := &fakeDisplay{runFn: func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
+			mu.Lock()
+			switch name {
+			case "b", "c":
+				assert.True(t, completed["a"], "%s should run after a", name)
+			case "d":
+				assert.True(t, completed["b"], "d should run after b")
+				assert.True(t, completed["c"], "d should run after c")
+			default:
+			}
+			completed[name] = true
+			mu.Unlock()
+			for s := range ch {
+				_ = s
+			}
+			return nil
+		}}
+
+		// Diamond: a -> {b, c} -> d
+		err := Run(context.Background(), RunInput{
+			Solver: solver,
+			Jobs: []Job{
+				{Name: "a", Definition: def},
+				{Name: "b", Definition: def, DependsOn: []string{"a"}},
+				{Name: "c", Definition: def, DependsOn: []string{"a"}},
+				{Name: "d", Definition: def, DependsOn: []string{"b", "c"}},
+			},
+			Display: display,
+		})
+		require.NoError(t, err)
+		assert.Len(t, completed, 4)
+	})
+}
+
+func TestRun_parallelism(t *testing.T) {
+	t.Parallel()
+
+	t.Run("independent jobs run concurrently", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			def, err := llb.Scratch().Marshal(t.Context())
+			require.NoError(t, err)
+
+			var concurrent, maxConcurrent atomic.Int64
+
+			solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+				cur := concurrent.Add(1)
+				for {
+					old := maxConcurrent.Load()
+					if cur <= old || maxConcurrent.CompareAndSwap(old, cur) {
+						break
+					}
+				}
+				time.Sleep(10 * time.Millisecond)
+				concurrent.Add(-1)
+				close(ch)
+				return &client.SolveResponse{}, nil
+			}}
+
+			err = Run(t.Context(), RunInput{
+				Solver: solver,
+				Jobs: []Job{
+					{Name: "a", Definition: def},
+					{Name: "b", Definition: def},
+					{Name: "c", Definition: def},
+				},
+				Display: &fakeDisplay{},
+			})
+			require.NoError(t, err)
+			assert.Equal(t, int64(3), maxConcurrent.Load(), "all 3 independent jobs should run concurrently")
+		})
+	})
+
+	t.Run("bounded by parallelism flag", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			def, err := llb.Scratch().Marshal(t.Context())
+			require.NoError(t, err)
+
+			var concurrent, maxConcurrent atomic.Int64
+
+			solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+				cur := concurrent.Add(1)
+				for {
+					old := maxConcurrent.Load()
+					if cur <= old || maxConcurrent.CompareAndSwap(old, cur) {
+						break
+					}
+				}
+				time.Sleep(20 * time.Millisecond)
+				concurrent.Add(-1)
+				close(ch)
+				return &client.SolveResponse{}, nil
+			}}
+
+			err = Run(t.Context(), RunInput{
+				Solver: solver,
+				Jobs: []Job{
+					{Name: "a", Definition: def},
+					{Name: "b", Definition: def},
+					{Name: "c", Definition: def},
+					{Name: "d", Definition: def},
+				},
+				Display:     &fakeDisplay{},
+				Parallelism: 2,
+			})
+			require.NoError(t, err)
+			assert.LessOrEqual(t, maxConcurrent.Load(), int64(2), "should not exceed parallelism=2")
+		})
+	})
+}
+
+func TestRun_errorPropagation(t *testing.T) {
+	t.Parallel()
+
+	def, err := llb.Scratch().Marshal(context.Background())
+	require.NoError(t, err)
+
+	t.Run("error cancels downstream", func(t *testing.T) {
+		t.Parallel()
+
+		var cExecuted atomic.Bool
+
+		solver := &fakeSolver{solveFn: func(ctx context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 			close(ch)
 			return &client.SolveResponse{}, nil
 		}}
 
-		err = Run(t.Context(), RunInput{
+		// "a" completes, then "b" fails. "c" depends on "b" and should be cancelled.
+		display := &fakeDisplay{runFn: func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
+			if name == "c" {
+				cExecuted.Store(true)
+			}
+			for s := range ch {
+				_ = s
+			}
+			if name == "b" {
+				return errors.New("job b exploded")
+			}
+			return nil
+		}}
+
+		err := Run(context.Background(), RunInput{
 			Solver: solver,
-			Steps: []Step{
+			Jobs: []Job{
 				{Name: "a", Definition: def},
-				{Name: "b", Definition: def},
-				{Name: "c", Definition: def},
+				{Name: "b", Definition: def, DependsOn: []string{"a"}},
+				{Name: "c", Definition: def, DependsOn: []string{"b"}},
 			},
-			Display: &fakeDisplay{},
+			Display: display,
 		})
-		require.NoError(t, err)
-		assert.Equal(t, int64(3), maxConcurrent.Load(), "all 3 independent steps should run concurrently")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "job b exploded")
+		assert.False(t, cExecuted.Load(), "job c should never execute when dep b fails")
 	})
-}
 
-func TestRun_parallelismBound(t *testing.T) {
-	t.Parallel()
-	synctest.Test(t, func(t *testing.T) {
-		def, err := llb.Scratch().Marshal(t.Context())
-		require.NoError(t, err)
+	t.Run("propagates to grandchild", func(t *testing.T) {
+		t.Parallel()
 
-		var concurrent, maxConcurrent atomic.Int64
+		var cSolved atomic.Bool
 
 		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
-			cur := concurrent.Add(1)
-			for {
-				old := maxConcurrent.Load()
-				if cur <= old || maxConcurrent.CompareAndSwap(old, cur) {
-					break
-				}
+			close(ch)
+			return &client.SolveResponse{}, nil
+		}}
+		display := &fakeDisplay{runFn: func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
+			if name == "c" {
+				cSolved.Store(true)
 			}
-			time.Sleep(20 * time.Millisecond)
-			concurrent.Add(-1)
+			for s := range ch {
+				_ = s
+			}
+			if name == "a" {
+				return errors.New("job a failed")
+			}
+			return nil
+		}}
+
+		// Chain a -> b -> c. Job "a" fails; "c" should never be solved.
+		err := Run(context.Background(), RunInput{
+			Solver: solver,
+			Jobs: []Job{
+				{Name: "a", Definition: def},
+				{Name: "b", Definition: def, DependsOn: []string{"a"}},
+				{Name: "c", Definition: def, DependsOn: []string{"b"}},
+			},
+			Display:     display,
+			Parallelism: 1,
+		})
+		require.Error(t, err)
+		assert.False(t, cSolved.Load(), "job c should never be solved when grandparent a fails")
+	})
+
+	t.Run("failed job unblocks deps", func(t *testing.T) {
+		t.Parallel()
+
+		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 			close(ch)
 			return &client.SolveResponse{}, nil
 		}}
 
-		err = Run(t.Context(), RunInput{
+		// Job "a" fails. Job "b" depends on "a" and must unblock promptly.
+		display := &fakeDisplay{runFn: func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
+			for s := range ch {
+				_ = s
+			}
+			if name == "a" {
+				return errors.New("job a failed")
+			}
+			return nil
+		}}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		err := Run(ctx, RunInput{
 			Solver: solver,
-			Steps: []Step{
+			Jobs: []Job{
 				{Name: "a", Definition: def},
-				{Name: "b", Definition: def},
-				{Name: "c", Definition: def},
-				{Name: "d", Definition: def},
+				{Name: "b", Definition: def, DependsOn: []string{"a"}},
 			},
-			Display:     &fakeDisplay{},
-			Parallelism: 2,
+			Display: display,
+		})
+		require.Error(t, err)
+		// Must not be a context deadline exceeded (that would mean it hung).
+		assert.NotErrorIs(t, err, context.DeadlineExceeded)
+	})
+
+	t.Run("dep error skips solve", func(t *testing.T) {
+		t.Parallel()
+
+		var bSolved atomic.Bool
+
+		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			close(ch)
+			return nil, errors.New("job a failed")
+		}}
+		display := &fakeDisplay{runFn: func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
+			if name == "b" {
+				bSolved.Store(true)
+			}
+			for s := range ch {
+				_ = s
+			}
+			return nil
+		}}
+
+		err := Run(context.Background(), RunInput{
+			Solver: solver,
+			Jobs: []Job{
+				{Name: "a", Definition: def},
+				{Name: "b", Definition: def, DependsOn: []string{"a"}},
+			},
+			Display:     display,
+			Parallelism: 1,
+		})
+		require.Error(t, err)
+		assert.False(t, bSolved.Load(), "job b's solve should never be invoked when dep a fails")
+	})
+}
+
+func TestRun_display(t *testing.T) {
+	t.Parallel()
+
+	def, err := llb.Scratch().Marshal(context.Background())
+	require.NoError(t, err)
+
+	t.Run("error drains channel", func(t *testing.T) {
+		t.Parallel()
+
+		// Solver writes additional statuses after display returns an error.
+		// Without draining, ch blocks and Solve never returns, causing a deadlock.
+		solver := &fakeSolver{solveFn: func(ctx context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			ch <- &client.SolveStatus{}
+			ch <- &client.SolveStatus{}
+			ch <- &client.SolveStatus{}
+			close(ch)
+			return &client.SolveResponse{}, nil
+		}}
+		display := &fakeDisplay{runFn: func(_ context.Context, _ string, ch <-chan *client.SolveStatus) error {
+			// Read one event then bail with an error, leaving events unread.
+			<-ch
+			return errors.New("vertex error")
+		}}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		err := Run(ctx, RunInput{
+			Solver:  solver,
+			Jobs:    []Job{{Name: "drain-test", Definition: def}},
+			Display: display,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "displaying progress")
+	})
+
+	t.Run("solver writes status events", func(t *testing.T) {
+		t.Parallel()
+
+		var received atomic.Int64
+		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			ch <- &client.SolveStatus{}
+			ch <- &client.SolveStatus{}
+			close(ch)
+			return &client.SolveResponse{}, nil
+		}}
+		display := &fakeDisplay{runFn: func(_ context.Context, _ string, ch <-chan *client.SolveStatus) error {
+			for s := range ch {
+				_ = s
+				received.Add(1)
+			}
+			return nil
+		}}
+
+		err := Run(context.Background(), RunInput{
+			Solver:  solver,
+			Jobs:    []Job{{Name: "status-test", Definition: def}},
+			Display: display,
 		})
 		require.NoError(t, err)
-		assert.LessOrEqual(t, maxConcurrent.Load(), int64(2), "should not exceed parallelism=2")
+		assert.Equal(t, int64(2), received.Load())
 	})
-}
-
-func TestRun_errorCancelsOthers(t *testing.T) {
-	t.Parallel()
-
-	def, err := llb.Scratch().Marshal(context.Background())
-	require.NoError(t, err)
-
-	var cExecuted atomic.Bool
-
-	solver := &fakeSolver{solveFn: func(ctx context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
-		close(ch)
-		return &client.SolveResponse{}, nil
-	}}
-
-	// "a" completes, then "b" fails. "c" depends on "b" and should be cancelled.
-	display := &fakeDisplay{runFn: func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
-		if name == "c" {
-			cExecuted.Store(true)
-		}
-		for s := range ch {
-			_ = s
-		}
-		if name == "b" {
-			return errors.New("step b exploded")
-		}
-		return nil
-	}}
-
-	err = Run(context.Background(), RunInput{
-		Solver: solver,
-		Steps: []Step{
-			{Name: "a", Definition: def},
-			{Name: "b", Definition: def, DependsOn: []string{"a"}},
-			{Name: "c", Definition: def, DependsOn: []string{"b"}},
-		},
-		Display: display,
-	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "step b exploded")
-	assert.False(t, cExecuted.Load(), "step c should never execute when dep b fails")
-}
-
-func TestRun_depErrorPropagatesToGrandchild(t *testing.T) {
-	t.Parallel()
-
-	def, err := llb.Scratch().Marshal(context.Background())
-	require.NoError(t, err)
-
-	var cSolved atomic.Bool
-
-	solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
-		close(ch)
-		return &client.SolveResponse{}, nil
-	}}
-	display := &fakeDisplay{runFn: func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
-		if name == "c" {
-			cSolved.Store(true)
-		}
-		for s := range ch {
-			_ = s
-		}
-		if name == "a" {
-			return errors.New("step a failed")
-		}
-		return nil
-	}}
-
-	// Chain a -> b -> c. Step "a" fails; "c" should never be solved.
-	err = Run(context.Background(), RunInput{
-		Solver: solver,
-		Steps: []Step{
-			{Name: "a", Definition: def},
-			{Name: "b", Definition: def, DependsOn: []string{"a"}},
-			{Name: "c", Definition: def, DependsOn: []string{"b"}},
-		},
-		Display:     display,
-		Parallelism: 1,
-	})
-	require.Error(t, err)
-	assert.False(t, cSolved.Load(), "step c should never be solved when grandparent a fails")
-}
-
-func TestRun_nilDefinition(t *testing.T) {
-	t.Parallel()
-
-	err := Run(context.Background(), RunInput{
-		Solver:  &fakeSolver{},
-		Steps:   []Step{{Name: "bad", Definition: nil}},
-		Display: &fakeDisplay{},
-	})
-	require.ErrorIs(t, err, ErrNilDefinition)
-}
-
-func TestRun_displayErrorDrain(t *testing.T) {
-	t.Parallel()
-
-	def, err := llb.Scratch().Marshal(context.Background())
-	require.NoError(t, err)
-
-	// Solver writes additional statuses after display returns an error.
-	// Without draining, ch blocks and Solve never returns, causing a deadlock.
-	solver := &fakeSolver{solveFn: func(ctx context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
-		ch <- &client.SolveStatus{}
-		ch <- &client.SolveStatus{}
-		ch <- &client.SolveStatus{}
-		close(ch)
-		return &client.SolveResponse{}, nil
-	}}
-	display := &fakeDisplay{runFn: func(_ context.Context, _ string, ch <-chan *client.SolveStatus) error {
-		// Read one event then bail with an error, leaving events unread.
-		<-ch
-		return errors.New("vertex error")
-	}}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	err = Run(ctx, RunInput{
-		Solver:  solver,
-		Steps:   []Step{{Name: "drain-test", Definition: def}},
-		Display: display,
-	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "displaying progress")
-}
-
-func TestRun_failedStepUnblocksDeps(t *testing.T) {
-	t.Parallel()
-
-	def, err := llb.Scratch().Marshal(context.Background())
-	require.NoError(t, err)
-
-	solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
-		close(ch)
-		return &client.SolveResponse{}, nil
-	}}
-
-	// Step "a" fails. Step "b" depends on "a" and must unblock promptly.
-	display := &fakeDisplay{runFn: func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
-		for s := range ch {
-			_ = s
-		}
-		if name == "a" {
-			return errors.New("step a failed")
-		}
-		return nil
-	}}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	err = Run(ctx, RunInput{
-		Solver: solver,
-		Steps: []Step{
-			{Name: "a", Definition: def},
-			{Name: "b", Definition: def, DependsOn: []string{"a"}},
-		},
-		Display: display,
-	})
-	require.Error(t, err)
-	// Must not be a context deadline exceeded (that would mean it hung).
-	assert.NotErrorIs(t, err, context.DeadlineExceeded)
-}
-
-func TestRun_depErrorSkipsSolve(t *testing.T) {
-	t.Parallel()
-
-	def, err := llb.Scratch().Marshal(context.Background())
-	require.NoError(t, err)
-
-	var bSolved atomic.Bool
-
-	solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
-		close(ch)
-		return nil, errors.New("step a failed")
-	}}
-	display := &fakeDisplay{runFn: func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
-		if name == "b" {
-			bSolved.Store(true)
-		}
-		for s := range ch {
-			_ = s
-		}
-		return nil
-	}}
-
-	err = Run(context.Background(), RunInput{
-		Solver: solver,
-		Steps: []Step{
-			{Name: "a", Definition: def},
-			{Name: "b", Definition: def, DependsOn: []string{"a"}},
-		},
-		Display:     display,
-		Parallelism: 1,
-	})
-	require.Error(t, err)
-	assert.False(t, bSolved.Load(), "step b's solve should never be invoked when dep a fails")
 }
 
 func TestRun_semAcquireFailurePropagates(t *testing.T) {
@@ -605,13 +637,13 @@ func TestRun_semAcquireFailurePropagates(t *testing.T) {
 		return &client.SolveResponse{}, nil
 	}}
 
-	// Pre-cancel so sem.Acquire fails immediately for all steps.
+	// Pre-cancel so sem.Acquire fails immediately for all jobs.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	err = Run(ctx, RunInput{
 		Solver: solver,
-		Steps: []Step{
+		Jobs: []Job{
 			{Name: "a", Definition: def},
 			{Name: "b", Definition: def, DependsOn: []string{"a"}},
 		},
@@ -620,36 +652,6 @@ func TestRun_semAcquireFailurePropagates(t *testing.T) {
 	})
 	require.ErrorIs(t, err, context.Canceled)
 	assert.False(t, solved.Load(), "solver should not be called when sem.Acquire fails")
-}
-
-func TestRun_solverWritesStatus(t *testing.T) {
-	t.Parallel()
-
-	def, err := llb.Scratch().Marshal(context.Background())
-	require.NoError(t, err)
-
-	var received atomic.Int64
-	solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
-		ch <- &client.SolveStatus{}
-		ch <- &client.SolveStatus{}
-		close(ch)
-		return &client.SolveResponse{}, nil
-	}}
-	display := &fakeDisplay{runFn: func(_ context.Context, _ string, ch <-chan *client.SolveStatus) error {
-		for s := range ch {
-			_ = s
-			received.Add(1)
-		}
-		return nil
-	}}
-
-	err = Run(context.Background(), RunInput{
-		Solver:  solver,
-		Steps:   []Step{{Name: "status-test", Definition: def}},
-		Display: display,
-	})
-	require.NoError(t, err)
-	assert.Equal(t, int64(2), received.Load())
 }
 
 func TestRun_exports(t *testing.T) {
@@ -671,7 +673,7 @@ func TestRun_exports(t *testing.T) {
 		{
 			name: "export solves with local exporter",
 			exports: []builder.LocalExport{
-				{Definition: def, StepName: "build", Local: "/tmp/out/myapp"},
+				{Definition: def, JobName: "build", Local: "/tmp/out/myapp"},
 			},
 			solver: &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 				close(ch)
@@ -684,7 +686,7 @@ func TestRun_exports(t *testing.T) {
 		{
 			name: "directory export uses Local as OutputDir",
 			exports: []builder.LocalExport{
-				{Definition: def, StepName: "build", Local: "/tmp/out/dist", Dir: true},
+				{Definition: def, JobName: "build", Local: "/tmp/out/dist", Dir: true},
 			},
 			solver: &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 				close(ch)
@@ -695,21 +697,21 @@ func TestRun_exports(t *testing.T) {
 			wantOutputDir: "/tmp/out/dist",
 		},
 		{
-			name: "export solve error wraps step and path",
+			name: "export solve error wraps job and path",
 			exports: []builder.LocalExport{
-				{Definition: def, StepName: "compile", Local: "/tmp/bin/app"},
+				{Definition: def, JobName: "compile", Local: "/tmp/bin/app"},
 			},
 			solver: &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 				close(ch)
 				return nil, errors.New("disk full")
 			}},
 			display: &fakeDisplay{},
-			wantErr: `exporting "/tmp/bin/app" from step "compile"`,
+			wantErr: `exporting "/tmp/bin/app" from job "compile"`,
 		},
 		{
 			name: "export display error propagates",
 			exports: []builder.LocalExport{
-				{Definition: def, StepName: "build", Local: "/tmp/out/myapp"},
+				{Definition: def, JobName: "build", Local: "/tmp/out/myapp"},
 			},
 			solver: &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 				close(ch)
@@ -729,7 +731,7 @@ func TestRun_exports(t *testing.T) {
 		{
 			name: "nil export definition returns error",
 			exports: []builder.LocalExport{
-				{Definition: nil, StepName: "bad", Local: "/tmp/out/x"},
+				{Definition: nil, JobName: "bad", Local: "/tmp/out/x"},
 			},
 			solver:       &fakeSolver{},
 			display:      &fakeDisplay{},
@@ -738,7 +740,7 @@ func TestRun_exports(t *testing.T) {
 		{
 			name: "empty export local returns error",
 			exports: []builder.LocalExport{
-				{Definition: def, StepName: "bad", Local: ""},
+				{Definition: def, JobName: "bad", Local: ""},
 			},
 			solver:       &fakeSolver{},
 			display:      &fakeDisplay{},
@@ -752,9 +754,9 @@ func TestRun_exports(t *testing.T) {
 
 			var capturedExportOpt atomic.Pointer[client.SolveOpt]
 
-			// Use the same solver for both the step and export phases.
-			// For step phase, always succeed.
-			stepSolver := &fakeSolver{solveFn: func(ctx context.Context, d *llb.Definition, opt client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			// Use the same solver for both the job and export phases.
+			// For job phase, always succeed.
+			jobSolver := &fakeSolver{solveFn: func(ctx context.Context, d *llb.Definition, opt client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 				// Export phase: capture opt and delegate to test's solver.
 				if len(opt.Exports) > 0 {
 					capturedExportOpt.Store(&opt)
@@ -765,8 +767,8 @@ func TestRun_exports(t *testing.T) {
 			}}
 
 			err := Run(context.Background(), RunInput{
-				Solver:  stepSolver,
-				Steps:   []Step{{Name: "step", Definition: def}},
+				Solver:  jobSolver,
+				Jobs:    []Job{{Name: "job", Definition: def}},
 				Display: tt.display,
 				Exports: tt.exports,
 			})
@@ -789,83 +791,83 @@ func TestRun_exports(t *testing.T) {
 			}
 		})
 	}
-}
 
-func TestRun_exportsConcurrent(t *testing.T) {
-	t.Parallel()
-	synctest.Test(t, func(t *testing.T) {
-		def, err := llb.Scratch().Marshal(t.Context())
-		require.NoError(t, err)
+	t.Run("concurrent exports", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			def, err := llb.Scratch().Marshal(t.Context())
+			require.NoError(t, err)
 
-		var concurrent, maxConcurrent atomic.Int64
+			var concurrent, maxConcurrent atomic.Int64
 
-		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, opt client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
-			// Only track concurrency for export solves.
-			if len(opt.Exports) > 0 {
-				cur := concurrent.Add(1)
-				for {
-					old := maxConcurrent.Load()
-					if cur <= old || maxConcurrent.CompareAndSwap(old, cur) {
-						break
+			solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, opt client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+				// Only track concurrency for export solves.
+				if len(opt.Exports) > 0 {
+					cur := concurrent.Add(1)
+					for {
+						old := maxConcurrent.Load()
+						if cur <= old || maxConcurrent.CompareAndSwap(old, cur) {
+							break
+						}
 					}
+					time.Sleep(10 * time.Millisecond)
+					concurrent.Add(-1)
 				}
-				time.Sleep(10 * time.Millisecond)
-				concurrent.Add(-1)
-			}
-			close(ch)
-			return &client.SolveResponse{}, nil
-		}}
-
-		err = Run(t.Context(), RunInput{
-			Solver:  solver,
-			Steps:   []Step{{Name: "build", Definition: def}},
-			Display: &fakeDisplay{},
-			Exports: []builder.LocalExport{
-				{Definition: def, StepName: "build", Local: "/tmp/a"},
-				{Definition: def, StepName: "build", Local: "/tmp/b"},
-				{Definition: def, StepName: "build", Local: "/tmp/c"},
-			},
-		})
-		require.NoError(t, err)
-		assert.Equal(t, int64(3), maxConcurrent.Load(), "all 3 exports should run concurrently")
-	})
-}
-
-func TestRun_exportErrorCancelsSiblings(t *testing.T) {
-	t.Parallel()
-	synctest.Test(t, func(t *testing.T) {
-		def, err := llb.Scratch().Marshal(t.Context())
-		require.NoError(t, err)
-
-		var started atomic.Int64
-
-		solver := &fakeSolver{solveFn: func(ctx context.Context, _ *llb.Definition, opt client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
-			if len(opt.Exports) > 0 {
-				idx := started.Add(1)
-				if idx == 1 {
-					close(ch)
-					return nil, errors.New("disk full")
-				}
-				// Other exports block until cancelled.
-				<-ctx.Done()
 				close(ch)
-				return nil, ctx.Err()
-			}
-			close(ch)
-			return &client.SolveResponse{}, nil
-		}}
+				return &client.SolveResponse{}, nil
+			}}
 
-		err = Run(t.Context(), RunInput{
-			Solver:  solver,
-			Steps:   []Step{{Name: "build", Definition: def}},
-			Display: &fakeDisplay{},
-			Exports: []builder.LocalExport{
-				{Definition: def, StepName: "build", Local: "/tmp/a"},
-				{Definition: def, StepName: "build", Local: "/tmp/b"},
-			},
+			err = Run(t.Context(), RunInput{
+				Solver:  solver,
+				Jobs:    []Job{{Name: "build", Definition: def}},
+				Display: &fakeDisplay{},
+				Exports: []builder.LocalExport{
+					{Definition: def, JobName: "build", Local: "/tmp/a"},
+					{Definition: def, JobName: "build", Local: "/tmp/b"},
+					{Definition: def, JobName: "build", Local: "/tmp/c"},
+				},
+			})
+			require.NoError(t, err)
+			assert.Equal(t, int64(3), maxConcurrent.Load(), "all 3 exports should run concurrently")
 		})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "disk full")
+	})
+
+	t.Run("error cancels siblings", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			def, err := llb.Scratch().Marshal(t.Context())
+			require.NoError(t, err)
+
+			var started atomic.Int64
+
+			solver := &fakeSolver{solveFn: func(ctx context.Context, _ *llb.Definition, opt client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+				if len(opt.Exports) > 0 {
+					idx := started.Add(1)
+					if idx == 1 {
+						close(ch)
+						return nil, errors.New("disk full")
+					}
+					// Other exports block until cancelled.
+					<-ctx.Done()
+					close(ch)
+					return nil, ctx.Err()
+				}
+				close(ch)
+				return &client.SolveResponse{}, nil
+			}}
+
+			err = Run(t.Context(), RunInput{
+				Solver:  solver,
+				Jobs:    []Job{{Name: "build", Definition: def}},
+				Display: &fakeDisplay{},
+				Exports: []builder.LocalExport{
+					{Definition: def, JobName: "build", Local: "/tmp/a"},
+					{Definition: def, JobName: "build", Local: "/tmp/b"},
+				},
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "disk full")
+		})
 	})
 }
 
@@ -887,7 +889,7 @@ func TestRun_cacheEntriesFlowToSolveOpt(t *testing.T) {
 
 	err = Run(context.Background(), RunInput{
 		Solver:       solver,
-		Steps:        []Step{{Name: "build", Definition: def}},
+		Jobs:         []Job{{Name: "build", Definition: def}},
 		Display:      &fakeDisplay{},
 		CacheExports: exports,
 		CacheImports: imports,
@@ -900,66 +902,70 @@ func TestRun_cacheEntriesFlowToSolveOpt(t *testing.T) {
 	assert.Equal(t, imports, opt.CacheImports)
 }
 
-func TestTeeStatus_nilCollectorReturnsSource(t *testing.T) {
+func TestTeeStatus(t *testing.T) {
 	t.Parallel()
 
-	ch := make(chan *client.SolveStatus, 1)
-	result := teeStatus(context.Background(), ch, nil, "step")
-	// With nil collector, teeStatus returns the source channel directly.
-	assert.Equal(t, (<-chan *client.SolveStatus)(ch), result)
-}
+	t.Run("nil collector returns source", func(t *testing.T) {
+		t.Parallel()
 
-func TestTeeStatus_forwardsAndObserves(t *testing.T) {
-	t.Parallel()
+		ch := make(chan *client.SolveStatus, 1)
+		result := teeStatus(context.Background(), ch, nil, "step")
+		// With nil collector, teeStatus returns the source channel directly.
+		assert.Equal(t, (<-chan *client.SolveStatus)(ch), result)
+	})
 
-	now := time.Now()
-	started := now.Add(-time.Second)
-	completed := now
+	t.Run("forwards and observes", func(t *testing.T) {
+		t.Parallel()
 
-	collector := cache.NewCollector()
-	src := make(chan *client.SolveStatus, 2)
-	src <- &client.SolveStatus{
-		Vertexes: []*client.Vertex{
-			{Digest: digest.FromString("v1"), Name: "op1", Started: &started, Completed: &completed, Cached: true},
-		},
-	}
-	src <- &client.SolveStatus{
-		Vertexes: []*client.Vertex{
-			{Digest: digest.FromString("v2"), Name: "op2", Started: &started, Completed: &completed, Cached: false},
-		},
-	}
-	close(src)
+		now := time.Now()
+		started := now.Add(-time.Second)
+		completed := now
 
-	out := teeStatus(context.Background(), src, collector, "build")
-
-	var received int
-	for range out {
-		received++
-	}
-	assert.Equal(t, 2, received)
-
-	r := collector.Report()
-	require.Len(t, r.Steps, 1)
-	assert.Equal(t, 2, r.Steps[0].TotalOps)
-	assert.Equal(t, 1, r.Steps[0].CachedOps)
-}
-
-func TestTeeStatus_contextCancellation(t *testing.T) {
-	t.Parallel()
-	synctest.Test(t, func(t *testing.T) {
 		collector := cache.NewCollector()
-		src := make(chan *client.SolveStatus)
-
-		ctx, cancel := context.WithCancel(t.Context())
-		out := teeStatus(ctx, src, collector, "step")
-
-		// Cancel; the tee goroutine exits the select loop and drains src.
-		cancel()
-		// Simulate the Solve goroutine closing src after context cancellation.
+		src := make(chan *client.SolveStatus, 2)
+		src <- &client.SolveStatus{
+			Vertexes: []*client.Vertex{
+				{Digest: digest.FromString("v1"), Name: "op1", Started: &started, Completed: &completed, Cached: true},
+			},
+		}
+		src <- &client.SolveStatus{
+			Vertexes: []*client.Vertex{
+				{Digest: digest.FromString("v2"), Name: "op2", Started: &started, Completed: &completed, Cached: false},
+			},
+		}
 		close(src)
 
-		// Drain out; should terminate within the synctest bubble.
-		for range out { //nolint:revive // drain remaining events
+		out := teeStatus(context.Background(), src, collector, "build")
+
+		var received int
+		for range out {
+			received++
 		}
+		assert.Equal(t, 2, received)
+
+		r := collector.Report()
+		require.Len(t, r.Jobs, 1)
+		assert.Equal(t, 2, r.Jobs[0].TotalOps)
+		assert.Equal(t, 1, r.Jobs[0].CachedOps)
+	})
+
+	t.Run("context cancellation", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			collector := cache.NewCollector()
+			src := make(chan *client.SolveStatus)
+
+			ctx, cancel := context.WithCancel(t.Context())
+			out := teeStatus(ctx, src, collector, "step")
+
+			// Cancel; the tee goroutine exits the select loop and drains src.
+			cancel()
+			// Simulate the Solve goroutine closing src after context cancellation.
+			close(src)
+
+			// Drain out; should terminate within the synctest bubble.
+			for range out { //nolint:revive // drain remaining events
+			}
+		})
 	})
 }

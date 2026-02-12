@@ -83,16 +83,16 @@ func TestCollector(t *testing.T) {
 				t.Parallel()
 				c := NewCollector()
 				for _, s := range tt.statuses {
-					c.Observe("step1", s)
+					c.Observe("job1", s)
 				}
 				r := c.Report()
 				if tt.wantOps == 0 {
-					assert.Empty(t, r.Steps)
+					assert.Empty(t, r.Jobs)
 					return
 				}
-				require.Len(t, r.Steps, 1)
-				assert.Equal(t, tt.wantOps, r.Steps[0].TotalOps)
-				assert.Equal(t, tt.wantCache, r.Steps[0].CachedOps)
+				require.Len(t, r.Jobs, 1)
+				assert.Equal(t, tt.wantOps, r.Jobs[0].TotalOps)
+				assert.Equal(t, tt.wantCache, r.Jobs[0].CachedOps)
 			})
 		}
 	})
@@ -104,7 +104,7 @@ func TestCollector(t *testing.T) {
 		var wg sync.WaitGroup
 		for i := range 10 {
 			wg.Go(func() {
-				c.Observe("step", &client.SolveStatus{
+				c.Observe("job", &client.SolveStatus{
 					Vertexes: []*client.Vertex{
 						{Digest: digest.FromString(fmt.Sprintf("v%d", i)), Name: "op", Started: &started, Completed: &completed, Cached: i%2 == 0},
 					},
@@ -114,11 +114,11 @@ func TestCollector(t *testing.T) {
 		wg.Wait()
 
 		r := c.Report()
-		require.Len(t, r.Steps, 1)
-		assert.Equal(t, 10, r.Steps[0].TotalOps)
+		require.Len(t, r.Jobs, 1)
+		assert.Equal(t, 10, r.Jobs[0].TotalOps)
 	})
 
-	t.Run("MultipleSteps", func(t *testing.T) {
+	t.Run("MultipleJobs", func(t *testing.T) {
 		t.Parallel()
 
 		c := NewCollector()
@@ -134,7 +134,7 @@ func TestCollector(t *testing.T) {
 		})
 
 		r := c.Report()
-		assert.Len(t, r.Steps, 2)
+		assert.Len(t, r.Jobs, 2)
 	})
 
 	t.Run("DeduplicatesByDigest", func(t *testing.T) {
@@ -160,9 +160,9 @@ func TestCollector(t *testing.T) {
 		})
 
 		r := c.Report()
-		require.Len(t, r.Steps, 1)
-		assert.Equal(t, 2, r.Steps[0].TotalOps, "duplicate vertices should be counted once")
-		assert.Equal(t, 1, r.Steps[0].CachedOps)
+		require.Len(t, r.Jobs, 1)
+		assert.Equal(t, 2, r.Jobs[0].TotalOps, "duplicate vertices should be counted once")
+		assert.Equal(t, 1, r.Jobs[0].CachedOps)
 	})
 }
 
@@ -179,21 +179,21 @@ func TestReport(t *testing.T) {
 		}{
 			{
 				name: "50 percent",
-				r: Report{Steps: []StepReport{
+				r: Report{Jobs: []JobReport{
 					{TotalOps: 4, CachedOps: 2},
 				}},
 				want: 0.5,
 			},
 			{
 				name: "100 percent",
-				r: Report{Steps: []StepReport{
+				r: Report{Jobs: []JobReport{
 					{TotalOps: 3, CachedOps: 3},
 				}},
 				want: 1.0,
 			},
 			{
 				name: "0 percent",
-				r: Report{Steps: []StepReport{
+				r: Report{Jobs: []JobReport{
 					{TotalOps: 5, CachedOps: 0},
 				}},
 				want: 0.0,
@@ -204,8 +204,8 @@ func TestReport(t *testing.T) {
 				want: 0.0,
 			},
 			{
-				name: "multi-step aggregation",
-				r: Report{Steps: []StepReport{
+				name: "multi-job aggregation",
+				r: Report{Jobs: []JobReport{
 					{TotalOps: 6, CachedOps: 4},
 					{TotalOps: 3, CachedOps: 0},
 				}},
@@ -224,9 +224,9 @@ func TestReport(t *testing.T) {
 	t.Run("PrintReport", func(t *testing.T) {
 		t.Parallel()
 
-		r := Report{Steps: []StepReport{
-			{StepName: "build", TotalOps: 6, CachedOps: 4, Duration: 1200 * time.Millisecond},
-			{StepName: "test", TotalOps: 3, CachedOps: 0, Duration: 8400 * time.Millisecond},
+		r := Report{Jobs: []JobReport{
+			{JobName: "build", TotalOps: 6, CachedOps: 4, Duration: 1200 * time.Millisecond},
+			{JobName: "test", TotalOps: 3, CachedOps: 0, Duration: 8400 * time.Millisecond},
 		}}
 
 		var buf bytes.Buffer

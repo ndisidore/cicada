@@ -272,7 +272,7 @@ func TestResolveAddr(t *testing.T) {
 	}
 }
 
-func TestBuildSteps(t *testing.T) {
+func TestBuildRunnerJobs(t *testing.T) {
 	t.Parallel()
 
 	def, err := llb.Scratch().Marshal(context.Background())
@@ -282,22 +282,22 @@ func TestBuildSteps(t *testing.T) {
 		name         string
 		result       builder.Result
 		pipeline     pipeline.Pipeline
-		want         []runner.Step
+		want         []runner.Job
 		wantSentinel error
 	}{
 		{
 			name: "matching order",
 			result: builder.Result{
 				Definitions: []*llb.Definition{def, def},
-				StepNames:   []string{"a", "b"},
+				JobNames:    []string{"a", "b"},
 			},
 			pipeline: pipeline.Pipeline{
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{Name: "a"},
 					{Name: "b", DependsOn: []string{"a"}},
 				},
 			},
-			want: []runner.Step{
+			want: []runner.Job{
 				{Name: "a", Definition: def},
 				{Name: "b", Definition: def, DependsOn: []string{"a"}},
 			},
@@ -306,47 +306,47 @@ func TestBuildSteps(t *testing.T) {
 			name: "reordered builder output wires deps correctly",
 			result: builder.Result{
 				Definitions: []*llb.Definition{def, def},
-				StepNames:   []string{"b", "a"},
+				JobNames:    []string{"b", "a"},
 			},
 			pipeline: pipeline.Pipeline{
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{Name: "a"},
 					{Name: "b", DependsOn: []string{"a"}},
 				},
 			},
-			want: []runner.Step{
+			want: []runner.Job{
 				{Name: "b", Definition: def, DependsOn: []string{"a"}},
 				{Name: "a", Definition: def},
 			},
 		},
 		{
-			name: "definitions and step names length mismatch",
+			name: "definitions and job names length mismatch",
 			result: builder.Result{
 				Definitions: []*llb.Definition{def},
-				StepNames:   []string{"a", "b"},
+				JobNames:    []string{"a", "b"},
 			},
 			pipeline:     pipeline.Pipeline{},
 			wantSentinel: errResultMismatch,
 		},
 		{
-			name: "unknown builder step name",
+			name: "unknown builder job name",
 			result: builder.Result{
 				Definitions: []*llb.Definition{def},
-				StepNames:   []string{"unknown"},
+				JobNames:    []string{"unknown"},
 			},
 			pipeline: pipeline.Pipeline{
-				Steps: []pipeline.Step{
+				Jobs: []pipeline.Job{
 					{Name: "a"},
 				},
 			},
-			wantSentinel: errUnknownBuilderStep,
+			wantSentinel: errUnknownBuilderJob,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := buildSteps(tt.result, tt.pipeline)
+			got, err := buildRunnerJobs(tt.result, tt.pipeline)
 			if tt.wantSentinel != nil {
 				require.ErrorIs(t, err, tt.wantSentinel)
 				return
