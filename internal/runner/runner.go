@@ -14,6 +14,7 @@ import (
 	"golang.org/x/sync/semaphore"
 
 	"github.com/ndisidore/cicada/internal/builder"
+	"github.com/ndisidore/cicada/internal/cache"
 	"github.com/ndisidore/cicada/internal/progress"
 	"github.com/ndisidore/cicada/pkg/pipeline"
 )
@@ -70,6 +71,21 @@ type RunInput struct {
 	Parallelism int
 	// Exports contains artifacts to export to the host after all steps complete.
 	Exports []builder.LocalExport
+	// CacheExports configures cache export destinations (e.g. registry, gha, local).
+	CacheExports []client.CacheOptionsEntry
+	// CacheImports configures cache import sources.
+	CacheImports []client.CacheOptionsEntry
+	// CacheCollector accumulates vertex stats for cache analytics; nil disables.
+	CacheCollector *cache.Collector
+}
+
+// solveConfig groups parameters for solveStep and solveExport, keeping their
+// signatures under the CS-05 limit.
+type solveConfig struct {
+	localMounts  map[string]fsutil.FS
+	cacheExports []client.CacheOptionsEntry
+	cacheImports []client.CacheOptionsEntry
+	collector    *cache.Collector
 }
 
 // dagNode tracks a step and a done channel that is closed on completion.
@@ -107,11 +123,18 @@ func Run(ctx context.Context, in RunInput) error {
 	}
 	sem := semaphore.NewWeighted(limit)
 
+	cfg := solveConfig{
+		localMounts:  in.LocalMounts,
+		cacheExports: in.CacheExports,
+		cacheImports: in.CacheImports,
+		collector:    in.CacheCollector,
+	}
+
 	g, gctx := errgroup.WithContext(ctx)
 	for i := range in.Steps {
 		node := nodes[in.Steps[i].Name]
 		g.Go(func() error {
-			return runNode(gctx, node, nodes, sem, in)
+			return runNode(gctx, node, nodes, sem, in.Solver, in.Display, cfg)
 		})
 	}
 	if err := g.Wait(); err != nil {
@@ -124,7 +147,7 @@ func Run(ctx context.Context, in RunInput) error {
 	eg, ectx := errgroup.WithContext(ctx)
 	for _, exp := range in.Exports {
 		eg.Go(func() error {
-			if err := solveExport(ectx, in.Solver, in.Display, exp); err != nil {
+			if err := solveExport(ectx, in.Solver, in.Display, exp, cfg); err != nil {
 				return fmt.Errorf("exporting %q from step %q: %w", exp.Local, exp.StepName, err)
 			}
 			return nil
@@ -192,7 +215,7 @@ func detectCycles(nodes map[string]*dagNode) error {
 }
 
 // runNode waits for dependencies, acquires a semaphore slot, solves, and signals done.
-func runNode(ctx context.Context, node *dagNode, nodes map[string]*dagNode, sem *semaphore.Weighted, in RunInput) error {
+func runNode(ctx context.Context, node *dagNode, nodes map[string]*dagNode, sem *semaphore.Weighted, solver Solver, display progress.Display, cfg solveConfig) error {
 	defer close(node.done)
 
 	for _, dep := range node.step.DependsOn {
@@ -214,7 +237,7 @@ func runNode(ctx context.Context, node *dagNode, nodes map[string]*dagNode, sem 
 	}
 	defer sem.Release(1)
 
-	err := solveStep(ctx, in.Solver, in.Display, node.step.Name, node.step.Definition, in.LocalMounts)
+	err := solveStep(ctx, solver, display, node.step.Name, node.step.Definition, cfg)
 	if err != nil {
 		node.err = err
 		return fmt.Errorf("step %q: %w", node.step.Name, err)
@@ -228,7 +251,7 @@ func solveStep(
 	display progress.Display,
 	name string,
 	def *llb.Definition,
-	localMounts map[string]fsutil.FS,
+	cfg solveConfig,
 ) error {
 	if def == nil {
 		return ErrNilDefinition
@@ -240,7 +263,9 @@ func solveStep(
 
 	g.Go(func() error {
 		_, err := s.Solve(ctx, def, client.SolveOpt{
-			LocalMounts: localMounts,
+			LocalMounts:  cfg.localMounts,
+			CacheExports: cfg.cacheExports,
+			CacheImports: cfg.cacheImports,
 		}, ch)
 		if err != nil {
 			return fmt.Errorf("solving step: %w", err)
@@ -249,8 +274,9 @@ func solveStep(
 	})
 
 	g.Go(func() error {
-		err := display.Run(ctx, name, ch)
-		for range ch { //nolint:revive // drain so Solve can close ch
+		displayCh := teeStatus(ctx, ch, cfg.collector, name)
+		err := display.Run(ctx, name, displayCh)
+		for range displayCh { //nolint:revive // drain so Solve can close ch
 		}
 		if err != nil {
 			return fmt.Errorf("displaying progress: %w", err)
@@ -263,7 +289,7 @@ func solveStep(
 
 // solveExport solves an export LLB definition using the local exporter to
 // write files to the host filesystem.
-func solveExport(ctx context.Context, s Solver, display progress.Display, exp builder.LocalExport) error {
+func solveExport(ctx context.Context, s Solver, display progress.Display, exp builder.LocalExport, cfg solveConfig) error {
 	if exp.Definition == nil {
 		return ErrNilDefinition
 	}
@@ -284,6 +310,8 @@ func solveExport(ctx context.Context, s Solver, display progress.Display, exp bu
 				Type:      client.ExporterLocal,
 				OutputDir: outputDir,
 			}},
+			CacheExports: cfg.cacheExports,
+			CacheImports: cfg.cacheImports,
 		}, ch)
 		if err != nil {
 			return fmt.Errorf("solving export: %w", err)
@@ -291,9 +319,11 @@ func solveExport(ctx context.Context, s Solver, display progress.Display, exp bu
 		return nil
 	})
 
+	displayName := "export:" + exp.StepName
 	g.Go(func() error {
-		err := display.Run(ctx, "export:"+exp.StepName, ch)
-		for range ch { //nolint:revive // drain so Solve can close ch
+		displayCh := teeStatus(ctx, ch, cfg.collector, displayName)
+		err := display.Run(ctx, displayName, displayCh)
+		for range displayCh { //nolint:revive // drain so Solve can close ch
 		}
 		if err != nil {
 			return fmt.Errorf("displaying export progress: %w", err)
@@ -302,4 +332,42 @@ func solveExport(ctx context.Context, s Solver, display progress.Display, exp bu
 	})
 
 	return g.Wait()
+}
+
+// drainStatus discards remaining items from ch so the sender is not blocked.
+func drainStatus(ch <-chan *client.SolveStatus) {
+	//nolint:revive // intentionally discarding remaining events
+	for range ch {
+	}
+}
+
+// teeStatus interposes a Collector between the source status channel and the
+// display consumer. If collector is nil, returns src directly (zero overhead).
+// On context cancellation the goroutine drains src so the Solve sender can exit.
+func teeStatus(ctx context.Context, src <-chan *client.SolveStatus, collector *cache.Collector, stepName string) <-chan *client.SolveStatus {
+	if collector == nil {
+		return src
+	}
+	out := make(chan *client.SolveStatus)
+	go func() {
+		defer close(out)
+		defer drainStatus(src)
+		for {
+			select {
+			case status, ok := <-src:
+				if !ok {
+					return
+				}
+				collector.Observe(stepName, status)
+				select {
+				case out <- status:
+				case <-ctx.Done():
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out
 }

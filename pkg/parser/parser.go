@@ -219,6 +219,7 @@ func parseStep(node *document.Node, filename string) (pipeline.Step, error) {
 	return s, nil
 }
 
+//revive:disable-next-line:cognitive-complexity,cyclomatic applyStepField is a flat switch dispatch over node types; splitting it hurts readability.
 func applyStepField(s *pipeline.Step, node *document.Node, filename string) error {
 	nt := NodeType(node.Name.ValueString())
 	switch nt {
@@ -266,6 +267,14 @@ func applyStepField(s *pipeline.Step, node *document.Node, filename string) erro
 		if err := setOnce(&s.Matrix, &m, filename, fmt.Sprintf("step %q", s.Name), string(nt)); err != nil {
 			return err
 		}
+	case NodeTypeNoCache:
+		if len(node.Arguments) > 0 {
+			return fmt.Errorf("%s: step %q: no-cache takes no arguments: %w", filename, s.Name, ErrExtraArgs)
+		}
+		if s.NoCache {
+			return fmt.Errorf("%s: step %q: %w: %q", filename, s.Name, ErrDuplicateField, string(nt))
+		}
+		s.NoCache = true
 	default:
 		return fmt.Errorf(
 			"%s: step %q: %w: %q", filename, s.Name, ErrUnknownNode, string(nt),

@@ -770,6 +770,51 @@ func TestParse(t *testing.T) {
 			}`,
 			wantErr: ErrMissingField,
 		},
+		{
+			name: "step with no-cache flag",
+			input: `pipeline "ci" {
+				step "test" {
+					image "golang:1.23"
+					run "go test ./..."
+					no-cache
+				}
+			}`,
+			want: pipeline.Pipeline{
+				Name: "ci",
+				Steps: []pipeline.Step{
+					{
+						Name:    "test",
+						Image:   "golang:1.23",
+						Run:     []string{"go test ./..."},
+						NoCache: true,
+					},
+				},
+				TopoOrder: []int{0},
+			},
+		},
+		{
+			name: "duplicate no-cache rejected",
+			input: `pipeline "bad" {
+				step "test" {
+					image "alpine:latest"
+					run "echo hi"
+					no-cache
+					no-cache
+				}
+			}`,
+			wantErr: ErrDuplicateField,
+		},
+		{
+			name: "no-cache with arguments rejected",
+			input: `pipeline "bad" {
+				step "test" {
+					image "alpine:latest"
+					run "echo hi"
+					no-cache "arg"
+				}
+			}`,
+			wantErr: ErrExtraArgs,
+		},
 	}
 
 	for _, tt := range tests {

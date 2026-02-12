@@ -309,6 +309,82 @@ func TestBuild(t *testing.T) {
 			},
 		},
 		{
+			name: "no-cache-filter applies IgnoreCache to matching step only",
+			opts: BuildOpts{NoCacheFilter: map[string]struct{}{"test": {}}},
+			p: pipeline.Pipeline{
+				Name: "selective",
+				Steps: []pipeline.Step{
+					{
+						Name:  "build",
+						Image: "alpine:latest",
+						Run:   []string{"echo build"},
+					},
+					{
+						Name:      "test",
+						Image:     "alpine:latest",
+						DependsOn: []string{"build"},
+						Run:       []string{"echo test"},
+					},
+				},
+			},
+			wantSteps: 2,
+			verify: func(t *testing.T, result Result) {
+				t.Helper()
+				// "build" should NOT have IgnoreCache.
+				buildDef := result.Definitions[0]
+				for _, md := range buildDef.Metadata {
+					assert.False(t, md.IgnoreCache, "build step should not have IgnoreCache")
+				}
+				// "test" should have IgnoreCache on both image and exec.
+				testDef := result.Definitions[1]
+				var imgIgnored, execIgnored bool
+				for _, md := range testDef.Metadata {
+					if !md.IgnoreCache {
+						continue
+					}
+					if md.Description["llb.customname"] != "" {
+						execIgnored = true
+					} else {
+						imgIgnored = true
+					}
+				}
+				assert.True(t, imgIgnored, "test image op should have IgnoreCache=true")
+				assert.True(t, execIgnored, "test exec op should have IgnoreCache=true")
+			},
+		},
+		{
+			name: "step NoCache field applies IgnoreCache",
+			p: pipeline.Pipeline{
+				Name: "step-nocache",
+				Steps: []pipeline.Step{
+					{
+						Name:    "test",
+						Image:   "alpine:latest",
+						Run:     []string{"echo test"},
+						NoCache: true,
+					},
+				},
+			},
+			wantSteps: 1,
+			verify: func(t *testing.T, result Result) {
+				t.Helper()
+				def := result.Definitions[0]
+				var imgIgnored, execIgnored bool
+				for _, md := range def.Metadata {
+					if !md.IgnoreCache {
+						continue
+					}
+					if md.Description["llb.customname"] != "" {
+						execIgnored = true
+					} else {
+						imgIgnored = true
+					}
+				}
+				assert.True(t, imgIgnored, "image op should have IgnoreCache=true")
+				assert.True(t, execIgnored, "exec op should have IgnoreCache=true")
+			},
+		},
+		{
 			name: "empty run commands",
 			p: pipeline.Pipeline{
 				Name: "bad",
