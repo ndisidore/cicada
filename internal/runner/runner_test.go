@@ -3,7 +3,6 @@ package runner
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -31,18 +30,27 @@ func (f *fakeSolver) Solve(ctx context.Context, def *llb.Definition, opt client.
 
 // fakeDisplay implements progress.Display for testing.
 type fakeDisplay struct {
-	runFn func(ctx context.Context, name string, ch <-chan *client.SolveStatus) error
+	wg       sync.WaitGroup
+	attachFn func(ctx context.Context, name string, ch <-chan *client.SolveStatus) error
 }
 
-func (f *fakeDisplay) Run(ctx context.Context, name string, ch <-chan *client.SolveStatus) error {
-	if f.runFn != nil {
-		return f.runFn(ctx, name, ch)
+func (*fakeDisplay) Start(_ context.Context) error { return nil }
+
+func (f *fakeDisplay) Attach(ctx context.Context, name string, ch <-chan *client.SolveStatus) error {
+	if f.attachFn != nil {
+		return f.attachFn(ctx, name, ch)
 	}
-	for s := range ch {
-		_ = s
-	}
+	f.wg.Go(func() {
+		//revive:disable-next-line:empty-block // drain
+		for range ch {
+		}
+	})
 	return nil
 }
+
+func (*fakeDisplay) Seal() {}
+
+func (f *fakeDisplay) Wait() error { f.wg.Wait(); return nil }
 
 // indexOf returns the position of s in slice, or -1 if not found.
 func indexOf(slice []string, s string) int {
@@ -108,23 +116,6 @@ func TestRun(t *testing.T) {
 				Display: &fakeDisplay{},
 			},
 			wantErr: `job "deploy"`,
-		},
-		{
-			name: "display error propagates",
-			input: RunInput{
-				Solver: &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
-					close(ch)
-					return &client.SolveResponse{}, nil
-				}},
-				Jobs: []Job{{Name: "render", Definition: def}},
-				Display: &fakeDisplay{runFn: func(_ context.Context, _ string, ch <-chan *client.SolveStatus) error {
-					for s := range ch {
-						_ = s
-					}
-					return errors.New("terminal error")
-				}},
-			},
-			wantErr: "displaying progress",
 		},
 		{
 			name: "empty jobs is a no-op",
@@ -258,15 +249,18 @@ func TestRun_ordering(t *testing.T) {
 			close(ch)
 			return &client.SolveResponse{}, nil
 		}}
-		display := &fakeDisplay{runFn: func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
+		display := &fakeDisplay{}
+		display.attachFn = func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
 			mu.Lock()
 			order = append(order, name)
 			mu.Unlock()
-			for s := range ch {
-				_ = s
-			}
+			display.wg.Go(func() {
+				//revive:disable-next-line:empty-block // drain
+				for range ch {
+				}
+			})
 			return nil
-		}}
+		}
 
 		// Chain a -> b -> c so they must run in order.
 		err := Run(context.Background(), RunInput{
@@ -298,7 +292,8 @@ func TestRun_ordering(t *testing.T) {
 			close(ch)
 			return &client.SolveResponse{}, nil
 		}}
-		display := &fakeDisplay{runFn: func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
+		display := &fakeDisplay{}
+		display.attachFn = func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
 			mu.Lock()
 			switch name {
 			case "b", "c":
@@ -310,11 +305,13 @@ func TestRun_ordering(t *testing.T) {
 			}
 			completed[name] = true
 			mu.Unlock()
-			for s := range ch {
-				_ = s
-			}
+			display.wg.Go(func() {
+				//revive:disable-next-line:empty-block // drain
+				for range ch {
+				}
+			})
 			return nil
-		}}
+		}
 
 		// Diamond: a -> {b, c} -> d
 		err := Run(context.Background(), RunInput{
@@ -419,33 +416,45 @@ func TestRun_errorPropagation(t *testing.T) {
 	t.Run("error cancels downstream", func(t *testing.T) {
 		t.Parallel()
 
+		// Separate definitions so the solver can identify each job
+		// by pointer, without relying on display side-channel state.
+		defA, err := llb.Scratch().Marshal(t.Context())
+		require.NoError(t, err)
+		defB, err := llb.Scratch().Marshal(t.Context())
+		require.NoError(t, err)
+		defC, err := llb.Scratch().Marshal(t.Context())
+		require.NoError(t, err)
+
 		var cExecuted atomic.Bool
 
-		solver := &fakeSolver{solveFn: func(ctx context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
-			close(ch)
-			return &client.SolveResponse{}, nil
-		}}
-
-		// "a" completes, then "b" fails. "c" depends on "b" and should be cancelled.
-		display := &fakeDisplay{runFn: func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
+		display := &fakeDisplay{}
+		display.attachFn = func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
 			if name == "c" {
 				cExecuted.Store(true)
 			}
-			for s := range ch {
-				_ = s
-			}
-			if name == "b" {
-				return errors.New("job b exploded")
-			}
+			display.wg.Go(func() {
+				//revive:disable-next-line:empty-block // drain
+				for range ch {
+				}
+			})
 			return nil
+		}
+
+		// "a" succeeds, "b" fails at solve, "c" depends on "b".
+		solver := &fakeSolver{solveFn: func(_ context.Context, def *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			close(ch)
+			if def == defB {
+				return nil, errors.New("job b exploded")
+			}
+			return &client.SolveResponse{}, nil
 		}}
 
-		err := Run(context.Background(), RunInput{
+		err = Run(context.Background(), RunInput{
 			Solver: solver,
 			Jobs: []Job{
-				{Name: "a", Definition: def},
-				{Name: "b", Definition: def, DependsOn: []string{"a"}},
-				{Name: "c", Definition: def, DependsOn: []string{"b"}},
+				{Name: "a", Definition: defA},
+				{Name: "b", Definition: defB, DependsOn: []string{"a"}},
+				{Name: "c", Definition: defC, DependsOn: []string{"b"}},
 			},
 			Display: display,
 		})
@@ -461,20 +470,20 @@ func TestRun_errorPropagation(t *testing.T) {
 
 		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 			close(ch)
-			return &client.SolveResponse{}, nil
+			return nil, errors.New("job a failed")
 		}}
-		display := &fakeDisplay{runFn: func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
+		display := &fakeDisplay{}
+		display.attachFn = func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
 			if name == "c" {
 				cSolved.Store(true)
 			}
-			for s := range ch {
-				_ = s
-			}
-			if name == "a" {
-				return errors.New("job a failed")
-			}
+			display.wg.Go(func() {
+				//revive:disable-next-line:empty-block // drain
+				for range ch {
+				}
+			})
 			return nil
-		}}
+		}
 
 		// Chain a -> b -> c. Job "a" fails; "c" should never be solved.
 		err := Run(context.Background(), RunInput{
@@ -496,19 +505,10 @@ func TestRun_errorPropagation(t *testing.T) {
 
 		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 			close(ch)
-			return &client.SolveResponse{}, nil
+			return nil, errors.New("job a failed")
 		}}
 
-		// Job "a" fails. Job "b" depends on "a" and must unblock promptly.
-		display := &fakeDisplay{runFn: func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
-			for s := range ch {
-				_ = s
-			}
-			if name == "a" {
-				return errors.New("job a failed")
-			}
-			return nil
-		}}
+		display := &fakeDisplay{}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -535,15 +535,18 @@ func TestRun_errorPropagation(t *testing.T) {
 			close(ch)
 			return nil, errors.New("job a failed")
 		}}
-		display := &fakeDisplay{runFn: func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
+		display := &fakeDisplay{}
+		display.attachFn = func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
 			if name == "b" {
 				bSolved.Store(true)
 			}
-			for s := range ch {
-				_ = s
-			}
+			display.wg.Go(func() {
+				//revive:disable-next-line:empty-block // drain
+				for range ch {
+				}
+			})
 			return nil
-		}}
+		}
 
 		err := Run(context.Background(), RunInput{
 			Solver: solver,
@@ -565,36 +568,6 @@ func TestRun_display(t *testing.T) {
 	def, err := llb.Scratch().Marshal(context.Background())
 	require.NoError(t, err)
 
-	t.Run("error drains channel", func(t *testing.T) {
-		t.Parallel()
-
-		// Solver writes additional statuses after display returns an error.
-		// Without draining, ch blocks and Solve never returns, causing a deadlock.
-		solver := &fakeSolver{solveFn: func(ctx context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
-			ch <- &client.SolveStatus{}
-			ch <- &client.SolveStatus{}
-			ch <- &client.SolveStatus{}
-			close(ch)
-			return &client.SolveResponse{}, nil
-		}}
-		display := &fakeDisplay{runFn: func(_ context.Context, _ string, ch <-chan *client.SolveStatus) error {
-			// Read one event then bail with an error, leaving events unread.
-			<-ch
-			return errors.New("vertex error")
-		}}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		err := Run(ctx, RunInput{
-			Solver:  solver,
-			Jobs:    []Job{{Name: "drain-test", Definition: def}},
-			Display: display,
-		})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "displaying progress")
-	})
-
 	t.Run("solver writes status events", func(t *testing.T) {
 		t.Parallel()
 
@@ -605,13 +578,15 @@ func TestRun_display(t *testing.T) {
 			close(ch)
 			return &client.SolveResponse{}, nil
 		}}
-		display := &fakeDisplay{runFn: func(_ context.Context, _ string, ch <-chan *client.SolveStatus) error {
-			for s := range ch {
-				_ = s
-				received.Add(1)
-			}
+		display := &fakeDisplay{}
+		display.attachFn = func(_ context.Context, _ string, ch <-chan *client.SolveStatus) error {
+			display.wg.Go(func() {
+				for range ch {
+					received.Add(1)
+				}
+			})
 			return nil
-		}}
+		}
 
 		err := Run(context.Background(), RunInput{
 			Solver:  solver,
@@ -619,6 +594,7 @@ func TestRun_display(t *testing.T) {
 			Display: display,
 		})
 		require.NoError(t, err)
+		require.NoError(t, display.Wait())
 		assert.Equal(t, int64(2), received.Load())
 	})
 }
@@ -706,26 +682,6 @@ func TestRun_exports(t *testing.T) {
 			}},
 			display: &fakeDisplay{},
 			wantErr: `exporting "/tmp/bin/app" from job "compile"`,
-		},
-		{
-			name: "export display error propagates",
-			exports: []Export{
-				{Definition: def, JobName: "build", Local: "/tmp/out/myapp"},
-			},
-			solver: &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
-				close(ch)
-				return &client.SolveResponse{}, nil
-			}},
-			display: &fakeDisplay{runFn: func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
-				for s := range ch {
-					_ = s
-				}
-				if strings.HasPrefix(name, "export:") {
-					return errors.New("render failed")
-				}
-				return nil
-			}},
-			wantErr: "displaying export progress",
 		},
 		{
 			name: "nil export definition returns error",
@@ -963,7 +919,8 @@ func TestTeeStatus(t *testing.T) {
 			close(src)
 
 			// Drain out; should terminate within the synctest bubble.
-			for range out { //nolint:revive // drain remaining events
+			//revive:disable-next-line:empty-block // drain remaining events
+			for range out {
 			}
 		})
 	})

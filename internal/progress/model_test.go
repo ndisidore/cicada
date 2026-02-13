@@ -1,6 +1,7 @@
 package progress
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-func TestModelUpdate(t *testing.T) {
+func TestMultiModelUpdate(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
@@ -23,56 +24,65 @@ func TestModelUpdate(t *testing.T) {
 		msgs       []tea.Msg
 		wantDone   bool
 		wantWidth  int
-		wantStatus map[string]stepStatus
+		wantJobs   int
+		wantStatus map[string]map[string]stepStatus // job -> vertex name -> status
 	}{
 		{
-			name: "status message adds vertex",
+			name: "job added then status",
 			msgs: []tea.Msg{
-				statusMsg{status: &client.SolveStatus{
+				jobAddedMsg{name: "build"},
+				jobStatusMsg{name: "build", status: &client.SolveStatus{
 					Vertexes: []*client.Vertex{
-						{Digest: digest.FromString("a"), Name: "build", Started: &now},
+						{Digest: digest.FromString("a"), Name: "compile", Started: &now},
 					},
 				}},
 			},
-			wantStatus: map[string]stepStatus{"build": statusRunning},
+			wantJobs:   1,
+			wantStatus: map[string]map[string]stepStatus{"build": {"compile": statusRunning}},
 		},
 		{
 			name: "vertex completes",
 			msgs: []tea.Msg{
-				statusMsg{status: &client.SolveStatus{
+				jobAddedMsg{name: "lint"},
+				jobStatusMsg{name: "lint", status: &client.SolveStatus{
 					Vertexes: []*client.Vertex{
-						{Digest: digest.FromString("a"), Name: "build", Started: &now, Completed: &completed},
+						{Digest: digest.FromString("a"), Name: "golangci", Started: &now, Completed: &completed},
 					},
 				}},
 			},
-			wantStatus: map[string]stepStatus{"build": statusDone},
+			wantJobs:   1,
+			wantStatus: map[string]map[string]stepStatus{"lint": {"golangci": statusDone}},
 		},
 		{
 			name: "vertex cached",
 			msgs: []tea.Msg{
-				statusMsg{status: &client.SolveStatus{
+				jobAddedMsg{name: "build"},
+				jobStatusMsg{name: "build", status: &client.SolveStatus{
 					Vertexes: []*client.Vertex{
-						{Digest: digest.FromString("a"), Name: "lint", Cached: true},
+						{Digest: digest.FromString("a"), Name: "deps", Cached: true},
 					},
 				}},
 			},
-			wantStatus: map[string]stepStatus{"lint": statusCached},
+			wantJobs:   1,
+			wantStatus: map[string]map[string]stepStatus{"build": {"deps": statusCached}},
 		},
 		{
 			name: "vertex error",
 			msgs: []tea.Msg{
-				statusMsg{status: &client.SolveStatus{
+				jobAddedMsg{name: "deploy"},
+				jobStatusMsg{name: "deploy", status: &client.SolveStatus{
 					Vertexes: []*client.Vertex{
-						{Digest: digest.FromString("a"), Name: "deploy", Error: "timeout"},
+						{Digest: digest.FromString("a"), Name: "push", Error: "timeout"},
 					},
 				}},
 			},
-			wantStatus: map[string]stepStatus{"deploy": statusError},
+			wantJobs:   1,
+			wantStatus: map[string]map[string]stepStatus{"deploy": {"push": statusError}},
 		},
 		{
-			name: "done message quits",
+			name: "allDoneMsg quits",
 			msgs: []tea.Msg{
-				doneMsg{},
+				allDoneMsg{},
 			},
 			wantDone: true,
 		},
@@ -83,25 +93,50 @@ func TestModelUpdate(t *testing.T) {
 			},
 			wantWidth: 120,
 		},
+		{
+			name: "multiple jobs",
+			msgs: []tea.Msg{
+				jobAddedMsg{name: "lint"},
+				jobAddedMsg{name: "build"},
+				jobStatusMsg{name: "lint", status: &client.SolveStatus{
+					Vertexes: []*client.Vertex{
+						{Digest: digest.FromString("a"), Name: "check", Cached: true},
+					},
+				}},
+				jobStatusMsg{name: "build", status: &client.SolveStatus{
+					Vertexes: []*client.Vertex{
+						{Digest: digest.FromString("b"), Name: "compile", Started: &now},
+					},
+				}},
+			},
+			wantJobs: 2,
+			wantStatus: map[string]map[string]stepStatus{
+				"lint":  {"check": statusCached},
+				"build": {"compile": statusRunning},
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			var result tea.Model = newModel("test", false)
+			var result tea.Model = newMultiModel(false)
 
 			for _, msg := range tt.msgs {
 				var cmd tea.Cmd
 				result, cmd = result.Update(msg)
-				if tt.wantDone {
+				switch msg.(type) {
+				case allDoneMsg:
 					require.NotNil(t, cmd)
-				} else {
+				case tickMsg:
+					require.NotNil(t, cmd)
+				default:
 					assert.Nil(t, cmd)
 				}
 			}
 
-			rm, ok := result.(*model)
+			rm, ok := result.(*multiModel)
 			require.True(t, ok)
 
 			if tt.wantDone {
@@ -112,97 +147,143 @@ func TestModelUpdate(t *testing.T) {
 				assert.Equal(t, tt.wantWidth, rm.width)
 			}
 
-			for name, wantSt := range tt.wantStatus {
-				var found bool
-				for _, st := range rm.vertices {
-					if st.name == name {
-						assert.Equal(t, wantSt, st.status, "status mismatch for %q", name)
-						found = true
-						break
+			if tt.wantJobs > 0 {
+				assert.Len(t, rm.jobs, tt.wantJobs)
+			}
+
+			for jobName, vertices := range tt.wantStatus {
+				js, ok := rm.jobs[jobName]
+				require.True(t, ok, "job %q not found", jobName)
+				for vertexName, wantSt := range vertices {
+					var found bool
+					for _, st := range js.vertices {
+						if st.name == vertexName {
+							assert.Equal(t, wantSt, st.status, "status mismatch for %q/%q", jobName, vertexName)
+							found = true
+							break
+						}
 					}
+					assert.True(t, found, "vertex %q not found in job %q", vertexName, jobName)
 				}
-				assert.True(t, found, "vertex %q not found", name)
 			}
 		})
 	}
 }
 
-func TestModelView(t *testing.T) {
+func TestMultiModelView(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name     string
 		boring   bool
-		setup    func(m *model)
+		setup    func(m *multiModel)
 		contains []string
 	}{
 		{
 			name:   "completed step with emoji",
 			boring: false,
-			setup: func(m *model) {
+			setup: func(m *multiModel) {
+				js := newJobState()
 				d := digest.FromString("v1")
-				m.vertices[d] = &stepState{
+				js.vertices[d] = &stepState{
 					name:     "compile",
 					status:   statusDone,
 					duration: 300 * time.Millisecond,
 				}
-				m.order = append(m.order, d)
-				m.logs = []string{"gcc -o main main.c"}
+				js.order = append(js.order, d)
+				js.logs = []string{"gcc -o main main.c"}
+				m.jobs["build"] = js
+				m.order = append(m.order, "build")
 			},
-			contains: []string{"build", "\u2705", "compile", "300ms", "gcc -o main main.c"},
+			contains: []string{"Job: build", "\u2705", "compile", "300ms", "gcc -o main main.c"},
 		},
 		{
 			name:   "completed step boring mode",
 			boring: true,
-			setup: func(m *model) {
+			setup: func(m *multiModel) {
+				js := newJobState()
 				d := digest.FromString("v1")
-				m.vertices[d] = &stepState{
+				js.vertices[d] = &stepState{
 					name:     "compile",
 					status:   statusDone,
 					duration: 300 * time.Millisecond,
 				}
-				m.order = append(m.order, d)
+				js.order = append(js.order, d)
+				m.jobs["build"] = js
+				m.order = append(m.order, "build")
 			},
 			contains: []string{"[done]", "compile", "300ms"},
 		},
 		{
-			name:   "running step shows ellipsis",
+			name:   "running step shows spinner",
 			boring: true,
-			setup: func(m *model) {
+			setup: func(m *multiModel) {
+				js := newJobState()
 				d := digest.FromString("v2")
-				m.vertices[d] = &stepState{
+				js.vertices[d] = &stepState{
 					name:   "lint",
 					status: statusRunning,
 				}
-				m.order = append(m.order, d)
+				js.order = append(js.order, d)
+				m.jobs["lint"] = js
+				m.order = append(m.order, "lint")
 			},
-			contains: []string{"[build]", "lint", "..."},
+			contains: []string{"[build]", "lint", _boringSpinnerFrames[0]},
 		},
 		{
 			name:   "pending step shows dashes",
 			boring: true,
-			setup: func(m *model) {
+			setup: func(m *multiModel) {
+				js := newJobState()
 				d := digest.FromString("v3")
-				m.vertices[d] = &stepState{
+				js.vertices[d] = &stepState{
 					name:   "deploy",
 					status: statusPending,
 				}
-				m.order = append(m.order, d)
+				js.order = append(js.order, d)
+				m.jobs["deploy"] = js
+				m.order = append(m.order, "deploy")
 			},
 			contains: []string{"[      ]", "deploy", "--"},
 		},
 		{
-			name:   "running step emoji mode",
-			boring: false,
-			setup: func(m *model) {
-				d := digest.FromString("v2")
-				m.vertices[d] = &stepState{
-					name:   "lint",
-					status: statusRunning,
-				}
-				m.order = append(m.order, d)
+			name:   "error step counts as resolved",
+			boring: true,
+			setup: func(m *multiModel) {
+				js := newJobState()
+				d1 := digest.FromString("v1")
+				js.vertices[d1] = &stepState{name: "compile", status: statusDone, duration: 100 * time.Millisecond}
+				js.order = append(js.order, d1)
+				d2 := digest.FromString("v2")
+				js.vertices[d2] = &stepState{name: "test", status: statusError}
+				js.order = append(js.order, d2)
+				d3 := digest.FromString("v3")
+				js.vertices[d3] = &stepState{name: "deploy", status: statusPending}
+				js.order = append(js.order, d3)
+				m.jobs["build"] = js
+				m.order = append(m.order, "build")
 			},
-			contains: []string{"\U0001f528", "lint", "..."},
+			contains: []string{"Job: build (2/3)"},
+		},
+		{
+			name:   "multi-job view",
+			boring: true,
+			setup: func(m *multiModel) {
+				js1 := newJobState()
+				d1 := digest.FromString("v1")
+				js1.vertices[d1] = &stepState{name: "check", status: statusCached}
+				js1.order = append(js1.order, d1)
+				m.jobs["lint"] = js1
+				m.order = append(m.order, "lint")
+
+				js2 := newJobState()
+				d2 := digest.FromString("v2")
+				js2.vertices[d2] = &stepState{name: "compile", status: statusRunning}
+				js2.order = append(js2.order, d2)
+				m.jobs["build"] = js2
+				m.order = append(m.order, "build")
+			},
+			contains: []string{"Job: lint", "Job: build", "[cached]", "[build]"},
 		},
 	}
 
@@ -210,7 +291,7 @@ func TestModelView(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			m := newModel("build", tt.boring)
+			m := newMultiModel(tt.boring)
 			tt.setup(m)
 
 			view := m.View()
@@ -221,7 +302,7 @@ func TestModelView(t *testing.T) {
 	}
 }
 
-func TestModelLogCapping(t *testing.T) {
+func TestJobStateLogCapping(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -250,14 +331,14 @@ func TestModelLogCapping(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			m := newModel("test", false)
+			js := newJobState()
 			logs := make([]*client.VertexLog, tt.logCount)
 			for i := range logs {
-				logs[i] = &client.VertexLog{Data: []byte("line\n")}
+				logs[i] = &client.VertexLog{Data: fmt.Appendf(nil, "line %d\n", i)}
 			}
 
-			m.applyStatus(&client.SolveStatus{Logs: logs})
-			assert.Len(t, m.logs, tt.wantLen)
+			js.applyStatus(&client.SolveStatus{Logs: logs})
+			assert.Len(t, js.logs, tt.wantLen)
 		})
 	}
 }

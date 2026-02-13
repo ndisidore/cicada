@@ -2,7 +2,6 @@ package progress
 
 import (
 	"bytes"
-	"context"
 	"log/slog"
 	"strings"
 	"testing"
@@ -12,9 +11,11 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/ndisidore/cicada/pkg/slogctx"
 )
 
-func TestPlainRun(t *testing.T) {
+func TestPlainAttach(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
@@ -26,7 +27,6 @@ func TestPlainRun(t *testing.T) {
 		wantLogs     []string
 		wantLogCount map[string]int // exact occurrence count for specific substrings
 		wantEmpty    bool           // assert log buffer is empty
-		wantErr      bool
 	}{
 		{
 			name: "vertex started then completed",
@@ -64,8 +64,7 @@ func TestPlainRun(t *testing.T) {
 					},
 				},
 			},
-			wantLogs: []string{"vertex error"},
-			wantErr:  true,
+			wantLogs: []string{"FAIL"},
 		},
 		{
 			name: "log output",
@@ -76,7 +75,7 @@ func TestPlainRun(t *testing.T) {
 					},
 				},
 			},
-			wantLogs: []string{"output"},
+			wantLogs: []string{"hello world"},
 		},
 		{
 			name: "empty log data skipped",
@@ -104,8 +103,8 @@ func TestPlainRun(t *testing.T) {
 					},
 				},
 			},
-			wantLogs:     []string{"started"},
-			wantLogCount: map[string]int{"started": 1},
+			wantLogs:     []string{"started step4"},
+			wantLogCount: map[string]int{"started step4": 1},
 		},
 	}
 
@@ -114,7 +113,8 @@ func TestPlainRun(t *testing.T) {
 			t.Parallel()
 
 			var buf bytes.Buffer
-			log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			ctx := slogctx.ContextWithLogger(t.Context(), logger)
 
 			ch := make(chan *client.SolveStatus, len(tt.statuses))
 			for _, s := range tt.statuses {
@@ -122,13 +122,14 @@ func TestPlainRun(t *testing.T) {
 			}
 			close(ch)
 
-			p := &Plain{Log: log}
-			err := p.Run(context.Background(), "test-step", ch)
-			if tt.wantErr {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-			}
+			p := &Plain{}
+			require.NoError(t, p.Start(ctx))
+			err := p.Attach(ctx, "test-step", ch)
+			require.NoError(t, err)
+
+			p.Seal()
+			err = p.Wait()
+			require.NoError(t, err)
 
 			output := buf.String()
 

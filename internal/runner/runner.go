@@ -32,7 +32,7 @@ var ErrNilDefinition = errors.New("definition must not be nil")
 // Channel close contract: the status channel passed to Solve is owned by the caller
 // of Solve (e.g. solveJob) until the implementer closes it. Implementations of Solver
 // MUST close the provided status channel when Solve returns or completes, so that
-// consumers such as solveJob and display.Run do not hang.
+// consumers such as solveJob and display.Attach do not hang.
 type Solver interface {
 	// Solve runs the LLB definition. The implementer must close statusChan when
 	// Solve returns or completes; ownership of the channel remains with the
@@ -257,32 +257,22 @@ func solveJob(
 	}
 
 	ch := make(chan *client.SolveStatus)
+	displayCh := teeStatus(ctx, ch, cfg.collector, name)
 
-	g, ctx := errgroup.WithContext(ctx)
+	if err := display.Attach(ctx, name, displayCh); err != nil {
+		close(ch)
+		return fmt.Errorf("attaching display: %w", err)
+	}
 
-	g.Go(func() error {
-		_, err := s.Solve(ctx, def, client.SolveOpt{
-			LocalMounts:  cfg.localMounts,
-			CacheExports: cfg.cacheExports,
-			CacheImports: cfg.cacheImports,
-		}, ch)
-		if err != nil {
-			return fmt.Errorf("solving job: %w", err)
-		}
-		return nil
-	})
-
-	g.Go(func() error {
-		displayCh := teeStatus(ctx, ch, cfg.collector, name)
-		err := display.Run(ctx, name, displayCh)
-		drainChannel(displayCh)
-		if err != nil {
-			return fmt.Errorf("displaying progress: %w", err)
-		}
-		return nil
-	})
-
-	return g.Wait()
+	_, err := s.Solve(ctx, def, client.SolveOpt{
+		LocalMounts:  cfg.localMounts,
+		CacheExports: cfg.cacheExports,
+		CacheImports: cfg.cacheImports,
+	}, ch)
+	if err != nil {
+		return fmt.Errorf("solving job: %w", err)
+	}
+	return nil
 }
 
 // solveExport solves an export LLB definition using the local exporter to
@@ -300,40 +290,31 @@ func solveExport(ctx context.Context, s Solver, display progress.Display, exp Ex
 	}
 
 	ch := make(chan *client.SolveStatus)
-	g, ctx := errgroup.WithContext(ctx)
-
-	g.Go(func() error {
-		_, err := s.Solve(ctx, exp.Definition, client.SolveOpt{
-			Exports: []client.ExportEntry{{
-				Type:      client.ExporterLocal,
-				OutputDir: outputDir,
-			}},
-			CacheExports: cfg.cacheExports,
-			CacheImports: cfg.cacheImports,
-		}, ch)
-		if err != nil {
-			return fmt.Errorf("solving export: %w", err)
-		}
-		return nil
-	})
-
 	displayName := "export:" + exp.JobName
-	g.Go(func() error {
-		displayCh := teeStatus(ctx, ch, cfg.collector, displayName)
-		err := display.Run(ctx, displayName, displayCh)
-		drainChannel(displayCh)
-		if err != nil {
-			return fmt.Errorf("displaying export progress: %w", err)
-		}
-		return nil
-	})
+	displayCh := teeStatus(ctx, ch, cfg.collector, displayName)
 
-	return g.Wait()
+	if err := display.Attach(ctx, displayName, displayCh); err != nil {
+		close(ch)
+		return fmt.Errorf("attaching export display: %w", err)
+	}
+
+	_, err := s.Solve(ctx, exp.Definition, client.SolveOpt{
+		Exports: []client.ExportEntry{{
+			Type:      client.ExporterLocal,
+			OutputDir: outputDir,
+		}},
+		CacheExports: cfg.cacheExports,
+		CacheImports: cfg.cacheImports,
+	}, ch)
+	if err != nil {
+		return fmt.Errorf("solving export: %w", err)
+	}
+	return nil
 }
 
 // drainChannel discards remaining items from ch so the sender is not blocked.
 func drainChannel(ch <-chan *client.SolveStatus) {
-	//nolint:revive // intentionally discarding remaining events
+	//revive:disable-next-line:empty-block // intentionally discarding remaining events
 	for range ch {
 	}
 }

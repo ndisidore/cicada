@@ -39,6 +39,12 @@ var _boringIcons = map[stepStatus]string{
 	statusError:   "[FAIL]  ",
 }
 
+var (
+	_spinnerFrames       = [...]string{"\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"} // braille dots
+	_boringSpinnerFrames = [...]string{"|", "/", "-", "\\"}
+	_spinnerInterval     = 80 * time.Millisecond
+)
+
 // stepState tracks a single step's render state.
 type stepState struct {
 	name     string
@@ -46,99 +52,68 @@ type stepState struct {
 	duration time.Duration
 }
 
-// model is the bubbletea model for rendering pipeline progress.
-// All methods use pointer receivers so mutations to the vertices map
-// (via applyStatus) operate on the same instance without copy aliasing.
-type model struct {
-	jobName  string
-	vertices map[digest.Digest]*stepState
-	order    []digest.Digest // preserves vertex discovery order
-	logs     []string        // recent output lines (capped)
-	width    int
-	boring   bool // use ASCII icons instead of emoji
-	done     bool
-	err      error
-}
-
-// _maxLogs caps the number of retained log lines per model instance.
-// appendLogs enforces a sliding window of this size to bound memory
-// and keep the TUI viewport readable.
+// _maxLogs caps the number of retained log lines per job.
 const _maxLogs = 10
 
-func newModel(jobName string, boring bool) *model {
-	return &model{
-		jobName:  jobName,
-		boring:   boring,
+// jobState tracks all vertex and log state for a single job.
+type jobState struct {
+	vertices map[digest.Digest]*stepState
+	order    []digest.Digest
+	logs     []string
+	done     bool
+	started  *time.Time // earliest vertex start
+	ended    *time.Time // latest vertex completion
+}
+
+func newJobState() *jobState {
+	return &jobState{
 		vertices: make(map[digest.Digest]*stepState),
 	}
 }
 
-// statusMsg carries a SolveStatus from the channel to the bubbletea event loop.
-type statusMsg struct{ status *client.SolveStatus }
-
-// doneMsg signals the status channel has been closed.
-type doneMsg struct{}
-
-// Init implements tea.Model.
-func (*model) Init() tea.Cmd {
-	return nil
-}
-
-// Update implements tea.Model.
-func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-	case statusMsg:
-		m.applyStatus(msg.status)
-	case doneMsg:
-		m.done = true
-		return m, tea.Quit
-	case tea.KeyMsg:
-		if msg.String() == "ctrl+c" {
-			return m, tea.Quit
-		}
-	}
-	return m, nil
-}
-
-func (m *model) applyStatus(s *client.SolveStatus) {
+func (js *jobState) applyStatus(s *client.SolveStatus) {
 	for _, v := range s.Vertexes {
-		st, ok := m.vertices[v.Digest]
-		if !ok {
-			st = &stepState{name: v.Name, status: statusPending}
-			m.vertices[v.Digest] = st
-			m.order = append(m.order, v.Digest)
-		}
-
-		// Skip updates for vertices already in a terminal state.
-		if st.status == statusDone || st.status == statusCached || st.status == statusError {
-			continue
-		}
-
-		switch {
-		case v.Error != "":
-			st.status = statusError
-			if m.err == nil {
-				m.err = fmt.Errorf("vertex %q: %s", v.Name, v.Error)
-			}
-		case v.Cached:
-			st.status = statusCached
-		case v.Completed != nil:
-			st.status = statusDone
-			if v.Started != nil {
-				st.duration = v.Completed.Sub(*v.Started).Round(time.Millisecond)
-			}
-		case v.Started != nil:
-			st.status = statusRunning
-		default:
-		}
+		js.applyVertex(v)
 	}
-
-	m.appendLogs(s.Logs)
+	js.appendLogs(s.Logs)
 }
 
-func (m *model) appendLogs(logs []*client.VertexLog) {
+func (js *jobState) applyVertex(v *client.Vertex) {
+	st, ok := js.vertices[v.Digest]
+	if !ok {
+		st = &stepState{name: v.Name, status: statusPending}
+		js.vertices[v.Digest] = st
+		js.order = append(js.order, v.Digest)
+	}
+
+	if st.status == statusDone || st.status == statusCached || st.status == statusError {
+		return
+	}
+
+	if v.Started != nil && (js.started == nil || v.Started.Before(*js.started)) {
+		js.started = v.Started
+	}
+	if v.Completed != nil && (js.ended == nil || v.Completed.After(*js.ended)) {
+		js.ended = v.Completed
+	}
+
+	switch {
+	case v.Error != "":
+		st.status = statusError
+	case v.Cached:
+		st.status = statusCached
+	case v.Completed != nil:
+		st.status = statusDone
+		if v.Started != nil {
+			st.duration = v.Completed.Sub(*v.Started).Round(time.Millisecond)
+		}
+	case v.Started != nil:
+		st.status = statusRunning
+	default:
+	}
+}
+
+func (js *jobState) appendLogs(logs []*client.VertexLog) {
 	for _, l := range logs {
 		if len(l.Data) == 0 {
 			continue
@@ -147,51 +122,168 @@ func (m *model) appendLogs(logs []*client.VertexLog) {
 		if msg == "" {
 			continue
 		}
-		m.logs = append(m.logs, msg)
-		if len(m.logs) > _maxLogs {
-			m.logs = m.logs[len(m.logs)-_maxLogs:]
-		}
+		js.logs = append(js.logs, msg)
+	}
+	if len(js.logs) > _maxLogs {
+		js.logs = append([]string(nil), js.logs[len(js.logs)-_maxLogs:]...)
 	}
 }
 
+// multiModel is the bubbletea model for rendering multi-job pipeline progress.
+type multiModel struct {
+	jobs   map[string]*jobState
+	order  []string
+	width  int
+	boring bool
+	done   bool
+	frame  int // spinner frame counter
+}
+
+// tickMsg drives the spinner animation.
+type tickMsg struct{}
+
+// jobAddedMsg signals a new job was attached to the display.
+type jobAddedMsg struct{ name string }
+
+// jobStatusMsg carries a SolveStatus for a specific job.
+type jobStatusMsg struct {
+	name   string
+	status *client.SolveStatus
+}
+
+// jobDoneMsg signals a job's status channel has been closed.
+type jobDoneMsg struct{ name string }
+
+// allDoneMsg signals all jobs have completed and the TUI should quit.
+type allDoneMsg struct{}
+
+func newMultiModel(boring bool) *multiModel {
+	return &multiModel{
+		jobs:   make(map[string]*jobState),
+		boring: boring,
+	}
+}
+
+// Init implements tea.Model.
+func (*multiModel) Init() tea.Cmd {
+	return tea.Tick(_spinnerInterval, func(time.Time) tea.Msg { return tickMsg{} })
+}
+
+// Update implements tea.Model.
+func (m *multiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+	case jobAddedMsg:
+		if _, ok := m.jobs[msg.name]; !ok {
+			m.jobs[msg.name] = newJobState()
+			m.order = append(m.order, msg.name)
+		}
+	case jobStatusMsg:
+		// jobAddedMsg is always sent before the goroutine that produces
+		// jobStatusMsg, so the job is guaranteed to exist here.
+		if js, ok := m.jobs[msg.name]; ok {
+			js.applyStatus(msg.status)
+		}
+	case jobDoneMsg:
+		if js, ok := m.jobs[msg.name]; ok {
+			js.done = true
+		}
+	case allDoneMsg:
+		m.done = true
+		return m, tea.Quit
+	case tickMsg:
+		m.frame = (m.frame + 1) % (len(_spinnerFrames) * len(_boringSpinnerFrames))
+		return m, tea.Tick(_spinnerInterval, func(time.Time) tea.Msg { return tickMsg{} })
+	case tea.KeyMsg:
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+	}
+	return m, nil
+}
+
 var (
-	_headerStyle = lipgloss.NewStyle().Bold(true)
-	_logStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	_headerStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")) // bright white
+	_logStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))             // dim
+	_durationStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))             // cyan
+	_stepDoneStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))             // green
+	_stepErrorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))             // red
+	_stepRunningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))             // yellow
+	_stepCachedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))             // magenta
 )
 
+func statusStyle(s stepStatus) lipgloss.Style {
+	switch s {
+	case statusDone:
+		return _stepDoneStyle
+	case statusError:
+		return _stepErrorStyle
+	case statusRunning:
+		return _stepRunningStyle
+	case statusCached:
+		return _stepCachedStyle
+	default:
+		return lipgloss.NewStyle()
+	}
+}
+
 // View implements tea.Model.
-func (m *model) View() string {
+func (m *multiModel) View() string {
 	var b strings.Builder
 
-	_, _ = b.WriteString(_headerStyle.Render(fmt.Sprintf("Job: %s", m.jobName)))
-	_ = b.WriteByte('\n')
-
 	icons := _emojiIcons
+	spinnerFrames := _spinnerFrames[:]
 	if m.boring {
 		icons = _boringIcons
+		spinnerFrames = _boringSpinnerFrames[:]
 	}
 
-	for _, d := range m.order {
-		st := m.vertices[d]
-		icon := icons[st.status]
-
-		durStr := "--"
-		if st.duration > 0 {
-			durStr = st.duration.String()
-		} else if st.status == statusRunning {
-			durStr = "..."
-		}
-
-		_, _ = fmt.Fprintf(&b, "  %s %s  %s\n", icon, st.name, durStr)
-	}
-
-	if len(m.logs) > 0 {
-		_ = b.WriteByte('\n')
-		for _, l := range m.logs {
-			_, _ = b.WriteString(_logStyle.Render(fmt.Sprintf("    > %s", l)))
+	for i, name := range m.order {
+		m.jobs[name].renderTo(&b, name, icons, m.frame, spinnerFrames)
+		if i < len(m.order)-1 {
 			_ = b.WriteByte('\n')
 		}
 	}
 
 	return b.String()
+}
+
+func (js *jobState) renderTo(b *strings.Builder, name string, icons map[stepStatus]string, frame int, spinnerFrames []string) {
+	resolvedCount := 0
+	for _, d := range js.order {
+		switch js.vertices[d].status {
+		case statusDone, statusCached, statusError:
+			resolvedCount++
+		default:
+		}
+	}
+	header := fmt.Sprintf("Job: %s (%d/%d)", name, resolvedCount, len(js.order))
+	if js.done && js.started != nil && js.ended != nil {
+		dur := js.ended.Sub(*js.started).Round(time.Millisecond)
+		header += "  " + _durationStyle.Render(dur.String())
+	}
+	_, _ = b.WriteString(_headerStyle.Render(header))
+	_ = b.WriteByte('\n')
+
+	for _, d := range js.order {
+		st := js.vertices[d]
+		var durStr string
+		switch {
+		case st.duration > 0:
+			durStr = "  " + _durationStyle.Render(st.duration.String())
+		case st.status == statusRunning:
+			durStr = "  " + _stepRunningStyle.Render(spinnerFrames[frame%len(spinnerFrames)])
+		case st.status == statusPending:
+			durStr = "  --"
+		default:
+		}
+		styledName := statusStyle(st.status).Render(st.name)
+		_, _ = fmt.Fprintf(b, "  %s %s%s\n", icons[st.status], styledName, durStr)
+	}
+
+	for _, l := range js.logs {
+		_, _ = b.WriteString(_logStyle.Render(fmt.Sprintf("    > %s", l)))
+		_ = b.WriteByte('\n')
+	}
 }

@@ -1,0 +1,40 @@
+// Long-running example for testing spinner and duration display.
+
+defaults {
+    image "alpine:latest"
+}
+
+job "setup" {
+    step "pull" {
+        run "echo 'setting up...'"
+        run "sleep 3"
+        run "echo 'setup complete'"
+    }
+}
+
+job "build-a" {
+    depends-on "setup"
+    step "compile" {
+        run "echo 'compiling module A...'"
+        run "sleep 5"
+        run "echo 'module A done'"
+    }
+}
+
+job "build-b" {
+    depends-on "setup"
+    step "compile" {
+        run "echo 'compiling module B...'"
+        run "sleep 8"
+        run "echo 'module B done'"
+    }
+}
+
+job "test" {
+    depends-on "build-a" "build-b"
+    step "integration" {
+        run "echo 'running integration tests...'"
+        run "sleep 4"
+        run "echo 'all tests passed'"
+    }
+}

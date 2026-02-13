@@ -8,7 +8,7 @@ run = "mkdir -p ./bin && go build -o ./bin/cicada ./cmd/cicada"
 
 [tasks.test]
 description = "Run all tests"
-run = "go test -v -race ./..."
+run = "go test -v -count=3 -race ./..."
 
 [tasks.vet]
 description = "Run go vet"

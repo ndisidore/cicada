@@ -10,6 +10,8 @@ import (
 
 	bkclient "github.com/moby/buildkit/client"
 
+	"github.com/ndisidore/cicada/pkg/slogctx"
+
 	"github.com/ndisidore/cicada/internal/runtime"
 )
 
@@ -83,7 +85,7 @@ func defaultBkDial(ctx context.Context, addr string) (bool, error) {
 func DefaultAddr() string { return _defaultAddr }
 
 // EnsureRunning checks if buildkitd is reachable at addr.
-// If userAddr is non-empty and differs from DefaultAddr(), it is assumed
+// If userAddr is non-empty and differs from DefaultAddr() it is assumed
 // to be user-managed and returned as-is without starting a daemon.
 // Otherwise, it starts a local daemon container if needed.
 func (m *Manager) EnsureRunning(ctx context.Context, userAddr string) (string, error) {
@@ -97,7 +99,7 @@ func (m *Manager) EnsureRunning(ctx context.Context, userAddr string) (string, e
 		return "", fmt.Errorf("probing buildkitd: %w", err)
 	}
 	if ok {
-		slog.Default().DebugContext(ctx, "buildkitd already reachable", slog.String("addr", addr))
+		slogctx.FromContext(ctx).LogAttrs(ctx, slog.LevelDebug, "buildkitd already reachable", slog.String("addr", addr))
 		return addr, nil
 	}
 
@@ -114,7 +116,7 @@ func (m *Manager) IsReachable(ctx context.Context, addr string) bool {
 // It is idempotent: if a stopped container exists, it is restarted.
 // The daemon listens on TCP so no Unix socket permissions are needed.
 func (m *Manager) Start(ctx context.Context) (string, error) {
-	log := slog.Default().With(slog.String("runtime", string(m.rt.Type())))
+	log := slogctx.FromContext(ctx).With(slog.String("runtime", string(m.rt.Type())))
 
 	state, err := m.rt.Inspect(ctx, _containerName)
 	if err != nil && !errors.Is(err, runtime.ErrContainerNotFound) {

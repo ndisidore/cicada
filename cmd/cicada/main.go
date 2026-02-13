@@ -26,6 +26,7 @@ import (
 	"github.com/ndisidore/cicada/internal/synccontext"
 	"github.com/ndisidore/cicada/pkg/parser"
 	"github.com/ndisidore/cicada/pkg/pipeline"
+	"github.com/ndisidore/cicada/pkg/slogctx"
 )
 
 // errResultMismatch indicates builder.Result has mismatched Definitions and JobNames lengths.
@@ -60,6 +61,7 @@ type app struct {
 	getwd   func() (string, error)
 	stdout  io.Writer
 	isTTY   bool
+	format  string // resolved output format (pretty, json, text)
 }
 
 func main() {
@@ -97,6 +99,38 @@ func main() {
 				Value:   "auto",
 				Sources: cli.EnvVars("CICADA_RUNTIME"),
 			},
+			&cli.StringFlag{
+				Name:    "format",
+				Usage:   "output format (auto, pretty, json, text)",
+				Value:   "auto",
+				Sources: cli.EnvVars("CICADA_FORMAT"),
+			},
+			&cli.StringFlag{
+				Name:    "log-level",
+				Usage:   "log level (debug, info, warn, error)",
+				Value:   "info",
+				Sources: cli.EnvVars("CICADA_LOG_LEVEL"),
+			},
+		},
+		Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+			a.format = cmd.String("format")
+			if a.format == "auto" {
+				if a.isTTY {
+					a.format = "pretty"
+				} else {
+					a.format = "text"
+				}
+			}
+			var level slog.Level
+			if err := level.UnmarshalText([]byte(cmd.String("log-level"))); err != nil {
+				return ctx, fmt.Errorf("invalid log level %q: %w", cmd.String("log-level"), err)
+			}
+			logger, err := progress.NewLogger(a.stdout, a.format, level)
+			if err != nil {
+				return ctx, fmt.Errorf("initializing logger: %w", err)
+			}
+			slog.SetDefault(logger)
+			return slogctx.ContextWithLogger(ctx, logger), nil
 		},
 		Commands: []*cli.Command{
 			{
@@ -238,7 +272,7 @@ func buildkitFlags() []cli.Flag {
 		},
 		&cli.StringFlag{
 			Name:  "progress",
-			Usage: "progress output mode (auto, plain, quiet)",
+			Usage: "progress output mode (auto, tui, plain, quiet)",
 			Value: "auto",
 		},
 	}
@@ -279,7 +313,7 @@ func buildNoCacheFilter(ctx context.Context, filters []string, p pipeline.Pipeli
 	}
 	for name := range set {
 		if _, ok := jobNames[name]; !ok {
-			slog.WarnContext(ctx, "no-cache-filter: no job matches", slog.String("name", name))
+			slogctx.FromContext(ctx).LogAttrs(ctx, slog.LevelWarn, "no-cache-filter: no job matches", slog.String("name", name))
 		}
 	}
 	return set
@@ -407,7 +441,7 @@ func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipe
 	}
 	defer func() {
 		if err := closer(); err != nil {
-			slog.Default().DebugContext(ctx, "close connection failed", slog.String("error", err.Error()))
+			slogctx.FromContext(ctx).LogAttrs(ctx, slog.LevelDebug, "close connection", slog.String("error", err.Error()))
 		}
 	}()
 
@@ -424,20 +458,17 @@ func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipe
 
 	parallelism := int(cmd.Int("parallelism"))
 
-	// Fall back to plain display when running jobs in parallel (parallelism
-	// 0 = unlimited, >1 = bounded), since bubbletea cannot multiplex
-	// concurrent job displays.
-	progressMode := cmd.String("progress")
-	if parallelism != 1 && progressMode == "auto" && a.isTTY {
-		progressMode = "plain"
-	}
-
-	display, err := a.selectDisplay(progressMode, cmd.Bool("boring"))
+	display, err := a.selectDisplay(cmd.String("progress"), cmd.Bool("boring"))
 	if err != nil {
 		return err
 	}
 
-	if err := runner.Run(ctx, runner.RunInput{
+	if err := display.Start(ctx); err != nil {
+		return fmt.Errorf("starting display: %w", err)
+	}
+	defer display.Seal()
+
+	runErr := runner.Run(ctx, runner.RunInput{
 		Solver: solver,
 		Jobs:   params.jobs,
 		LocalMounts: map[string]fsutil.FS{
@@ -449,21 +480,20 @@ func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipe
 		CacheExports:   params.cacheExports,
 		CacheImports:   params.cacheImports,
 		CacheCollector: params.cacheCollector,
-	}); err != nil {
-		if params.cacheCollector != nil {
-			cache.PrintReport(a.stdout, params.cacheCollector.Report())
-		}
-		return fmt.Errorf("running pipeline: %w", err)
-	}
+	})
+
+	display.Seal()
+	waitErr := display.Wait()
 
 	if params.cacheCollector != nil {
 		cache.PrintReport(a.stdout, params.cacheCollector.Report())
 	}
-	return nil
+
+	return errors.Join(runErr, waitErr)
 }
 
 func (a *app) printDryRun(name string, jobs []runner.Job) {
-	_, _ = fmt.Fprintf(a.stdout, "Pipeline '%s' validated\n", name)
+	_, _ = fmt.Fprintf(a.stdout, "Pipeline '%s' is valid\n", name)
 	_, _ = fmt.Fprintf(a.stdout, "  Jobs: %d\n", len(jobs))
 	for _, j := range jobs {
 		ops := 0
@@ -475,6 +505,22 @@ func (a *app) printDryRun(name string, jobs []runner.Job) {
 				j.Name, ops, strings.Join(j.DependsOn, ", "))
 		} else {
 			_, _ = fmt.Fprintf(a.stdout, "    - %s (%d LLB ops)\n", j.Name, ops)
+		}
+	}
+}
+
+func (a *app) printPipelineSummary(name string, jobs []pipeline.Job) {
+	_, _ = fmt.Fprintf(a.stdout, "Pipeline '%s' is valid\n", name)
+	_, _ = fmt.Fprintf(a.stdout, "  Jobs: %d\n", len(jobs))
+	for _, j := range jobs {
+		if len(j.DependsOn) > 0 {
+			_, _ = fmt.Fprintf(a.stdout, "    - %s (image: %s, depends: %s)\n",
+				j.Name, j.Image, strings.Join(j.DependsOn, ", "))
+		} else {
+			_, _ = fmt.Fprintf(a.stdout, "    - %s (image: %s)\n", j.Name, j.Image)
+		}
+		for _, s := range j.Steps {
+			_, _ = fmt.Fprintf(a.stdout, "      - %s\n", s.Name)
 		}
 	}
 }
@@ -552,7 +598,7 @@ func (a *app) pullAction(ctx context.Context, cmd *cli.Command) error {
 	}
 	defer func() {
 		if err := closer(); err != nil {
-			slog.Default().DebugContext(ctx, "close connection failed", slog.String("error", err.Error()))
+			slogctx.FromContext(ctx).LogAttrs(ctx, slog.LevelDebug, "close connection", slog.String("error", err.Error()))
 		}
 	}()
 
@@ -561,7 +607,17 @@ func (a *app) pullAction(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	if err := imagestore.PullImages(ctx, solver, images, display); err != nil {
+	if err := display.Start(ctx); err != nil {
+		return fmt.Errorf("starting display: %w", err)
+	}
+	defer display.Seal()
+
+	pullErr := imagestore.PullImages(ctx, solver, images, display)
+
+	display.Seal()
+	waitErr := display.Wait()
+
+	if err := errors.Join(pullErr, waitErr); err != nil {
 		return fmt.Errorf("pulling images: %w", err)
 	}
 
@@ -617,34 +673,20 @@ func (a *app) engineStatusAction(ctx context.Context, _ *cli.Command) error {
 	return nil
 }
 
-func (a *app) printPipelineSummary(name string, jobs []pipeline.Job) {
-	_, _ = fmt.Fprintf(a.stdout, "Pipeline '%s' is valid\n", name)
-	_, _ = fmt.Fprintf(a.stdout, "  Jobs: %d\n", len(jobs))
-	for _, j := range jobs {
-		if len(j.DependsOn) > 0 {
-			_, _ = fmt.Fprintf(a.stdout, "    - %s (image: %s, depends: %s)\n",
-				j.Name, j.Image, strings.Join(j.DependsOn, ", "))
-		} else {
-			_, _ = fmt.Fprintf(a.stdout, "    - %s (image: %s)\n", j.Name, j.Image)
-		}
-		for _, s := range j.Steps {
-			_, _ = fmt.Fprintf(a.stdout, "      - %s\n", s.Name)
-		}
-	}
-}
-
 func (a *app) selectDisplay(mode string, boring bool) (progress.Display, error) {
 	switch mode {
 	case "auto":
-		if a.isTTY {
+		if a.isTTY && a.format == "pretty" {
 			return &progress.TUI{Boring: boring}, nil
 		}
-		return &progress.Plain{Log: slog.Default()}, nil
+		return &progress.Plain{}, nil
+	case "tui":
+		return &progress.TUI{Boring: boring}, nil
 	case "plain":
-		return &progress.Plain{Log: slog.Default()}, nil
+		return &progress.Plain{}, nil
 	case "quiet":
 		return &progress.Quiet{}, nil
 	default:
-		return nil, fmt.Errorf("unknown progress mode %q (valid: auto, plain, quiet)", mode)
+		return nil, fmt.Errorf("unknown progress mode %q (valid: auto, tui, plain, quiet)", mode)
 	}
 }

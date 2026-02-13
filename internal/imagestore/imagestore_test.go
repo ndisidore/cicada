@@ -3,6 +3,7 @@ package imagestore
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/moby/buildkit/client"
@@ -22,14 +23,24 @@ func (f *fakeSolver) Solve(ctx context.Context, def *llb.Definition, opt client.
 }
 
 // fakeDisplay implements progress.Display for testing.
-type fakeDisplay struct{}
+type fakeDisplay struct {
+	wg sync.WaitGroup
+}
 
-func (*fakeDisplay) Run(_ context.Context, _ string, ch <-chan *client.SolveStatus) error {
-	for s := range ch {
-		_ = s
-	}
+func (*fakeDisplay) Start(_ context.Context) error { return nil }
+
+func (f *fakeDisplay) Attach(_ context.Context, _ string, ch <-chan *client.SolveStatus) error {
+	f.wg.Go(func() {
+		//revive:disable-next-line:empty-block // drain
+		for range ch {
+		}
+	})
 	return nil
 }
+
+func (*fakeDisplay) Seal() {}
+
+func (f *fakeDisplay) Wait() error { f.wg.Wait(); return nil }
 
 func TestCheckCached(t *testing.T) {
 	t.Parallel()
@@ -144,7 +155,9 @@ func TestPullImages(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			solver := &fakeSolver{solveFn: tt.solveFn}
-			err := PullImages(context.Background(), solver, tt.images, &fakeDisplay{})
+			d := &fakeDisplay{}
+			err := PullImages(context.Background(), solver, tt.images, d)
+			require.NoError(t, d.Wait())
 			if tt.wantErr {
 				require.Error(t, err)
 				return

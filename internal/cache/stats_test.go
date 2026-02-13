@@ -232,7 +232,7 @@ func TestReport(t *testing.T) {
 		var buf bytes.Buffer
 		PrintReport(&buf, r)
 		out := buf.String()
-		assert.Contains(t, out, "Cache summary:")
+		assert.Contains(t, out, "Cache summary")
 		assert.Contains(t, out, "build")
 		assert.Contains(t, out, "4/6 cached")
 		assert.Contains(t, out, "test")

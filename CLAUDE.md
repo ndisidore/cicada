@@ -93,7 +93,7 @@ internal/runner  # BuildKit runner (internal only)
 ## Concurrency (CC)
 
 - **CC-01**: The sender closes the channel.
-- **CC-02**: Use `golang.org/x/sync/errgroup` for concurrent goroutine management.
+- **CC-02**: Use `golang.org/x/sync/errgroup` or stdlib's `sync.WaitGroup` (`WaitGroup.Go()` exists in go 1.25+) for concurrent goroutine management.
 - Prefer channels for communication, mutexes for state protection.
 - Always use `context.Context` for cancellation.
 

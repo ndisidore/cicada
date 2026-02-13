@@ -18,7 +18,7 @@ import (
 // Channel close contract: the status channel passed to Solve is owned by the caller
 // of Solve (e.g. pullImage, isImageCached) until the implementer closes it. Implementations
 // of Solver MUST close the provided status channel when Solve returns or completes, so that
-// consumers such as display.Run and collectVertexCachedStates do not hang.
+// consumers such as display.Attach and collectVertexCachedStates do not hang.
 type Solver interface {
 	// Solve runs the LLB definition. The implementer must close statusChan when
 	// Solve returns or completes; ownership of the channel remains with the
@@ -46,24 +46,16 @@ func pullImage(ctx context.Context, c Solver, ref string, display progress.Displ
 
 	ch := make(chan *client.SolveStatus)
 
-	g, ctx := errgroup.WithContext(ctx)
+	if err := display.Attach(ctx, "pull "+ref, ch); err != nil {
+		close(ch)
+		return fmt.Errorf("attaching pull display: %w", err)
+	}
 
-	g.Go(func() error {
-		_, err := c.Solve(ctx, def, client.SolveOpt{}, ch)
-		if err != nil {
-			return fmt.Errorf("solving image pull: %w", err)
-		}
-		return nil
-	})
-
-	g.Go(func() error {
-		if err := display.Run(ctx, "pull "+ref, ch); err != nil {
-			return fmt.Errorf("displaying pull progress: %w", err)
-		}
-		return nil
-	})
-
-	return g.Wait()
+	_, err = c.Solve(ctx, def, client.SolveOpt{}, ch)
+	if err != nil {
+		return fmt.Errorf("solving image pull: %w", err)
+	}
+	return nil
 }
 
 // CheckCached verifies all images exist in the BuildKit cache.
@@ -94,26 +86,22 @@ func isImageCached(ctx context.Context, c Solver, ref string) (bool, error) {
 
 	ch := make(chan *client.SolveStatus)
 
-	g, ctx := errgroup.WithContext(ctx)
-
-	// Safe without a mutex: collectVertexCachedStates is the sole writer (via g.Go),
-	// and reads happen only after g.Wait() establishes a happens-before barrier.
+	// Safe without a mutex: collectVertexCachedStates is the sole writer (via goroutine),
+	// and reads happen only after the errgroup completes.
 	vertices := make(map[string]bool)
 
-	g.Go(func() error {
-		_, err := c.Solve(ctx, def, client.SolveOpt{}, ch)
-		if err != nil {
-			return fmt.Errorf("solving cache check: %w", err)
-		}
-		return nil
-	})
-
+	var g errgroup.Group
 	g.Go(func() error {
 		collectVertexCachedStates(ch, vertices)
 		return nil
 	})
 
-	if err := g.Wait(); err != nil {
+	_, err = c.Solve(ctx, def, client.SolveOpt{}, ch)
+
+	// Wait for the collector to finish draining.
+	_ = g.Wait()
+
+	if err != nil {
 		if isImageNotFoundErr(err) {
 			return false, nil
 		}
