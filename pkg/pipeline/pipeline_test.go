@@ -636,6 +636,28 @@ func TestValidateStepRun(t *testing.T) {
 			wantErr: ErrMissingRun,
 		},
 		{
+			name: "step with empty-string run command rejected",
+			jobs: []Job{{
+				Name:  "build",
+				Image: "alpine",
+				Steps: []Step{
+					{Name: "setup", Run: []string{""}},
+				},
+			}},
+			wantErr: ErrEmptyRunCommand,
+		},
+		{
+			name: "step with whitespace-only run command rejected",
+			jobs: []Job{{
+				Name:  "build",
+				Image: "alpine",
+				Steps: []Step{
+					{Name: "setup", Run: []string{"  "}},
+				},
+			}},
+			wantErr: ErrEmptyRunCommand,
+		},
+		{
 			name: "all steps with valid Run passes",
 			jobs: []Job{{
 				Name:  "build",
