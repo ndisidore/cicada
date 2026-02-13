@@ -150,7 +150,7 @@ step "install" {
 
 | Child | Args / Props | Cardinality | Description |
 |-------|-------------|:-----------:|-------------|
-| `run` | `<command>` | 1..N | Shell command (multiple are `&&`-joined) |
+| `run` | `<command>` | 1..N | Shell command (each runs in a fresh shell; a failure halts the step; filesystem state carries forward, shell state does not) |
 | `env` | `<key>` `<value>` | 0..N | Step-scoped env (additive to job) |
 | `workdir` | `<path>` | 0..1 | Set workdir from this step onward (like Docker `WORKDIR`) |
 | `mount` | `<source>` `<target>` | 0..N | Step-specific bind mount (additive to job) |

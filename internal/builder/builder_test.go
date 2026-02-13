@@ -75,6 +75,20 @@ func lastExecMeta(t *testing.T, defBytes [][]byte) *pb.Meta {
 	return last
 }
 
+// allExecMetas returns the Meta from every ExecOp in the definition, in order.
+func allExecMetas(t *testing.T, defBytes [][]byte) []*pb.Meta {
+	t.Helper()
+	var metas []*pb.Meta
+	for _, raw := range defBytes {
+		var op pb.Op
+		require.NoError(t, op.UnmarshalVT(raw))
+		if exec := op.GetExec(); exec != nil {
+			metas = append(metas, exec.GetMeta())
+		}
+	}
+	return metas
+}
+
 // lastExecMounts returns the mounts from the last ExecOp in the definition.
 func lastExecMounts(t *testing.T, defBytes [][]byte) []*pb.Mount {
 	t.Helper()
@@ -243,7 +257,7 @@ func TestBuild(t *testing.T) {
 			},
 		},
 		{
-			name: "multiple run commands joined",
+			name: "multiple run commands produce individual ops",
 			p: pipeline.Pipeline{
 				Name: "multi-cmd",
 				Jobs: []pipeline.Job{
@@ -255,6 +269,13 @@ func TestBuild(t *testing.T) {
 				},
 			},
 			wantJobs: 1,
+			verify: func(t *testing.T, result Result) {
+				t.Helper()
+				metas := allExecMetas(t, result.Definitions[0].Def)
+				require.Len(t, metas, 2, "expected 2 ExecOps for 2 run commands")
+				assert.Equal(t, []string{"/bin/sh", "-c", "uname -a"}, metas[0].GetArgs())
+				assert.Equal(t, []string{"/bin/sh", "-c", "date"}, metas[1].GetArgs())
+			},
 		},
 		{
 			name: "toposort ordering preserved",
@@ -410,7 +431,7 @@ func TestBuild(t *testing.T) {
 					},
 				},
 			},
-			wantErr: pipeline.ErrMissingRun,
+			wantErr: pipeline.ErrEmptyRunCommand,
 		},
 		{
 			name: "whitespace-only run commands",
@@ -424,7 +445,7 @@ func TestBuild(t *testing.T) {
 					},
 				},
 			},
-			wantErr: pipeline.ErrMissingRun,
+			wantErr: pipeline.ErrEmptyRunCommand,
 		},
 		{
 			name: "invalid job name rejected",
@@ -526,6 +547,50 @@ func TestBuild(t *testing.T) {
 				args := meta.GetArgs()
 				require.NotEmpty(t, args, "expected non-empty args")
 				assert.Contains(t, args[len(args)-1], "for __f in /cicada/deps/*/output")
+			},
+		},
+		{
+			name: "preamble prepended to all commands in first step",
+			p: pipeline.Pipeline{
+				Name: "preamble-multi",
+				Jobs: []pipeline.Job{
+					{
+						Name:  "setup",
+						Image: "alpine:latest",
+						Steps: []pipeline.Step{{Name: "setup", Run: []string{"echo setup"}}},
+					},
+					{
+						Name:      "build",
+						Image:     "alpine:latest",
+						DependsOn: []string{"setup"},
+						Steps: []pipeline.Step{
+							{Name: "build", Run: []string{"echo first", "echo second"}},
+							{Name: "verify", Run: []string{"echo third"}},
+						},
+					},
+				},
+			},
+			wantJobs: 2,
+			verify: func(t *testing.T, result Result) {
+				t.Helper()
+				metas := allExecMetas(t, result.Definitions[1].Def)
+				// Dep job contributes 1 ExecOp; build step has 2, verify step has 1.
+				require.GreaterOrEqual(t, len(metas), 3, "expected at least 3 ExecOps")
+				buildMetas := metas[len(metas)-3:]
+
+				// Both commands in the first step get the preamble.
+				firstArgs := buildMetas[0].GetArgs()
+				require.GreaterOrEqual(t, len(firstArgs), 3, "expected at least 3 args in first build ExecOp")
+				assert.Contains(t, firstArgs[2], "for __f in /cicada/deps/*/output")
+				assert.Contains(t, firstArgs[2], "echo first")
+
+				secondArgs := buildMetas[1].GetArgs()
+				require.GreaterOrEqual(t, len(secondArgs), 3, "expected at least 3 args in second build ExecOp")
+				assert.Contains(t, secondArgs[2], "for __f in /cicada/deps/*/output")
+				assert.Contains(t, secondArgs[2], "echo second")
+
+				// Second step does NOT get the preamble.
+				assert.Equal(t, []string{"/bin/sh", "-c", "echo third"}, buildMetas[2].GetArgs())
 			},
 		},
 		{

@@ -13,23 +13,24 @@ import (
 
 // Sentinel errors for pipeline validation.
 var (
-	ErrEmptyPipeline  = errors.New("pipeline has no jobs")
-	ErrEmptyJobName   = errors.New("job has empty name")
-	ErrDuplicateJob   = errors.New("duplicate job name")
-	ErrEmptyStepName  = errors.New("step has empty name")
-	ErrDuplicateStep  = errors.New("duplicate step name")
-	ErrInvalidName    = errors.New("name contains invalid characters")
-	ErrMissingImage   = errors.New("job missing image")
-	ErrMissingRun     = errors.New("step has no run commands")
-	ErrEmptyJob       = errors.New("job has no steps")
-	ErrSelfDependency = errors.New("job depends on itself")
-	ErrUnknownDep     = errors.New("unknown dependency")
-	ErrCycleDetected  = errors.New("dependency cycle detected")
-	ErrEmptyMatrix    = errors.New("matrix has no dimensions")
-	ErrEmptyDimension = errors.New("dimension has no values")
-	ErrInvalidDimName = errors.New("invalid dimension name")
-	ErrDuplicateDim   = errors.New("duplicate dimension name")
-	ErrMatrixTooLarge = errors.New("matrix produces too many combinations")
+	ErrEmptyPipeline   = errors.New("pipeline has no jobs")
+	ErrEmptyJobName    = errors.New("job has empty name")
+	ErrDuplicateJob    = errors.New("duplicate job name")
+	ErrEmptyStepName   = errors.New("step has empty name")
+	ErrDuplicateStep   = errors.New("duplicate step name")
+	ErrInvalidName     = errors.New("name contains invalid characters")
+	ErrMissingImage    = errors.New("job missing image")
+	ErrMissingRun      = errors.New("step has no run commands")
+	ErrEmptyRunCommand = errors.New("run command is empty or whitespace-only")
+	ErrEmptyJob        = errors.New("job has no steps")
+	ErrSelfDependency  = errors.New("job depends on itself")
+	ErrUnknownDep      = errors.New("unknown dependency")
+	ErrCycleDetected   = errors.New("dependency cycle detected")
+	ErrEmptyMatrix     = errors.New("matrix has no dimensions")
+	ErrEmptyDimension  = errors.New("dimension has no values")
+	ErrInvalidDimName  = errors.New("invalid dimension name")
+	ErrDuplicateDim    = errors.New("duplicate dimension name")
+	ErrMatrixTooLarge  = errors.New("matrix produces too many combinations")
 )
 
 // Sentinel errors for modular configuration (includes, fragments, params).
@@ -325,7 +326,7 @@ func validateStep(jobName string, idx int, s *Step, seen map[string]struct{}) er
 	}
 	for _, cmd := range s.Run {
 		if strings.TrimSpace(cmd) == "" {
-			return fmt.Errorf("job %q: step %q: %w", jobName, s.Name, ErrMissingRun)
+			return fmt.Errorf("job %q: step %q: %w", jobName, s.Name, ErrEmptyRunCommand)
 		}
 	}
 	if err := validateEnvVars(fmt.Sprintf("job %q step %q", jobName, s.Name), s.Env); err != nil {

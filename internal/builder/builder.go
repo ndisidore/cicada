@@ -237,6 +237,10 @@ func buildJob(
 	// Pre-build job-level mount and cache run options (reused per step).
 	jobMountOpts := buildMountRunOpts(job.Mounts, job.Caches, localOpts)
 
+	// Determine whether job-level caching is already disabled in baseRunOpts.
+	_, jobFiltered := opts.noCacheFilter[job.Name]
+	jobNoCached := opts.globalNoCache || job.NoCache || jobFiltered
+
 	// Execute steps sequentially, chaining state.
 	for i := range job.Steps {
 		step := &job.Steps[i]
@@ -263,31 +267,43 @@ func buildJob(
 			st = st.AddEnv(e.Key, e.Value)
 		}
 
-		cmd := strings.Join(step.Run, " && ")
-		if strings.TrimSpace(cmd) == "" {
+		if len(step.Run) == 0 {
 			return nil, llb.State{}, fmt.Errorf("job %q step %q: %w", job.Name, step.Name, pipeline.ErrMissingRun)
 		}
-		if i == 0 && preamble != "" {
-			cmd = preamble + cmd
+
+		// Pre-compute step-level mount/cache run options (shared across all commands).
+		stepMountOpts := buildMountRunOpts(step.Mounts, step.Caches, localOpts)
+
+		for j, cmd := range step.Run {
+			if strings.TrimSpace(cmd) == "" {
+				return nil, llb.State{}, fmt.Errorf("job %q step %q run[%d]: %w", job.Name, step.Name, j, pipeline.ErrEmptyRunCommand)
+			}
+
+			// Preamble sources dependency output env vars into the shell.
+			// Only applied to the first step: each command runs in a fresh
+			// shell, so every command in step 0 needs it. Later steps
+			// intentionally omit it — cross-step env should use the `env`
+			// directive (which sets LLB-level env) or write to $CICADA_OUTPUT.
+			shellCmd := cmd
+			if i == 0 && preamble != "" {
+				shellCmd = preamble + cmd
+			}
+
+			runOpts := append([]llb.RunOption(nil), baseRunOpts...)
+			runOpts = append(runOpts,
+				llb.Args([]string{"/bin/sh", "-c", shellCmd}),
+				llb.WithCustomName(job.Name+"/"+step.Name+"/"+cmd),
+			)
+			runOpts = append(runOpts, depMounts...)
+			runOpts = append(runOpts, jobMountOpts...)
+			runOpts = append(runOpts, stepMountOpts...)
+
+			if step.NoCache && !jobNoCached {
+				runOpts = append(runOpts, llb.IgnoreCache)
+			}
+
+			st = st.Run(runOpts...).Root()
 		}
-
-		runOpts := append([]llb.RunOption(nil), baseRunOpts...)
-		runOpts = append(runOpts,
-			llb.Args([]string{"/bin/sh", "-c", cmd}),
-			llb.WithCustomName(job.Name+"/"+step.Name),
-		)
-		runOpts = append(runOpts, depMounts...)
-		runOpts = append(runOpts, jobMountOpts...)
-
-		// Step-level mounts and caches.
-		runOpts = append(runOpts, buildMountRunOpts(step.Mounts, step.Caches, localOpts)...)
-
-		// Per-step no-cache (only if not already globally disabled).
-		if step.NoCache && !opts.globalNoCache {
-			runOpts = append(runOpts, llb.IgnoreCache)
-		}
-
-		st = st.Run(runOpts...).Root()
 	}
 
 	def, err := st.Marshal(ctx)
