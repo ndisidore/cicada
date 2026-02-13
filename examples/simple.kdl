@@ -1,12 +1,10 @@
-pipeline "hello" {
-  step "greet" {
-    image "alpine:latest"
-    run "echo 'Hello from Cicada!'"
-  }
+step "greet" {
+  image "alpine:latest"
+  run "echo 'Hello from Cicada!'"
+}
 
-  step "build" {
-    image "node:24-alpine"
-    depends-on "greet"
-    run "node -e \"console.log('hello from node')\""
-  }
+step "build" {
+  image "node:24-alpine"
+  depends-on "greet"
+  run "node -e \"console.log('hello from node')\""
 }

@@ -55,14 +55,12 @@ func TestParse(t *testing.T) {
 	}{
 		{
 			name: "single step",
-			input: `pipeline "hello" {
-				step "greet" {
-					image "alpine:latest"
-					run "echo hello"
-				}
+			input: `step "greet" {
+				image "alpine:latest"
+				run "echo hello"
 			}`,
 			want: pipeline.Pipeline{
-				Name: "hello",
+				Name: "",
 				Jobs: []pipeline.Job{
 					{
 						Name:  "greet",
@@ -75,19 +73,17 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name: "multi step with dependencies",
-			input: `pipeline "build" {
-				step "setup" {
-					image "alpine:latest"
-					run "echo setup"
-				}
-				step "test" {
-					image "golang:1.23"
-					depends-on "setup"
-					run "go test ./..."
-				}
+			input: `step "setup" {
+				image "alpine:latest"
+				run "echo setup"
+			}
+			step "test" {
+				image "golang:1.23"
+				depends-on "setup"
+				run "go test ./..."
 			}`,
 			want: pipeline.Pipeline{
-				Name: "build",
+				Name: "",
 				Jobs: []pipeline.Job{
 					{
 						Name:  "setup",
@@ -106,17 +102,15 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name: "step with mount and cache",
-			input: `pipeline "full" {
-				step "build" {
-					image "rust:1.76"
-					mount "." "/src"
-					cache "cargo" "/root/.cargo"
-					workdir "/src"
-					run "cargo build"
-				}
+			input: `step "build" {
+				image "rust:1.76"
+				mount "." "/src"
+				cache "cargo" "/root/.cargo"
+				workdir "/src"
+				run "cargo build"
 			}`,
 			want: pipeline.Pipeline{
-				Name: "full",
+				Name: "",
 				Jobs: []pipeline.Job{
 					{
 						Name:    "build",
@@ -132,15 +126,13 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name: "mount with readonly property",
-			input: `pipeline "ro" {
-				step "build" {
-					image "rust:1.76"
-					mount "." "/src" readonly=true
-					run "cargo build"
-				}
+			input: `step "build" {
+				image "rust:1.76"
+				mount "." "/src" readonly=true
+				run "cargo build"
 			}`,
 			want: pipeline.Pipeline{
-				Name: "ro",
+				Name: "",
 				Jobs: []pipeline.Job{
 					{
 						Name:  "build",
@@ -156,26 +148,22 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name: "mount readonly non-boolean",
-			input: `pipeline "bad" {
-				step "a" {
-					image "alpine:latest"
-					mount "." "/src" readonly="yes"
-					run "echo hi"
-				}
+			input: `step "a" {
+				image "alpine:latest"
+				mount "." "/src" readonly="yes"
+				run "echo hi"
 			}`,
 			wantErr: ErrTypeMismatch,
 		},
 		{
 			name: "multiple run commands",
-			input: `pipeline "multi" {
-				step "info" {
-					image "alpine:latest"
-					run "uname -a"
-					run "date"
-				}
+			input: `step "info" {
+				image "alpine:latest"
+				run "uname -a"
+				run "date"
 			}`,
 			want: pipeline.Pipeline{
-				Name: "multi",
+				Name: "",
 				Jobs: []pipeline.Job{
 					{
 						Name:  "info",
@@ -196,182 +184,126 @@ func TestParse(t *testing.T) {
 		{
 			name:    "empty file",
 			input:   ``,
-			wantErr: ErrNoPipeline,
+			wantErr: pipeline.ErrEmptyPipeline,
 		},
 		{
 			name: "missing image",
-			input: `pipeline "bad" {
-				step "noimg" {
-					run "echo oops"
-				}
+			input: `step "noimg" {
+				run "echo oops"
 			}`,
 			wantErr: pipeline.ErrMissingImage,
 		},
 		{
 			name: "duplicate step names",
-			input: `pipeline "dup" {
-				step "a" {
-					image "alpine:latest"
-					run "echo 1"
-				}
-				step "a" {
-					image "alpine:latest"
-					run "echo 2"
-				}
+			input: `step "a" {
+				image "alpine:latest"
+				run "echo 1"
+			}
+			step "a" {
+				image "alpine:latest"
+				run "echo 2"
 			}`,
 			wantErr: pipeline.ErrDuplicateJob,
 		},
 		{
 			name: "unknown dependency",
-			input: `pipeline "bad" {
-				step "a" {
-					image "alpine:latest"
-					depends-on "nonexistent"
-					run "echo 1"
-				}
+			input: `step "a" {
+				image "alpine:latest"
+				depends-on "nonexistent"
+				run "echo 1"
 			}`,
 			wantErr: pipeline.ErrUnknownDep,
 		},
 		{
-			name: "pipeline without name",
-			input: `pipeline {
-				step "a" {
-					image "alpine:latest"
-					run "echo hi"
-				}
-			}`,
-			wantErr: ErrMissingName,
-		},
-		{
-			name: "empty pipeline",
-			input: `pipeline "empty" {
-			}`,
-			wantErr: pipeline.ErrEmptyPipeline,
-		},
-		{
 			name: "unknown step child node",
-			input: `pipeline "bad" {
-				step "a" {
-					image "alpine:latest"
-					run "echo hi"
-					foobar "wat"
-				}
+			input: `step "a" {
+				image "alpine:latest"
+				run "echo hi"
+				foobar "wat"
 			}`,
 			wantErr: ErrUnknownNode,
 		},
 		{
 			name: "nested step in bare step",
-			input: `pipeline "bad" {
-				step "outer" {
-					image "alpine:latest"
-					run "echo outer"
-					step "inner" {
-						run "echo inner"
-					}
+			input: `step "outer" {
+				image "alpine:latest"
+				run "echo outer"
+				step "inner" {
+					run "echo inner"
 				}
 			}`,
 			wantErr: ErrUnknownNode,
 		},
 		{
 			name: "duplicate image field",
-			input: `pipeline "bad" {
-				step "a" {
-					image "alpine:latest"
-					image "ubuntu:latest"
-					run "echo hi"
-				}
+			input: `step "a" {
+				image "alpine:latest"
+				image "ubuntu:latest"
+				run "echo hi"
 			}`,
 			wantErr: ErrDuplicateField,
 		},
 		{
 			name: "duplicate workdir field",
-			input: `pipeline "bad" {
-				step "a" {
-					image "alpine:latest"
-					workdir "/a"
-					workdir "/b"
-					run "echo hi"
-				}
+			input: `step "a" {
+				image "alpine:latest"
+				workdir "/a"
+				workdir "/b"
+				run "echo hi"
 			}`,
 			wantErr: ErrDuplicateField,
 		},
 		{
 			name: "mount with extra arguments",
-			input: `pipeline "bad" {
-				step "a" {
-					image "alpine:latest"
-					mount "a" "b" "c"
-					run "echo hi"
-				}
+			input: `step "a" {
+				image "alpine:latest"
+				mount "a" "b" "c"
+				run "echo hi"
 			}`,
 			wantErr: ErrExtraArgs,
 		},
 		{
 			name: "self dependency",
-			input: `pipeline "bad" {
-				step "a" {
-					image "alpine:latest"
-					depends-on "a"
-					run "echo hi"
-				}
+			input: `step "a" {
+				image "alpine:latest"
+				depends-on "a"
+				run "echo hi"
 			}`,
 			wantErr: pipeline.ErrSelfDependency,
 		},
 		{
-			name: "multiple pipeline nodes",
-			input: `pipeline "first" {
-				step "a" {
-					image "alpine:latest"
-					run "echo 1"
-				}
-			}
-			pipeline "second" {
-				step "b" {
-					image "alpine:latest"
-					run "echo 2"
-				}
-			}`,
-			wantErr: ErrMultiplePipelines,
-		},
-		{
 			name: "dependency cycle",
-			input: `pipeline "bad" {
-				step "a" {
-					image "alpine:latest"
-					depends-on "b"
-					run "echo a"
-				}
-				step "b" {
-					image "alpine:latest"
-					depends-on "a"
-					run "echo b"
-				}
+			input: `step "a" {
+				image "alpine:latest"
+				depends-on "b"
+				run "echo a"
+			}
+			step "b" {
+				image "alpine:latest"
+				depends-on "a"
+				run "echo b"
 			}`,
 			wantErr: pipeline.ErrCycleDetected,
 		},
 		{
 			name: "non-string step field",
-			input: `pipeline "bad" {
-				step "a" {
-					image 42
-					run "echo hi"
-				}
+			input: `step "a" {
+				image 42
+				run "echo hi"
 			}`,
 			wantErr: ErrTypeMismatch,
 		},
 		{
 			name: "pipeline-level matrix",
-			input: `pipeline "ci" {
-				matrix {
-					os "linux" "darwin"
-				}
-				step "build" {
-					image "golang:1.23"
-					run "GOOS=${matrix.os} go build ./..."
-				}
+			input: `matrix {
+				os "linux" "darwin"
+			}
+			step "build" {
+				image "golang:1.23"
+				run "GOOS=${matrix.os} go build ./..."
 			}`,
 			want: pipeline.Pipeline{
-				Name: "ci",
+				Name: "",
 				Jobs: []pipeline.Job{
 					{
 						Name:  "build[os=linux]",
@@ -389,17 +321,15 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name: "step-level matrix",
-			input: `pipeline "test" {
-				step "test" {
-					matrix {
-						go-version "1.21" "1.22"
-					}
-					image "golang:${matrix.go-version}"
-					run "go test ./..."
+			input: `step "test" {
+				matrix {
+					go-version "1.21" "1.22"
 				}
+				image "golang:${matrix.go-version}"
+				run "go test ./..."
 			}`,
 			want: pipeline.Pipeline{
-				Name: "test",
+				Name: "",
 				Jobs: []pipeline.Job{
 					{
 						Name:  "test[go-version=1.21]",
@@ -417,25 +347,23 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name: "combined pipeline and step matrix",
-			input: `pipeline "ci" {
+			input: `matrix {
+				os "linux" "darwin"
+			}
+			step "build" {
+				image "golang:1.23"
+				run "GOOS=${matrix.os} go build ./..."
+			}
+			step "test" {
 				matrix {
-					os "linux" "darwin"
+					go-version "1.21" "1.22"
 				}
-				step "build" {
-					image "golang:1.23"
-					run "GOOS=${matrix.os} go build ./..."
-				}
-				step "test" {
-					matrix {
-						go-version "1.21" "1.22"
-					}
-					depends-on "build"
-					image "golang:${matrix.go-version}"
-					run "GOOS=${matrix.os} go test ./..."
-				}
+				depends-on "build"
+				image "golang:${matrix.go-version}"
+				run "GOOS=${matrix.os} go test ./..."
 			}`,
 			want: pipeline.Pipeline{
-				Name: "ci",
+				Name: "",
 				Jobs: []pipeline.Job{
 					{
 						Name:  "build[os=linux]",
@@ -477,98 +405,84 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name: "empty matrix block",
-			input: `pipeline "bad" {
-				matrix {
-				}
-				step "a" {
-					image "alpine:latest"
-					run "echo hi"
-				}
+			input: `matrix {
+			}
+			step "a" {
+				image "alpine:latest"
+				run "echo hi"
 			}`,
 			wantErr: pipeline.ErrEmptyMatrix,
 		},
 		{
 			name: "empty dimension values",
-			input: `pipeline "bad" {
-				step "a" {
-					matrix {
-						os
-					}
-					image "alpine:latest"
-					run "echo hi"
+			input: `step "a" {
+				matrix {
+					os
 				}
+				image "alpine:latest"
+				run "echo hi"
 			}`,
 			wantErr: pipeline.ErrEmptyDimension,
 		},
 		{
 			name: "duplicate pipeline matrix",
-			input: `pipeline "bad" {
+			input: `matrix {
+				os "linux"
+			}
+			matrix {
+				arch "amd64"
+			}
+			step "a" {
+				image "alpine:latest"
+				run "echo hi"
+			}`,
+			wantErr: ErrDuplicateField,
+		},
+		{
+			name: "duplicate step matrix",
+			input: `step "a" {
 				matrix {
 					os "linux"
 				}
 				matrix {
 					arch "amd64"
 				}
-				step "a" {
-					image "alpine:latest"
-					run "echo hi"
-				}
-			}`,
-			wantErr: ErrDuplicateField,
-		},
-		{
-			name: "duplicate step matrix",
-			input: `pipeline "bad" {
-				step "a" {
-					matrix {
-						os "linux"
-					}
-					matrix {
-						arch "amd64"
-					}
-					image "alpine:latest"
-					run "echo hi"
-				}
+				image "alpine:latest"
+				run "echo hi"
 			}`,
 			wantErr: ErrDuplicateField,
 		},
 		{
 			name: "non-string matrix dimension value",
-			input: `pipeline "bad" {
-				step "a" {
-					matrix {
-						count 1 2 3
-					}
-					image "alpine:latest"
-					run "echo hi"
+			input: `step "a" {
+				matrix {
+					count 1 2 3
 				}
+				image "alpine:latest"
+				run "echo hi"
 			}`,
 			wantErr: ErrTypeMismatch,
 		},
 		{
 			name: "invalid dimension name",
-			input: `pipeline "bad" {
-				step "a" {
-					matrix {
-						"os.name" "linux"
-					}
-					image "alpine:latest"
-					run "echo hi"
+			input: `step "a" {
+				matrix {
+					"os.name" "linux"
 				}
+				image "alpine:latest"
+				run "echo hi"
 			}`,
 			wantErr: pipeline.ErrInvalidDimName,
 		},
 		{
 			name: "platform field",
-			input: `pipeline "plat" {
-				step "build" {
-					image "golang:1.23"
-					platform "linux/arm64"
-					run "go version"
-				}
+			input: `step "build" {
+				image "golang:1.23"
+				platform "linux/arm64"
+				run "go version"
 			}`,
 			want: pipeline.Pipeline{
-				Name: "plat",
+				Name: "",
 				Jobs: []pipeline.Job{
 					{
 						Name:     "build",
@@ -582,44 +496,38 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name: "duplicate platform field",
-			input: `pipeline "bad" {
-				step "a" {
-					image "alpine:latest"
-					platform "linux/amd64"
-					platform "linux/arm64"
-					run "echo hi"
-				}
+			input: `step "a" {
+				image "alpine:latest"
+				platform "linux/amd64"
+				platform "linux/arm64"
+				run "echo hi"
 			}`,
 			wantErr: ErrDuplicateField,
 		},
 		{
 			name: "duplicate dimension name across levels",
-			input: `pipeline "bad" {
+			input: `matrix {
+				os "linux"
+			}
+			step "a" {
 				matrix {
-					os "linux"
+					os "darwin"
 				}
-				step "a" {
-					matrix {
-						os "darwin"
-					}
-					image "alpine:latest"
-					run "echo hi"
-				}
+				image "alpine:latest"
+				run "echo hi"
 			}`,
 			wantErr: pipeline.ErrDuplicateDim,
 		},
 		{
 			name: "pipeline-level env vars",
-			input: `pipeline "ci" {
-				env "CI" "true"
-				env "GOFLAGS" "-mod=vendor"
-				step "build" {
-					image "golang:1.23"
-					run "go build ./..."
-				}
+			input: `env "CI" "true"
+			env "GOFLAGS" "-mod=vendor"
+			step "build" {
+				image "golang:1.23"
+				run "go build ./..."
 			}`,
 			want: pipeline.Pipeline{
-				Name: "ci",
+				Name: "",
 				Env:  []pipeline.EnvVar{{Key: "CI", Value: "true"}, {Key: "GOFLAGS", Value: "-mod=vendor"}},
 				Jobs: []pipeline.Job{
 					{
@@ -633,15 +541,13 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name: "step-level env vars",
-			input: `pipeline "ci" {
-				step "build" {
-					image "golang:1.23"
-					env "CGO_ENABLED" "0"
-					run "go build ./..."
-				}
+			input: `step "build" {
+				image "golang:1.23"
+				env "CGO_ENABLED" "0"
+				run "go build ./..."
 			}`,
 			want: pipeline.Pipeline{
-				Name: "ci",
+				Name: "",
 				Jobs: []pipeline.Job{
 					{
 						Name:  "build",
@@ -655,37 +561,31 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name: "step export without local",
-			input: `pipeline "ci" {
-				step "build" {
-					image "golang:1.23"
-					run "go build -o /out/myapp ./..."
-					export "/out/myapp"
-				}
+			input: `step "build" {
+				image "golang:1.23"
+				run "go build -o /out/myapp ./..."
+				export "/out/myapp"
 			}`,
 			wantErr: ErrMissingField,
 		},
 		{
 			name: "step export with empty local",
-			input: `pipeline "ci" {
-				step "build" {
-					image "golang:1.23"
-					run "go build -o /out/myapp ./..."
-					export "/out/myapp" local=""
-				}
+			input: `step "build" {
+				image "golang:1.23"
+				run "go build -o /out/myapp ./..."
+				export "/out/myapp" local=""
 			}`,
 			wantErr: ErrMissingField,
 		},
 		{
 			name: "step export with local",
-			input: `pipeline "ci" {
-				step "build" {
-					image "golang:1.23"
-					run "go build -o /out/myapp ./..."
-					export "/out/myapp" local="./bin/myapp"
-				}
+			input: `step "build" {
+				image "golang:1.23"
+				run "go build -o /out/myapp ./..."
+				export "/out/myapp" local="./bin/myapp"
 			}`,
 			want: pipeline.Pipeline{
-				Name: "ci",
+				Name: "",
 				Jobs: []pipeline.Job{
 					{
 						Name:    "build",
@@ -699,20 +599,18 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name: "step artifact",
-			input: `pipeline "ci" {
-				step "build" {
-					image "golang:1.23"
-					run "go build -o /out/myapp ./..."
-				}
-				step "deploy" {
-					image "alpine:latest"
-					depends-on "build"
-					artifact "build" "/out/myapp" "/usr/local/bin/myapp"
-					run "echo deploying"
-				}
+			input: `step "build" {
+				image "golang:1.23"
+				run "go build -o /out/myapp ./..."
+			}
+			step "deploy" {
+				image "alpine:latest"
+				depends-on "build"
+				artifact "build" "/out/myapp" "/usr/local/bin/myapp"
+				run "echo deploying"
 			}`,
 			want: pipeline.Pipeline{
-				Name: "ci",
+				Name: "",
 				Jobs: []pipeline.Job{
 					{
 						Name:  "build",
@@ -732,68 +630,58 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name: "artifact without dependency errors",
-			input: `pipeline "bad" {
-				step "build" {
-					image "golang:1.23"
-					run "go build -o /out/myapp ./..."
-				}
-				step "deploy" {
-					image "alpine:latest"
-					artifact "build" "/out/myapp" "/usr/local/bin/myapp"
-					run "echo deploying"
-				}
+			input: `step "build" {
+				image "golang:1.23"
+				run "go build -o /out/myapp ./..."
+			}
+			step "deploy" {
+				image "alpine:latest"
+				artifact "build" "/out/myapp" "/usr/local/bin/myapp"
+				run "echo deploying"
 			}`,
 			wantErr: pipeline.ErrArtifactNoDep,
 		},
 		{
 			name: "env with wrong args",
-			input: `pipeline "bad" {
-				step "a" {
-					image "alpine:latest"
-					env "ONLY_KEY"
-					run "echo hi"
-				}
+			input: `step "a" {
+				image "alpine:latest"
+				env "ONLY_KEY"
+				run "echo hi"
 			}`,
 			wantErr: ErrMissingField,
 		},
 		{
 			name: "export with extra args",
-			input: `pipeline "bad" {
-				step "a" {
-					image "alpine:latest"
-					export "/out/myapp" "/extra"
-					run "echo hi"
-				}
+			input: `step "a" {
+				image "alpine:latest"
+				export "/out/myapp" "/extra"
+				run "echo hi"
 			}`,
 			wantErr: ErrExtraArgs,
 		},
 		{
 			name: "artifact with wrong args",
-			input: `pipeline "bad" {
-				step "other" {
-					image "alpine:latest"
-					run "echo other"
-				}
-				step "a" {
-					image "alpine:latest"
-					depends-on "other"
-					artifact "other" "/src"
-					run "echo hi"
-				}
+			input: `step "other" {
+				image "alpine:latest"
+				run "echo other"
+			}
+			step "a" {
+				image "alpine:latest"
+				depends-on "other"
+				artifact "other" "/src"
+				run "echo hi"
 			}`,
 			wantErr: ErrMissingField,
 		},
 		{
 			name: "step with no-cache flag",
-			input: `pipeline "ci" {
-				step "test" {
-					image "golang:1.23"
-					run "go test ./..."
-					no-cache
-				}
+			input: `step "test" {
+				image "golang:1.23"
+				run "go test ./..."
+				no-cache
 			}`,
 			want: pipeline.Pipeline{
-				Name: "ci",
+				Name: "",
 				Jobs: []pipeline.Job{
 					{
 						Name:    "test",
@@ -807,86 +695,74 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name: "duplicate no-cache rejected",
-			input: `pipeline "bad" {
-				step "test" {
-					image "alpine:latest"
-					run "echo hi"
-					no-cache
-					no-cache
-				}
+			input: `step "test" {
+				image "alpine:latest"
+				run "echo hi"
+				no-cache
+				no-cache
 			}`,
 			wantErr: ErrDuplicateField,
 		},
 		{
 			name: "no-cache with arguments rejected",
-			input: `pipeline "bad" {
-				step "test" {
-					image "alpine:latest"
-					run "echo hi"
-					no-cache "arg"
-				}
+			input: `step "test" {
+				image "alpine:latest"
+				run "echo hi"
+				no-cache "arg"
 			}`,
 			wantErr: ErrExtraArgs,
 		},
 		{
 			name: "defaults with arguments rejected",
-			input: `pipeline "bad" {
-				defaults "extra" {
-					image "alpine:latest"
-				}
-				step "a" {
-					image "alpine:latest"
-					run "echo hi"
-				}
+			input: `defaults "extra" {
+				image "alpine:latest"
+			}
+			step "a" {
+				image "alpine:latest"
+				run "echo hi"
 			}`,
 			wantErr: ErrExtraArgs,
 		},
 		{
 			name: "defaults duplicate image rejected",
-			input: `pipeline "bad" {
-				defaults {
-					image "alpine:latest"
-					image "golang:1.23"
-				}
-				step "a" {
-					image "alpine:latest"
-					run "echo hi"
-				}
+			input: `defaults {
+				image "alpine:latest"
+				image "golang:1.23"
+			}
+			step "a" {
+				image "alpine:latest"
+				run "echo hi"
 			}`,
 			wantErr: ErrDuplicateField,
 		},
 		{
 			name: "defaults unknown child rejected",
-			input: `pipeline "bad" {
-				defaults {
-					image "alpine:latest"
-					bogus "value"
-				}
-				step "a" {
-					image "alpine:latest"
-					run "echo hi"
-				}
+			input: `defaults {
+				image "alpine:latest"
+				bogus "value"
+			}
+			step "a" {
+				image "alpine:latest"
+				run "echo hi"
 			}`,
 			wantErr: ErrUnknownNode,
 		},
 		{
 			name: "multi-step job",
-			input: `pipeline "ci" {
-				job "quality" {
-					image "golang:1.23"
-					step "fmt" {
-						run "gofmt -l ."
-					}
-					step "vet" {
-						run "go vet ./..."
-					}
-					step "lint" {
-						run "golangci-lint run"
-					}
+			input: `job "quality" {
+				image "golang:1.23"
+				step "fmt" {
+					run "gofmt -l ."
+				}
+				step "vet" {
+					run "go vet ./..."
+				}
+				step "lint" {
+					run "golangci-lint run"
 				}
 			}`,
 			want: pipeline.Pipeline{
-				Name: "ci",
+				Name: "",
 				Jobs: []pipeline.Job{
 					{
 						Name:  "quality",
@@ -934,13 +810,11 @@ func TestParseInclude(t *testing.T) {
 		{
 			name: "single fragment include",
 			files: map[string]string{
-				"/project/ci.kdl": `pipeline "ci" {
-					include "./fragments/lint.kdl" as="lint"
-					step "build" {
-						image "golang:1.23"
-						depends-on "lint"
-						run "go build ./..."
-					}
+				"/project/ci.kdl": `include "./fragments/lint.kdl" as="lint"
+				step "build" {
+					image "golang:1.23"
+					depends-on "lint"
+					run "go build ./..."
 				}`,
 				"/project/fragments/lint.kdl": `fragment "lint" {
 					step "lint" {
@@ -971,11 +845,9 @@ func TestParseInclude(t *testing.T) {
 		{
 			name: "parameterized fragment",
 			files: map[string]string{
-				"/project/ci.kdl": `pipeline "ci" {
-					include "./fragments/test.kdl" as="tests" {
-						go-version "1.23"
-						threshold "80"
-					}
+				"/project/ci.kdl": `include "./fragments/test.kdl" as="tests" {
+					go-version "1.23"
+					threshold "80"
 				}`,
 				"/project/fragments/test.kdl": `fragment "go-test" {
 					param "go-version" default="1.22"
@@ -1013,15 +885,13 @@ func TestParseInclude(t *testing.T) {
 		{
 			name: "alias resolves to terminal steps",
 			files: map[string]string{
-				"/project/ci.kdl": `pipeline "ci" {
-					include "./fragments/test.kdl" as="tests" {
-						go-version "1.23"
-					}
-					step "deploy" {
-						image "alpine:latest"
-						depends-on "tests"
-						run "echo deploy"
-					}
+				"/project/ci.kdl": `include "./fragments/test.kdl" as="tests" {
+					go-version "1.23"
+				}
+				step "deploy" {
+					image "alpine:latest"
+					depends-on "tests"
+					run "echo deploy"
 				}`,
 				"/project/fragments/test.kdl": `fragment "go-test" {
 					param "go-version"
@@ -1064,15 +934,13 @@ func TestParseInclude(t *testing.T) {
 		{
 			name: "multiple includes",
 			files: map[string]string{
-				"/project/ci.kdl": `pipeline "ci" {
-					include "./fragments/lint.kdl" as="lint"
-					include "./fragments/test.kdl" as="tests"
-					step "deploy" {
-						image "alpine:latest"
-						depends-on "lint"
-						depends-on "tests"
-						run "echo deploy"
-					}
+				"/project/ci.kdl": `include "./fragments/lint.kdl" as="lint"
+				include "./fragments/test.kdl" as="tests"
+				step "deploy" {
+					image "alpine:latest"
+					depends-on "lint"
+					depends-on "tests"
+					run "echo deploy"
 				}`,
 				"/project/fragments/lint.kdl": `fragment "lint" {
 					step "lint" {
@@ -1114,9 +982,7 @@ func TestParseInclude(t *testing.T) {
 		{
 			name: "circular include detection",
 			files: map[string]string{
-				"/project/a.kdl": `pipeline "ci" {
-					include "./b.kdl" as="b"
-				}`,
+				"/project/a.kdl": `include "./b.kdl" as="b"`,
 				"/project/b.kdl": `fragment "b" {
 					step "b" {
 						image "alpine:latest"
@@ -1131,9 +997,7 @@ func TestParseInclude(t *testing.T) {
 		{
 			name: "missing required param",
 			files: map[string]string{
-				"/project/ci.kdl": `pipeline "ci" {
-					include "./frag.kdl" as="f"
-				}`,
+				"/project/ci.kdl": `include "./frag.kdl" as="f"`,
 				"/project/frag.kdl": `fragment "f" {
 					param "required-param"
 					step "s" {
@@ -1148,10 +1012,8 @@ func TestParseInclude(t *testing.T) {
 		{
 			name: "unknown param provided",
 			files: map[string]string{
-				"/project/ci.kdl": `pipeline "ci" {
-					include "./frag.kdl" as="f" {
-						unknown-param "value"
-					}
+				"/project/ci.kdl": `include "./frag.kdl" as="f" {
+					unknown-param "value"
 				}`,
 				"/project/frag.kdl": `fragment "f" {
 					step "s" {
@@ -1166,13 +1028,11 @@ func TestParseInclude(t *testing.T) {
 		{
 			name: "alias falls back to fragment name",
 			files: map[string]string{
-				"/project/ci.kdl": `pipeline "ci" {
-					include "./frag.kdl"
-					step "deploy" {
-						image "alpine:latest"
-						depends-on "f"
-						run "echo deploy"
-					}
+				"/project/ci.kdl": `include "./frag.kdl"
+				step "deploy" {
+					image "alpine:latest"
+					depends-on "f"
+					run "echo deploy"
 				}`,
 				"/project/frag.kdl": `fragment "f" {
 					step "s" {
@@ -1203,10 +1063,8 @@ func TestParseInclude(t *testing.T) {
 		{
 			name: "duplicate alias names",
 			files: map[string]string{
-				"/project/ci.kdl": `pipeline "ci" {
-					include "./a.kdl" as="x"
-					include "./b.kdl" as="x"
-				}`,
+				"/project/ci.kdl": `include "./a.kdl" as="x"
+				include "./b.kdl" as="x"`,
 				"/project/a.kdl": `fragment "a" {
 					step "a" {
 						image "alpine:latest"
@@ -1226,13 +1084,11 @@ func TestParseInclude(t *testing.T) {
 		{
 			name: "on-conflict skip first wins",
 			files: map[string]string{
-				"/project/ci.kdl": `pipeline "ci" {
-					step "scan" {
-						image "custom-scanner:latest"
-						run "custom-scan ."
-					}
-					include "./security.kdl" as="security" on-conflict="skip"
-				}`,
+				"/project/ci.kdl": `step "scan" {
+					image "custom-scanner:latest"
+					run "custom-scan ."
+				}
+				include "./security.kdl" as="security" on-conflict="skip"`,
 				"/project/security.kdl": `fragment "security" {
 					step "scan" {
 						image "trivy:latest"
@@ -1265,13 +1121,11 @@ func TestParseInclude(t *testing.T) {
 		{
 			name: "on-conflict error duplicate step",
 			files: map[string]string{
-				"/project/ci.kdl": `pipeline "ci" {
-					step "scan" {
-						image "custom-scanner:latest"
-						run "custom-scan ."
-					}
-					include "./security.kdl" as="security"
-				}`,
+				"/project/ci.kdl": `step "scan" {
+					image "custom-scanner:latest"
+					run "custom-scan ."
+				}
+				include "./security.kdl" as="security"`,
 				"/project/security.kdl": `fragment "security" {
 					step "scan" {
 						image "trivy:latest"
@@ -1285,9 +1139,7 @@ func TestParseInclude(t *testing.T) {
 		{
 			name: "param default used when not provided",
 			files: map[string]string{
-				"/project/ci.kdl": `pipeline "ci" {
-					include "./frag.kdl" as="f"
-				}`,
+				"/project/ci.kdl": `include "./frag.kdl" as="f"`,
 				"/project/frag.kdl": `fragment "f" {
 					param "version" default="1.22"
 					step "s" {
@@ -1312,13 +1164,11 @@ func TestParseInclude(t *testing.T) {
 		{
 			name: "param plus matrix interaction",
 			files: map[string]string{
-				"/project/ci.kdl": `pipeline "ci" {
-					matrix {
-						os "linux" "darwin"
-					}
-					include "./frag.kdl" as="tests" {
-						version "1.23"
-					}
+				"/project/ci.kdl": `matrix {
+					os "linux" "darwin"
+				}
+				include "./frag.kdl" as="tests" {
+					version "1.23"
 				}`,
 				"/project/frag.kdl": `fragment "tests" {
 					param "version"
@@ -1349,22 +1199,18 @@ func TestParseInclude(t *testing.T) {
 		{
 			name: "including a pipeline file extracts steps",
 			files: map[string]string{
-				"/project/ci.kdl": `pipeline "ci" {
-					include "./other.kdl" as="other"
-					step "deploy" {
-						image "alpine:latest"
-						depends-on "other"
-						run "echo deploy"
-					}
+				"/project/ci.kdl": `include "./other.kdl" as="other"
+				step "deploy" {
+					image "alpine:latest"
+					depends-on "other"
+					run "echo deploy"
 				}`,
-				"/project/other.kdl": `pipeline "security" {
-					matrix {
-						os "linux"
-					}
-					step "scan" {
-						image "trivy:latest"
-						run "trivy scan"
-					}
+				"/project/other.kdl": `matrix {
+					os "linux"
+				}
+				step "scan" {
+					image "trivy:latest"
+					run "trivy scan"
 				}`,
 			},
 			entry: "/project/ci.kdl",
@@ -1389,9 +1235,7 @@ func TestParseInclude(t *testing.T) {
 		{
 			name: "transitive includes",
 			files: map[string]string{
-				"/project/ci.kdl": `pipeline "ci" {
-					include "./a.kdl" as="a"
-				}`,
+				"/project/ci.kdl": `include "./a.kdl" as="a"`,
 				"/project/a.kdl": `fragment "a" {
 					include "./sub/b.kdl" as="b"
 					step "a-step" {
@@ -1429,11 +1273,9 @@ func TestParseInclude(t *testing.T) {
 		{
 			name: "duplicate include param",
 			files: map[string]string{
-				"/project/ci.kdl": `pipeline "ci" {
-					include "./frag.kdl" as="f" {
-						version "1.23"
-						version "1.24"
-					}
+				"/project/ci.kdl": `include "./frag.kdl" as="f" {
+					version "1.23"
+					version "1.24"
 				}`,
 				"/project/frag.kdl": `fragment "f" {
 					param "version"
@@ -1447,16 +1289,12 @@ func TestParseInclude(t *testing.T) {
 			wantErr: ErrDuplicateField,
 		},
 		{
-			name: "included file with both pipeline and fragment",
+			name: "included file with both pipeline children and fragment",
 			files: map[string]string{
-				"/project/ci.kdl": `pipeline "ci" {
-					include "./both.kdl" as="both"
-				}`,
-				"/project/both.kdl": `pipeline "p" {
-					step "a" {
-						image "alpine:latest"
-						run "echo a"
-					}
+				"/project/ci.kdl": `include "./both.kdl" as="both"`,
+				"/project/both.kdl": `step "a" {
+					image "alpine:latest"
+					run "echo a"
 				}
 				fragment "f" {
 					step "b" {
@@ -1471,9 +1309,7 @@ func TestParseInclude(t *testing.T) {
 		{
 			name: "unknown top-level node in included file",
 			files: map[string]string{
-				"/project/ci.kdl": `pipeline "ci" {
-					include "./bad.kdl" as="bad"
-				}`,
+				"/project/ci.kdl": `include "./bad.kdl" as="bad"`,
 				"/project/bad.kdl": `frgament "oops" {
 					step "s" {
 						image "alpine:latest"
@@ -1485,21 +1321,17 @@ func TestParseInclude(t *testing.T) {
 			wantErr: ErrUnknownNode,
 		},
 		{
-			name: "alias falls back to pipeline name",
+			name: "alias falls back to filename-derived name",
 			files: map[string]string{
-				"/project/ci.kdl": `pipeline "ci" {
-					include "./other.kdl"
-					step "deploy" {
-						image "alpine:latest"
-						depends-on "security"
-						run "echo deploy"
-					}
+				"/project/ci.kdl": `include "./other.kdl"
+				step "deploy" {
+					image "alpine:latest"
+					depends-on "other"
+					run "echo deploy"
 				}`,
-				"/project/other.kdl": `pipeline "security" {
-					step "scan" {
-						image "trivy:latest"
-						run "trivy scan"
-					}
+				"/project/other.kdl": `step "scan" {
+					image "trivy:latest"
+					run "trivy scan"
 				}`,
 			},
 			entry: "/project/ci.kdl",
@@ -1524,13 +1356,11 @@ func TestParseInclude(t *testing.T) {
 		{
 			name: "explicit as overrides fragment name",
 			files: map[string]string{
-				"/project/ci.kdl": `pipeline "ci" {
-					include "./frag.kdl" as="custom"
-					step "deploy" {
-						image "alpine:latest"
-						depends-on "custom"
-						run "echo deploy"
-					}
+				"/project/ci.kdl": `include "./frag.kdl" as="custom"
+				step "deploy" {
+					image "alpine:latest"
+					depends-on "custom"
+					run "echo deploy"
 				}`,
 				"/project/frag.kdl": `fragment "go-test" {
 					step "unit-test" {
@@ -1561,10 +1391,8 @@ func TestParseInclude(t *testing.T) {
 		{
 			name: "duplicate auto-alias",
 			files: map[string]string{
-				"/project/ci.kdl": `pipeline "ci" {
-					include "./a.kdl"
-					include "./b.kdl"
-				}`,
+				"/project/ci.kdl": `include "./a.kdl"
+				include "./b.kdl"`,
 				"/project/a.kdl": `fragment "shared" {
 					step "a-step" {
 						image "alpine:latest"

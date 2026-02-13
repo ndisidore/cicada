@@ -16,18 +16,15 @@ import (
 
 // Sentinel errors for parse failures.
 var (
-	ErrNoPipeline        = errors.New("no pipeline node found")
-	ErrMultiplePipelines = errors.New("multiple pipeline nodes found")
-	ErrMissingName       = errors.New("pipeline node missing name argument")
-	ErrUnknownNode       = errors.New("unknown node type")
-	ErrMissingField      = errors.New("missing required field")
-	ErrDuplicateField    = errors.New("duplicate field")
-	ErrExtraArgs         = errors.New("too many arguments")
-	ErrTypeMismatch      = errors.New("argument type mismatch")
-	ErrUnknownProp       = errors.New("unknown property")
-	ErrAmbiguousFile     = errors.New("contains both pipeline and fragment nodes")
-	ErrEmptyInclude      = errors.New("no pipeline or fragment node found")
-	ErrNilResolver       = errors.New("Parser.Resolver is nil")
+	ErrUnknownNode    = errors.New("unknown node type")
+	ErrMissingField   = errors.New("missing required field")
+	ErrDuplicateField = errors.New("duplicate field")
+	ErrExtraArgs      = errors.New("too many arguments")
+	ErrTypeMismatch   = errors.New("argument type mismatch")
+	ErrUnknownProp    = errors.New("unknown property")
+	ErrAmbiguousFile  = errors.New("ambiguous file: contains both pipeline and fragment nodes")
+	ErrEmptyInclude   = errors.New("no pipeline or fragment node found")
+	ErrNilResolver    = errors.New("Parser.Resolver is nil")
 )
 
 // Parser converts KDL documents into validated pipeline definitions.
@@ -60,7 +57,7 @@ func (p *Parser) ParseString(content string) (pipeline.Pipeline, error) {
 	return p.parse(strings.NewReader(content), _syntheticFilename)
 }
 
-// parse is the core parse entry: detects top-level pipeline node and delegates.
+// parse is the core parse entry: dispatches root nodes directly.
 func (p *Parser) parse(r io.Reader, filename string) (pipeline.Pipeline, error) {
 	if p.Resolver == nil {
 		return pipeline.Pipeline{}, ErrNilResolver
@@ -70,49 +67,12 @@ func (p *Parser) parse(r io.Reader, filename string) (pipeline.Pipeline, error) 
 		return pipeline.Pipeline{}, err
 	}
 
-	var pipelineNode *document.Node
-	for _, node := range doc.Nodes {
-		switch nt := NodeType(node.Name.ValueString()); nt {
-		case NodeTypePipeline:
-			if pipelineNode != nil {
-				return pipeline.Pipeline{}, fmt.Errorf("%s: %w", filename, ErrMultiplePipelines)
-			}
-			pipelineNode = node
-		default:
-			return pipeline.Pipeline{}, fmt.Errorf(
-				"%s: %w: %q (expected pipeline)", filename, ErrUnknownNode, string(nt),
-			)
-		}
-	}
-
-	if pipelineNode == nil {
-		return pipeline.Pipeline{}, fmt.Errorf("%s: %w", filename, ErrNoPipeline)
-	}
-
-	return p.parsePipeline(pipelineNode, filename, newIncludeState())
-}
-
-// pipelineAcc accumulates pipeline-level fields parsed from child nodes.
-type pipelineAcc struct {
-	Matrix   *pipeline.Matrix
-	Defaults *pipeline.Defaults
-	Env      []pipeline.EnvVar
-}
-
-// parsePipeline parses a pipeline node with include-aware child resolution.
-func (p *Parser) parsePipeline(node *document.Node, filename string, state *includeState) (pipeline.Pipeline, error) {
-	name, err := requireStringArg(node, filename, string(NodeTypePipeline))
-	if err != nil {
-		return pipeline.Pipeline{}, fmt.Errorf(
-			"%s: %w: %w", filename, ErrMissingName, err,
-		)
-	}
-
 	gc := newGroupCollector(filename)
 	var acc pipelineAcc
+	state := newIncludeState()
 
-	for _, child := range node.Children {
-		if err := p.parsePipelineChild(child, filename, state, gc, &acc); err != nil {
+	for _, node := range doc.Nodes {
+		if err := p.parsePipelineChild(node, filename, state, gc, &acc); err != nil {
 			return pipeline.Pipeline{}, err
 		}
 	}
@@ -123,7 +83,7 @@ func (p *Parser) parsePipeline(node *document.Node, filename string, state *incl
 	}
 
 	return finalizePipeline(finalizePipelineInput{
-		Name:     name,
+		Name:     nameFromFilename(filename),
 		Jobs:     merged,
 		Env:      acc.Env,
 		Matrix:   acc.Matrix,
@@ -131,6 +91,13 @@ func (p *Parser) parsePipeline(node *document.Node, filename string, state *incl
 		Aliases:  state.aliases,
 		Filename: filename,
 	})
+}
+
+// pipelineAcc accumulates pipeline-level fields parsed from child nodes.
+type pipelineAcc struct {
+	Matrix   *pipeline.Matrix
+	Defaults *pipeline.Defaults
+	Env      []pipeline.EnvVar
 }
 
 // parsePipelineChild dispatches a single child node of a pipeline block.
@@ -555,6 +522,14 @@ func dirOf(filename string) string {
 		return "."
 	}
 	return filepath.Dir(filename)
+}
+
+// nameFromFilename derives a pipeline name from its filename (e.g. "ci.kdl" -> "ci").
+func nameFromFilename(filename string) string {
+	if filename == _syntheticFilename {
+		return ""
+	}
+	return strings.TrimSuffix(filepath.Base(filename), ".kdl")
 }
 
 // parseMatrix parses a matrix block into a pipeline.Matrix. Each child node

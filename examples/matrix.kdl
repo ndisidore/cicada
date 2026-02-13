@@ -11,24 +11,22 @@
 // Note: cross-arch execution requires QEMU/binfmt support:
 //   docker run --privileged --rm tonistiigi/binfmt --install all
 
-pipeline "matrix-ci" {
+matrix {
+    platform "linux/amd64" "linux/arm64"
+}
+
+step "build" {
+    image "golang:1.23"
+    platform "${matrix.platform}"
+    run "echo building for ${matrix.platform} && go version"
+}
+
+step "test" {
     matrix {
-        platform "linux/amd64" "linux/arm64"
+        go-version "1.22" "1.23"
     }
-
-    step "build" {
-        image "golang:1.23"
-        platform "${matrix.platform}"
-        run "echo building for ${matrix.platform} && go version"
-    }
-
-    step "test" {
-        matrix {
-            go-version "1.22" "1.23"
-        }
-        depends-on "build"
-        image "golang:${matrix.go-version}"
-        platform "${matrix.platform}"
-        run "echo testing on ${matrix.platform} with $(go version)"
-    }
+    depends-on "build"
+    image "golang:${matrix.go-version}"
+    platform "${matrix.platform}"
+    run "echo testing on ${matrix.platform} with $(go version)"
 }

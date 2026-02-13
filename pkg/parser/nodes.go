@@ -5,7 +5,6 @@ type NodeType string
 
 // Node types.
 const (
-	NodeTypePipeline  NodeType = "pipeline"
 	NodeTypeJob       NodeType = "job"
 	NodeTypeStep      NodeType = "step"
 	NodeTypeDefaults  NodeType = "defaults"

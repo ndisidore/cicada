@@ -1,12 +1,10 @@
-pipeline "fail" {
-  step "setup" {
-    image "alpine:latest"
-    run "echo 'setting up...'"
-  }
+step "setup" {
+  image "alpine:latest"
+  run "echo 'setting up...'"
+}
 
-  step "explode" {
-    image "alpine:latest"
-    depends-on "setup"
-    run "exit 1"
-  }
+step "explode" {
+  image "alpine:latest"
+  depends-on "setup"
+  run "exit 1"
 }

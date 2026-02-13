@@ -7,38 +7,36 @@
 // The "defaults" block sets pipeline-wide config inherited by all jobs.
 // Jobs can override image/workdir; env and mount are additive.
 
-pipeline "ci" {
-    defaults {
-        image "golang:1.25"
-        mount "." "/src"
-        workdir "/src"
-    }
+defaults {
+    image "golang:1.25"
+    mount "." "/src"
+    workdir "/src"
+}
 
-    job "quality" {
-        step "fmt" {
-            run "test -z $(gofmt -l .)"
-        }
-        step "vet" {
-            run "go vet ./..."
-        }
+job "quality" {
+    step "fmt" {
+        run "test -z $(gofmt -l .)"
     }
+    step "vet" {
+        run "go vet ./..."
+    }
+}
 
-    job "test" {
-        depends-on "quality"
-        step "unit" {
-            cache "go-test" "/root/.cache/go-build"
-            run "go test -race -coverprofile=coverage.out ./..."
-        }
-        step "check-coverage" {
-            run "total=$(go tool cover -func=coverage.out | tail -1 | awk '{print $3}') && echo Coverage: $total"
-        }
+job "test" {
+    depends-on "quality"
+    step "unit" {
+        cache "go-test" "/root/.cache/go-build"
+        run "go test -race -coverprofile=coverage.out ./..."
     }
+    step "check-coverage" {
+        run "total=$(go tool cover -func=coverage.out | tail -1 | awk '{print $3}') && echo Coverage: $total"
+    }
+}
 
-    job "build" {
-        depends-on "test"
-        step "compile" {
-            run "go build -o /out/app ./cmd/app"
-        }
-        export "/out/app" local="./bin/app"
+job "build" {
+    depends-on "test"
+    step "compile" {
+        run "go build -o /out/app ./cmd/app"
     }
+    export "/out/app" local="./bin/app"
 }
