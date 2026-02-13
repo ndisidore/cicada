@@ -1,21 +1,19 @@
-pipeline "artifacts" {
-  env "CI" "true"
+env "CI" "true"
 
-  step "build" {
-    image "alpine:latest"
-    env "GREETING" "hello from cicada"
-    run "mkdir -p /out"
-    run "echo '#!/bin/sh' > /out/greet && echo \"echo '$GREETING'\" >> /out/greet && chmod +x /out/greet"
-    run "echo BUILD_TS=$(date +%s) >> $CICADA_OUTPUT"
-    export "/out/greet" local="./bin/greet"
-    export "/out/" local="./dist/out"
-  }
+step "build" {
+  image "alpine:latest"
+  env "GREETING" "hello from cicada"
+  run "mkdir -p /out"
+  run "echo '#!/bin/sh' > /out/greet && echo \"echo '$GREETING'\" >> /out/greet && chmod +x /out/greet"
+  run "echo BUILD_TS=$(date +%s) >> $CICADA_OUTPUT"
+  export "/out/greet" local="./bin/greet"
+  export "/out/" local="./dist/out"
+}
 
-  step "test" {
-    depends-on "build"
-    image "alpine:latest"
-    artifact "build" "/out/greet" "/usr/local/bin/greet"
-    run "echo CI=$CI Testing build from $BUILD_TS"
-    run "greet"
-  }
+step "test" {
+  depends-on "build"
+  image "alpine:latest"
+  artifact "build" "/out/greet" "/usr/local/bin/greet"
+  run "echo CI=$CI Testing build from $BUILD_TS"
+  run "greet"
 }

@@ -339,38 +339,37 @@ func (p *Parser) resolveInclude(inc *includeDirective, fromFile string, state *i
 
 // parseIncludedFile parses an included file (either pipeline or fragment) and
 // returns the fragment/pipeline name along with its jobs (params substituted).
+// A file containing a fragment node is a fragment file; a file with pipeline-child
+// nodes (job, step, defaults, etc.) is a pipeline file. Both present → ambiguous.
 func (p *Parser) parseIncludedFile(rc io.Reader, absPath string, params map[string]string, state *includeState) (string, []pipeline.Job, error) {
 	doc, err := parseKDL(rc, absPath)
 	if err != nil {
 		return "", nil, err
 	}
 
-	// Detect whether this is a pipeline or fragment file.
-	var pipelineNode, fragNode *document.Node
+	var fragNode *document.Node
+	hasPipelineChildren := false
 	for _, node := range doc.Nodes {
 		switch nt := NodeType(node.Name.ValueString()); nt {
-		case NodeTypePipeline:
-			if pipelineNode != nil {
-				return "", nil, fmt.Errorf("%s: %w: multiple %q nodes", absPath, ErrAmbiguousFile, NodeTypePipeline)
-			}
-			pipelineNode = node
 		case NodeTypeFragment:
 			if fragNode != nil {
 				return "", nil, fmt.Errorf("%s: %w: multiple %q nodes", absPath, ErrAmbiguousFile, NodeTypeFragment)
 			}
 			fragNode = node
+		case NodeTypeJob, NodeTypeStep, NodeTypeDefaults, NodeTypeMatrix, NodeTypeEnv, NodeTypeInclude:
+			hasPipelineChildren = true
 		default:
-			return "", nil, fmt.Errorf("%s: %w: %q (expected pipeline or fragment)", absPath, ErrUnknownNode, string(nt))
+			return "", nil, fmt.Errorf("%s: %w: %q (expected fragment, job, step, defaults, matrix, env, or include)", absPath, ErrUnknownNode, string(nt))
 		}
 	}
 
 	switch {
-	case fragNode != nil && pipelineNode != nil:
+	case fragNode != nil && hasPipelineChildren:
 		return "", nil, fmt.Errorf("%s: %w", absPath, ErrAmbiguousFile)
 	case fragNode != nil:
 		return p.includeFragment(fragNode, absPath, params, state)
-	case pipelineNode != nil:
-		return p.includePipeline(pipelineNode, absPath, params, state)
+	case hasPipelineChildren:
+		return p.includePipelineFile(doc.Nodes, absPath, params, state)
 	default:
 		return "", nil, fmt.Errorf("%s: %w", absPath, ErrEmptyInclude)
 	}
@@ -408,38 +407,34 @@ func parseConflictStrategy(s string) (pipeline.ConflictStrategy, error) {
 	}
 }
 
-// includePipeline extracts jobs from an included pipeline file, ignoring its
+// includePipelineFile extracts jobs from an included pipeline file, ignoring its
 // pipeline-level matrix and defaults.
 //
-//revive:disable-next-line:cognitive-complexity includePipeline is a flat switch dispatch; splitting it hurts readability.
-func (p *Parser) includePipeline(node *document.Node, absPath string, params map[string]string, state *includeState) (string, []pipeline.Job, error) {
-	name, err := requireStringArg(node, absPath, string(NodeTypePipeline))
-	if err != nil {
-		return "", nil, fmt.Errorf("%s: %w", absPath, err)
-	}
+//revive:disable-next-line:cognitive-complexity includePipelineFile is a flat switch dispatch; splitting it hurts readability.
+func (p *Parser) includePipelineFile(nodes []*document.Node, absPath string, params map[string]string, state *includeState) (string, []pipeline.Job, error) {
+	name := nameFromFilename(absPath)
 	if len(params) > 0 {
 		return "", nil, fmt.Errorf("pipeline %q: %w", name, pipeline.ErrPipelineNoParams)
 	}
 
 	gc := newGroupCollector(absPath)
-	for _, child := range node.Children {
-		switch nt := NodeType(child.Name.ValueString()); nt {
+	for _, node := range nodes {
+		switch nt := NodeType(node.Name.ValueString()); nt {
 		case NodeTypeStep:
-			// Bare step sugar.
-			job, err := parseBareStep(child, absPath)
+			job, err := parseBareStep(node, absPath)
 			if err != nil {
 				return "", nil, err
 			}
 			gc.addJob(job)
 		case NodeTypeJob:
-			job, err := parseJob(child, absPath)
+			job, err := parseJob(node, absPath)
 			if err != nil {
 				return "", nil, err
 			}
 			gc.addJob(job)
 		case NodeTypeMatrix:
-			dims := make([]string, len(child.Children))
-			for i, d := range child.Children {
+			dims := make([]string, len(node.Children))
+			for i, d := range node.Children {
 				dims[i] = d.Name.ValueString()
 			}
 			slog.Warn("included pipeline matrix ignored",
@@ -458,7 +453,7 @@ func (p *Parser) includePipeline(node *document.Node, absPath string, params map
 				slog.String("file", absPath),
 			)
 		case NodeTypeInclude:
-			incJobs, inc, err := p.resolveChildInclude(child, absPath, state)
+			incJobs, inc, err := p.resolveChildInclude(node, absPath, state)
 			if err != nil {
 				return "", nil, err
 			}

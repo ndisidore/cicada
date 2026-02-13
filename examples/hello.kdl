@@ -1,13 +1,11 @@
-pipeline "hello" {
-    step "greet" {
-        image "alpine:latest"
-        run "echo 'Hello from Cicada!'"
-    }
+step "greet" {
+    image "alpine:latest"
+    run "echo 'Hello from Cicada!'"
+}
 
-    step "info" {
-        image "alpine:latest"
-        depends-on "greet"
-        run "uname -a"
-        run "date"
-    }
+step "info" {
+    image "alpine:latest"
+    depends-on "greet"
+    run "uname -a"
+    run "date"
 }
