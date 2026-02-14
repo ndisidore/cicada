@@ -777,6 +777,117 @@ func TestParse(t *testing.T) {
 				TopoOrder: []int{0},
 			},
 		},
+		{
+			name: "publish with defaults",
+			input: `job "build" {
+				image "golang:1.25"
+				step "compile" {
+					run "go build -o /app"
+				}
+				publish "ghcr.io/user/app:latest"
+			}`,
+			want: pipeline.Pipeline{
+				Name: "",
+				Jobs: []pipeline.Job{
+					{
+						Name:    "build",
+						Image:   "golang:1.25",
+						Publish: &pipeline.Publish{Image: "ghcr.io/user/app:latest", Push: true},
+						Steps:   []pipeline.Step{{Name: "compile", Run: []string{"go build -o /app"}}},
+					},
+				},
+				TopoOrder: []int{0},
+			},
+		},
+		{
+			name: "publish with push=false",
+			input: `job "build" {
+				image "golang:1.25"
+				step "compile" {
+					run "go build -o /app"
+				}
+				publish "myapp:dev" push=false
+			}`,
+			want: pipeline.Pipeline{
+				Name: "",
+				Jobs: []pipeline.Job{
+					{
+						Name:    "build",
+						Image:   "golang:1.25",
+						Publish: &pipeline.Publish{Image: "myapp:dev", Push: false},
+						Steps:   []pipeline.Step{{Name: "compile", Run: []string{"go build -o /app"}}},
+					},
+				},
+				TopoOrder: []int{0},
+			},
+		},
+		{
+			name: "publish with insecure=true",
+			input: `job "build" {
+				image "alpine:latest"
+				step "compile" {
+					run "echo build"
+				}
+				publish "localhost:5000/app:dev" insecure=true
+			}`,
+			want: pipeline.Pipeline{
+				Name: "",
+				Jobs: []pipeline.Job{
+					{
+						Name:    "build",
+						Image:   "alpine:latest",
+						Publish: &pipeline.Publish{Image: "localhost:5000/app:dev", Push: true, Insecure: true},
+						Steps:   []pipeline.Step{{Name: "compile", Run: []string{"echo build"}}},
+					},
+				},
+				TopoOrder: []int{0},
+			},
+		},
+		{
+			name: "publish missing argument rejected",
+			input: `job "build" {
+				image "alpine:latest"
+				step "compile" {
+					run "echo build"
+				}
+				publish
+			}`,
+			wantErr: ErrMissingField,
+		},
+		{
+			name: "duplicate publish rejected",
+			input: `job "build" {
+				image "alpine:latest"
+				step "compile" {
+					run "echo build"
+				}
+				publish "ghcr.io/user/app:v1"
+				publish "ghcr.io/user/app:v2"
+			}`,
+			wantErr: ErrDuplicateField,
+		},
+		{
+			name: "publish extra arguments rejected",
+			input: `job "build" {
+				image "alpine:latest"
+				step "compile" {
+					run "echo build"
+				}
+				publish "ghcr.io/user/app:v1" "extra"
+			}`,
+			wantErr: ErrExtraArgs,
+		},
+		{
+			name: "publish with empty image rejected",
+			input: `job "build" {
+				image "alpine:latest"
+				step "compile" {
+					run "echo build"
+				}
+				publish ""
+			}`,
+			wantErr: pipeline.ErrEmptyPublishImage,
+		},
 	}
 
 	for _, tt := range tests {

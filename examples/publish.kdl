@@ -1,0 +1,24 @@
+// Single-platform image publish (local only, no registry push).
+//
+// Builds a small Alpine-based image with a greeting script and
+// stores it in BuildKit's local image store. The image is NOT
+// pushed to a remote registry (push=false).
+//
+// Run (BuildKit store only):
+//   cicada run examples/publish.kdl
+//
+// Run + load into Docker daemon:
+//   cicada run examples/publish.kdl --with-docker-export '*'
+
+job "build" {
+    image "alpine:latest"
+    step "install" {
+        run "echo '#!/bin/sh' > /usr/local/bin/greet"
+        run "echo 'echo Hello from Cicada!' >> /usr/local/bin/greet"
+        run "chmod +x /usr/local/bin/greet"
+    }
+    step "verify" {
+        run "greet"
+    }
+    publish "cicada-example:latest" push=false
+}

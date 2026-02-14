@@ -230,6 +230,36 @@ func TestSubstituteParams(t *testing.T) {
 			}},
 		},
 		{
+			name: "substitution in publish image",
+			jobs: []Job{{
+				Name:    "build",
+				Image:   "alpine",
+				Publish: &Publish{Image: "ghcr.io/${param.org}/app:${param.tag}", Push: true, Insecure: true},
+				Steps:   []Step{{Name: "build", Run: []string{"echo build"}}},
+			}},
+			params: map[string]string{"org": "myuser", "tag": "v1.0"},
+			want: []Job{{
+				Name:    "build",
+				Image:   "alpine",
+				Publish: &Publish{Image: "ghcr.io/myuser/app:v1.0", Push: true, Insecure: true},
+				Steps:   []Step{{Name: "build", Run: []string{"echo build"}}},
+			}},
+		},
+		{
+			name: "nil publish preserved",
+			jobs: []Job{{
+				Name:  "build",
+				Image: "alpine",
+				Steps: []Step{{Name: "build", Run: []string{"echo build"}}},
+			}},
+			params: map[string]string{"x": "y"},
+			want: []Job{{
+				Name:  "build",
+				Image: "alpine",
+				Steps: []Step{{Name: "build", Run: []string{"echo build"}}},
+			}},
+		},
+		{
 			name: "empty params is noop",
 			jobs: []Job{{
 				Name:  "a",

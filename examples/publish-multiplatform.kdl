@@ -1,0 +1,32 @@
+// Multi-platform image publish (local only, no registry push).
+//
+// Builds an Alpine-based image for amd64 and arm64, then assembles
+// a manifest list. Both variants are stored in BuildKit's local
+// image store without pushing to a registry.
+//
+// Note: moby/buildkit images ship with QEMU/binfmt pre-registered.
+// For bare-metal BuildKit installs, you may need:
+//   docker run --privileged --rm tonistiigi/binfmt --install all
+//
+// Note: --with-docker-export is not supported for multi-platform publishes
+// because the Docker exporter cannot produce manifest lists.
+//
+// Run:
+//   cicada run examples/publish-multiplatform.kdl
+
+job "build" {
+    image "alpine:latest"
+    platform "${matrix.platform}"
+    matrix {
+        platform "linux/amd64" "linux/arm64"
+    }
+    step "install" {
+        run "echo '#!/bin/sh' > /usr/local/bin/greet"
+        run "echo \"echo Hello from Cicada on $(uname -m)!\" >> /usr/local/bin/greet"
+        run "chmod +x /usr/local/bin/greet"
+    }
+    step "verify" {
+        run "greet"
+    }
+    publish "cicada-example:multiplatform" push=false
+}

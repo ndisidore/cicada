@@ -196,6 +196,10 @@ func main() {
 						Name:  "cache-stats",
 						Usage: "print cache hit/miss statistics after run",
 					},
+					&cli.StringSliceFlag{
+						Name:  "with-docker-export",
+						Usage: "load published images into local Docker daemon (job names, or '*' for all)",
+					},
 				),
 				Action: a.runAction,
 			},
@@ -319,6 +323,60 @@ func buildNoCacheFilter(ctx context.Context, filters []string, p pipeline.Pipeli
 	return set
 }
 
+// buildDockerExportFilter converts CLI flag values into a set of job names
+// whose published images should be loaded into the local Docker daemon.
+// A value of "*" selects all jobs with a publish node.
+func buildDockerExportFilter(ctx context.Context, flagValues []string, pubs []runner.ImagePublish) map[string]struct{} {
+	if len(flagValues) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(flagValues))
+	for _, v := range flagValues {
+		if v == "*" {
+			all := make(map[string]struct{}, len(pubs))
+			for i := range pubs {
+				all[pubs[i].JobName] = struct{}{}
+			}
+			return all
+		}
+		set[v] = struct{}{}
+	}
+	pubJobs := make(map[string]struct{}, len(pubs))
+	for i := range pubs {
+		pubJobs[pubs[i].JobName] = struct{}{}
+	}
+	for name := range set {
+		if _, ok := pubJobs[name]; !ok {
+			slogctx.FromContext(ctx).LogAttrs(ctx, slog.LevelWarn,
+				"with-docker-export: no publish job matches", slog.String("name", name))
+		}
+	}
+	return set
+}
+
+// buildImagePublishes converts builder image exports into runner ImagePublish
+// values, applying the --with-docker-export filter to set ExportDocker.
+func buildImagePublishes(ctx context.Context, exports []builder.ImageExport, dockerExportFlags []string) []runner.ImagePublish {
+	pubs := make([]runner.ImagePublish, len(exports))
+	for i, ie := range exports {
+		pubs[i] = runner.ImagePublish{
+			Definition: ie.Definition,
+			JobName:    ie.JobName,
+			Image:      ie.Publish.Image,
+			Push:       ie.Publish.Push,
+			Insecure:   ie.Publish.Insecure,
+			Platform:   ie.Platform,
+		}
+	}
+	filter := buildDockerExportFilter(ctx, dockerExportFlags, pubs)
+	for i := range pubs {
+		if _, ok := filter[pubs[i].JobName]; ok {
+			pubs[i].ExportDocker = true
+		}
+	}
+	return pubs
+}
+
 func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 	path := cmd.Args().First()
 	if path == "" {
@@ -404,11 +462,14 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 		}
 	}
 
+	imagePublishes := buildImagePublishes(ctx, result.ImageExports, cmd.StringSlice("with-docker-export"))
+
 	return a.executePipeline(ctx, cmd, pipelineRunParams{
 		path:           path,
 		pipe:           p,
 		jobs:           jobs,
 		exports:        exports,
+		imagePublishes: imagePublishes,
 		cwd:            cwd,
 		cacheExports:   cacheExports,
 		cacheImports:   cacheImports,
@@ -422,6 +483,7 @@ type pipelineRunParams struct {
 	pipe           pipeline.Pipeline
 	jobs           []runner.Job
 	exports        []runner.Export
+	imagePublishes []runner.ImagePublish
 	cwd            string
 	cacheExports   []bkclient.CacheOptionsEntry
 	cacheImports   []bkclient.CacheOptionsEntry
@@ -477,6 +539,7 @@ func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipe
 		Display:        display,
 		Parallelism:    parallelism,
 		Exports:        params.exports,
+		ImagePublishes: params.imagePublishes,
 		CacheExports:   params.cacheExports,
 		CacheImports:   params.cacheImports,
 		CacheCollector: params.cacheCollector,

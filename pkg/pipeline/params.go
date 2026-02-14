@@ -67,6 +67,9 @@ func substituteJobVars(j Job, combo map[string]string, prefix string) Job {
 	substituteEnvValues(c.Env, sub)
 	substituteExports(c.Exports, sub)
 	substituteArtifacts(c.Artifacts, sub)
+	if c.Publish != nil {
+		c.Publish.Image = sub(c.Publish.Image)
+	}
 	for i := range c.Steps {
 		substituteStepFields(&c.Steps[i], sub)
 	}

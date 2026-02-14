@@ -26,6 +26,14 @@ type LocalExport struct {
 	Dir        bool   // true when exporting a directory (trailing / on container path)
 }
 
+// ImageExport pairs an LLB definition with image publishing metadata.
+type ImageExport struct {
+	Definition *llb.Definition
+	JobName    string
+	Publish    pipeline.Publish
+	Platform   string
+}
+
 // Result holds the LLB definitions for a pipeline, one per job in topological order.
 type Result struct {
 	// Definitions contains one LLB definition per job, ordered by dependency.
@@ -34,6 +42,8 @@ type Result struct {
 	JobNames []string
 	// Exports contains LLB definitions for jobs with local export paths.
 	Exports []LocalExport
+	// ImageExports contains image publish targets for jobs with Publish set.
+	ImageExports []ImageExport
 }
 
 // BuildOpts configures the LLB build process.
@@ -116,6 +126,15 @@ func Build(ctx context.Context, p pipeline.Pipeline, opts BuildOpts) (Result, er
 				JobName:    job.Name,
 				Local:      exp.Local,
 				Dir:        strings.HasSuffix(exp.Path, "/"),
+			})
+		}
+
+		if job.Publish != nil {
+			result.ImageExports = append(result.ImageExports, ImageExport{
+				Definition: def,
+				JobName:    job.Name,
+				Publish:    *job.Publish,
+				Platform:   job.Platform,
 			})
 		}
 	}

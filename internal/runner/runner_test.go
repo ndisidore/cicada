@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb"
+	gateway "github.com/moby/buildkit/frontend/gateway/client"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -22,10 +24,19 @@ import (
 // fakeSolver implements the Solver interface for testing.
 type fakeSolver struct {
 	solveFn func(ctx context.Context, def *llb.Definition, opt client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error)
+	buildFn func(ctx context.Context, opt client.SolveOpt, product string, buildFunc gateway.BuildFunc, ch chan *client.SolveStatus) (*client.SolveResponse, error)
 }
 
 func (f *fakeSolver) Solve(ctx context.Context, def *llb.Definition, opt client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 	return f.solveFn(ctx, def, opt, ch)
+}
+
+func (f *fakeSolver) Build(ctx context.Context, opt client.SolveOpt, product string, buildFunc gateway.BuildFunc, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+	if f.buildFn != nil {
+		return f.buildFn(ctx, opt, product, buildFunc, ch)
+	}
+	close(ch)
+	return &client.SolveResponse{}, nil
 }
 
 // fakeDisplay implements progress.Display for testing.
@@ -855,6 +866,369 @@ func TestRun_cacheEntriesFlowToSolveOpt(t *testing.T) {
 	require.NotNil(t, opt)
 	assert.Equal(t, exports, opt.CacheExports)
 	assert.Equal(t, imports, opt.CacheImports)
+}
+
+func TestRun_imagePublish(t *testing.T) {
+	t.Parallel()
+
+	def, err := llb.Scratch().Marshal(context.Background())
+	require.NoError(t, err)
+
+	t.Run("single publish uses image exporter", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedOpt atomic.Pointer[client.SolveOpt]
+		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, opt client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			if len(opt.Exports) > 0 {
+				capturedOpt.Store(&opt)
+			}
+			close(ch)
+			return &client.SolveResponse{}, nil
+		}}
+
+		err := Run(context.Background(), RunInput{
+			Solver:  solver,
+			Jobs:    []Job{{Name: "build", Definition: def}},
+			Display: &fakeDisplay{},
+			ImagePublishes: []ImagePublish{
+				{Definition: def, JobName: "build", Image: "ghcr.io/user/app:v1", Push: true, Platform: "linux/amd64"},
+			},
+		})
+		require.NoError(t, err)
+
+		opt := capturedOpt.Load()
+		require.NotNil(t, opt)
+		require.Len(t, opt.Exports, 1)
+		assert.Equal(t, client.ExporterImage, opt.Exports[0].Type)
+		assert.Equal(t, "ghcr.io/user/app:v1", opt.Exports[0].Attrs["name"])
+		assert.Equal(t, "true", opt.Exports[0].Attrs["push"])
+	})
+
+	t.Run("publish with insecure sets registry.insecure", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedOpt atomic.Pointer[client.SolveOpt]
+		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, opt client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			if len(opt.Exports) > 0 {
+				capturedOpt.Store(&opt)
+			}
+			close(ch)
+			return &client.SolveResponse{}, nil
+		}}
+
+		err := Run(context.Background(), RunInput{
+			Solver:  solver,
+			Jobs:    []Job{{Name: "build", Definition: def}},
+			Display: &fakeDisplay{},
+			ImagePublishes: []ImagePublish{
+				{Definition: def, JobName: "build", Image: "localhost:5000/app:dev", Push: true, Insecure: true, Platform: "linux/amd64"},
+			},
+		})
+		require.NoError(t, err)
+
+		opt := capturedOpt.Load()
+		require.NotNil(t, opt)
+		assert.Equal(t, "true", opt.Exports[0].Attrs["registry.insecure"])
+	})
+
+	t.Run("publish with push=false omits push attr", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedOpt atomic.Pointer[client.SolveOpt]
+		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, opt client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			if len(opt.Exports) > 0 {
+				capturedOpt.Store(&opt)
+			}
+			close(ch)
+			return &client.SolveResponse{}, nil
+		}}
+
+		err := Run(context.Background(), RunInput{
+			Solver:  solver,
+			Jobs:    []Job{{Name: "build", Definition: def}},
+			Display: &fakeDisplay{},
+			ImagePublishes: []ImagePublish{
+				{Definition: def, JobName: "build", Image: "myapp:dev", Push: false, Platform: "linux/amd64"},
+			},
+		})
+		require.NoError(t, err)
+
+		opt := capturedOpt.Load()
+		require.NotNil(t, opt)
+		_, hasPush := opt.Exports[0].Attrs["push"]
+		assert.False(t, hasPush, "push attr should not be set when Push=false")
+	})
+
+	t.Run("publish error wraps image and job name", func(t *testing.T) {
+		t.Parallel()
+
+		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, opt client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			close(ch)
+			if len(opt.Exports) > 0 {
+				return nil, errors.New("registry unavailable")
+			}
+			return &client.SolveResponse{}, nil
+		}}
+
+		err := Run(context.Background(), RunInput{
+			Solver:  solver,
+			Jobs:    []Job{{Name: "build", Definition: def}},
+			Display: &fakeDisplay{},
+			ImagePublishes: []ImagePublish{
+				{Definition: def, JobName: "build", Image: "ghcr.io/user/app:v1", Push: true, Platform: "linux/amd64"},
+			},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "ghcr.io/user/app:v1")
+		assert.Contains(t, err.Error(), "build")
+	})
+
+	t.Run("nil publish definition returns error", func(t *testing.T) {
+		t.Parallel()
+
+		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			close(ch)
+			return &client.SolveResponse{}, nil
+		}}
+
+		err := Run(context.Background(), RunInput{
+			Solver:  solver,
+			Jobs:    []Job{{Name: "build", Definition: def}},
+			Display: &fakeDisplay{},
+			ImagePublishes: []ImagePublish{
+				{Definition: nil, JobName: "build", Image: "ghcr.io/user/app:v1", Push: true},
+			},
+		})
+		require.ErrorIs(t, err, ErrNilDefinition)
+	})
+}
+
+func TestGroupPublishes(t *testing.T) {
+	t.Parallel()
+
+	def, err := llb.Scratch().Marshal(context.Background())
+	require.NoError(t, err)
+
+	t.Run("single variant produces one group", func(t *testing.T) {
+		t.Parallel()
+
+		pubs := []ImagePublish{
+			{Definition: def, JobName: "build", Image: "ghcr.io/user/app:v1", Push: true, Platform: "linux/amd64"},
+		}
+		groups, err := groupPublishes(pubs)
+		require.NoError(t, err)
+		require.Len(t, groups, 1)
+		assert.Equal(t, "ghcr.io/user/app:v1", groups[0].Image)
+		assert.True(t, groups[0].Push)
+		require.Len(t, groups[0].Variants, 1)
+	})
+
+	t.Run("same image groups together", func(t *testing.T) {
+		t.Parallel()
+
+		pubs := []ImagePublish{
+			{Definition: def, JobName: "build-amd64", Image: "ghcr.io/user/app:v1", Push: true, Platform: "linux/amd64"},
+			{Definition: def, JobName: "build-arm64", Image: "ghcr.io/user/app:v1", Push: true, Platform: "linux/arm64"},
+		}
+		groups, err := groupPublishes(pubs)
+		require.NoError(t, err)
+		require.Len(t, groups, 1)
+		assert.Equal(t, "ghcr.io/user/app:v1", groups[0].Image)
+		require.Len(t, groups[0].Variants, 2)
+	})
+
+	t.Run("different images separate groups", func(t *testing.T) {
+		t.Parallel()
+
+		pubs := []ImagePublish{
+			{Definition: def, JobName: "a", Image: "app:v1", Push: true, Platform: "linux/amd64"},
+			{Definition: def, JobName: "b", Image: "app:v2", Push: true, Platform: "linux/amd64"},
+		}
+		groups, err := groupPublishes(pubs)
+		require.NoError(t, err)
+		require.Len(t, groups, 2)
+		assert.Equal(t, "app:v1", groups[0].Image)
+		assert.Equal(t, "app:v2", groups[1].Image)
+	})
+
+	t.Run("conflicting push setting rejected", func(t *testing.T) {
+		t.Parallel()
+
+		pubs := []ImagePublish{
+			{Definition: def, JobName: "build-amd64", Image: "ghcr.io/user/app:v1", Push: true, Platform: "linux/amd64"},
+			{Definition: def, JobName: "build-arm64", Image: "ghcr.io/user/app:v1", Push: false, Platform: "linux/arm64"},
+		}
+		_, err := groupPublishes(pubs)
+		require.ErrorIs(t, err, ErrPublishSettingConflict)
+	})
+
+	t.Run("conflicting export-docker setting rejected", func(t *testing.T) {
+		t.Parallel()
+
+		pubs := []ImagePublish{
+			{Definition: def, JobName: "build-amd64", Image: "app:v1", ExportDocker: true, Platform: "linux/amd64"},
+			{Definition: def, JobName: "build-arm64", Image: "app:v1", ExportDocker: false, Platform: "linux/arm64"},
+		}
+		_, err := groupPublishes(pubs)
+		require.ErrorIs(t, err, ErrPublishSettingConflict)
+	})
+}
+
+func TestGroupPublishes_exportDocker(t *testing.T) {
+	t.Parallel()
+
+	def, err := llb.Scratch().Marshal(context.Background())
+	require.NoError(t, err)
+
+	pubs := []ImagePublish{
+		{Definition: def, JobName: "build", Image: "myapp:dev", ExportDocker: true, Platform: "linux/amd64"},
+	}
+	groups, err := groupPublishes(pubs)
+	require.NoError(t, err)
+	require.Len(t, groups, 1)
+	assert.True(t, groups[0].ExportDocker)
+}
+
+func TestRun_exportDockerMultiPlatformError(t *testing.T) {
+	t.Parallel()
+
+	def, err := llb.Scratch().Marshal(context.Background())
+	require.NoError(t, err)
+
+	solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+		close(ch)
+		return &client.SolveResponse{}, nil
+	}}
+
+	err = Run(context.Background(), RunInput{
+		Solver:  solver,
+		Jobs:    []Job{{Name: "build", Definition: def}},
+		Display: &fakeDisplay{},
+		ImagePublishes: []ImagePublish{
+			{Definition: def, JobName: "build-amd64", Image: "myapp:latest", ExportDocker: true, Platform: "linux/amd64"},
+			{Definition: def, JobName: "build-arm64", Image: "myapp:latest", ExportDocker: true, Platform: "linux/arm64"},
+		},
+	})
+	require.ErrorIs(t, err, ErrExportDockerMultiPlatform)
+}
+
+func TestRun_duplicatePlatformError(t *testing.T) {
+	t.Parallel()
+
+	def, err := llb.Scratch().Marshal(context.Background())
+	require.NoError(t, err)
+
+	solver := &fakeSolver{
+		solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			close(ch)
+			return &client.SolveResponse{}, nil
+		},
+		buildFn: func(ctx context.Context, opt client.SolveOpt, product string, buildFunc gateway.BuildFunc, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			defer close(ch)
+			// Invoke the build function so multiPlatformBuildFunc runs its pre-check.
+			_, err := buildFunc(ctx, nil)
+			return &client.SolveResponse{}, err
+		},
+	}
+
+	err = Run(context.Background(), RunInput{
+		Solver:  solver,
+		Jobs:    []Job{{Name: "build", Definition: def}},
+		Display: &fakeDisplay{},
+		ImagePublishes: []ImagePublish{
+			{Definition: def, JobName: "build-a", Image: "myapp:latest", Push: true, Platform: "linux/amd64"},
+			{Definition: def, JobName: "build-b", Image: "myapp:latest", Push: true, Platform: "linux/amd64"},
+		},
+	})
+	require.ErrorIs(t, err, ErrDuplicatePlatform)
+}
+
+// TestRun_exportDocker tests the export-docker path. Subtests are sequential
+// because they override the package-level _dockerLoadCmd variable.
+func TestRun_exportDocker(t *testing.T) {
+	def, err := llb.Scratch().Marshal(context.Background())
+	require.NoError(t, err)
+
+	origCmd := _dockerLoadCmd
+	t.Cleanup(func() { _dockerLoadCmd = origCmd })
+
+	_dockerLoadCmd = func(ctx context.Context) *exec.Cmd {
+		return exec.CommandContext(ctx, "cat")
+	}
+
+	t.Run("solves with docker exporter and Output set", func(t *testing.T) {
+		var capturedOpt atomic.Pointer[client.SolveOpt]
+		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, opt client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			if len(opt.Exports) > 0 && opt.Exports[0].Type == client.ExporterDocker {
+				capturedOpt.Store(&opt)
+			}
+			close(ch)
+			return &client.SolveResponse{}, nil
+		}}
+
+		err := Run(context.Background(), RunInput{
+			Solver:  solver,
+			Jobs:    []Job{{Name: "build", Definition: def}},
+			Display: &fakeDisplay{},
+			ImagePublishes: []ImagePublish{
+				{Definition: def, JobName: "build", Image: "myapp:dev", ExportDocker: true, Platform: "linux/amd64"},
+			},
+		})
+		require.NoError(t, err)
+
+		opt := capturedOpt.Load()
+		require.NotNil(t, opt, "docker exporter solve should have been called")
+		require.Len(t, opt.Exports, 1)
+		assert.Equal(t, client.ExporterDocker, opt.Exports[0].Type)
+		assert.Equal(t, "myapp:dev", opt.Exports[0].Attrs["name"])
+		assert.NotNil(t, opt.Exports[0].Output, "Output callback must be set for docker exporter")
+	})
+
+	t.Run("push and export-docker run concurrently", func(t *testing.T) {
+		var imageExporterCalled, dockerExporterCalled atomic.Bool
+		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, opt client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			if len(opt.Exports) > 0 {
+				switch opt.Exports[0].Type {
+				case client.ExporterImage:
+					imageExporterCalled.Store(true)
+				case client.ExporterDocker:
+					dockerExporterCalled.Store(true)
+				default:
+				}
+			}
+			close(ch)
+			return &client.SolveResponse{}, nil
+		}}
+
+		err := Run(context.Background(), RunInput{
+			Solver:  solver,
+			Jobs:    []Job{{Name: "build", Definition: def}},
+			Display: &fakeDisplay{},
+			ImagePublishes: []ImagePublish{
+				{Definition: def, JobName: "build", Image: "ghcr.io/user/app:v1", Push: true, ExportDocker: true, Platform: "linux/amd64"},
+			},
+		})
+		require.NoError(t, err)
+		assert.True(t, imageExporterCalled.Load(), "image exporter should be called for push")
+		assert.True(t, dockerExporterCalled.Load(), "docker exporter should be called for export-docker")
+	})
+
+	t.Run("nil definition returns error", func(t *testing.T) {
+		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			close(ch)
+			return &client.SolveResponse{}, nil
+		}}
+
+		err := Run(context.Background(), RunInput{
+			Solver:  solver,
+			Jobs:    []Job{{Name: "build", Definition: def}},
+			Display: &fakeDisplay{},
+			ImagePublishes: []ImagePublish{
+				{Definition: nil, JobName: "build", Image: "myapp:dev", ExportDocker: true, Platform: "linux/amd64"},
+			},
+		})
+		require.ErrorIs(t, err, ErrNilDefinition)
+	})
 }
 
 func TestTeeStatus(t *testing.T) {

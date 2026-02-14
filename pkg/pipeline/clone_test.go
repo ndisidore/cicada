@@ -36,6 +36,7 @@ func testJob() Job {
 		Matrix: &Matrix{
 			Dimensions: []Dimension{{Name: "os", Values: []string{"linux", "darwin"}}},
 		},
+		Publish: &Publish{Image: "ghcr.io/user/app:latest", Push: true, Insecure: false},
 		Steps: []Step{
 			{Name: "s1", Run: []string{"echo hello"}, Env: []EnvVar{{Key: "K", Value: "V"}}},
 		},
@@ -164,6 +165,7 @@ func TestJobClone(t *testing.T) {
 		t.Parallel()
 		clone := Job{Name: "min", Image: "img"}.Clone()
 		assert.Nil(t, clone.Matrix)
+		assert.Nil(t, clone.Publish)
 		assert.Nil(t, clone.Steps)
 		assert.Nil(t, clone.DependsOn)
 	})
@@ -239,6 +241,14 @@ func TestJobClone(t *testing.T) {
 			check: func(t *testing.T, orig Job) {
 				t.Helper()
 				assert.Equal(t, "linux", orig.Matrix.Dimensions[0].Values[0])
+			},
+		},
+		{
+			name:   "publish deep-cloned",
+			mutate: func(j *Job) { j.Publish.Image = "CHANGED" },
+			check: func(t *testing.T, orig Job) {
+				t.Helper()
+				assert.Equal(t, "ghcr.io/user/app:latest", orig.Publish.Image)
 			},
 		},
 	}

@@ -786,3 +786,62 @@ func TestApplyDefaults(t *testing.T) {
 		}, result[0].Env, "job env should override defaults on conflict")
 	})
 }
+
+func TestValidatePublish(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		publish *Publish
+		wantErr error
+	}{
+		{
+			name:    "nil publish passes",
+			publish: nil,
+		},
+		{
+			name:    "valid publish passes",
+			publish: &Publish{Image: "ghcr.io/user/app:latest", Push: true},
+		},
+		{
+			name:    "valid publish with insecure passes",
+			publish: &Publish{Image: "localhost:5000/app:dev", Push: true, Insecure: true},
+		},
+		{
+			name:    "empty image returns ErrEmptyPublishImage",
+			publish: &Publish{Image: "", Push: true},
+			wantErr: ErrEmptyPublishImage,
+		},
+		{
+			name:    "whitespace-only image returns ErrEmptyPublishImage",
+			publish: &Publish{Image: "   ", Push: true},
+			wantErr: ErrEmptyPublishImage,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			p := Pipeline{
+				Name: "test-pipeline",
+				Jobs: []Job{
+					{
+						Name:    "build",
+						Image:   "golang:1.23",
+						Publish: tt.publish,
+						Steps:   []Step{{Name: "build", Run: []string{"go build ./..."}}},
+					},
+				},
+			}
+
+			_, err := p.Validate()
+
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}

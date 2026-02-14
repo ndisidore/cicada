@@ -2,13 +2,20 @@
 package runner
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os/exec"
 	"path/filepath"
 
+	"github.com/containerd/platforms"
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb"
+	"github.com/moby/buildkit/exporter/containerimage/exptypes"
+	gateway "github.com/moby/buildkit/frontend/gateway/client"
 	"github.com/tonistiigi/fsutil"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
@@ -27,6 +34,20 @@ var ErrNilDisplay = errors.New("display must not be nil")
 // ErrNilDefinition indicates that an LLB Definition is unexpectedly nil.
 var ErrNilDefinition = errors.New("definition must not be nil")
 
+// ErrExportDockerMultiPlatform indicates export-docker was set on a multi-platform publish.
+var ErrExportDockerMultiPlatform = errors.New("export-docker is not supported for multi-platform publishes")
+
+// ErrPublishSettingConflict indicates variants targeting the same image have inconsistent settings.
+var ErrPublishSettingConflict = errors.New("conflicting publish settings for same image")
+
+// ErrDuplicatePlatform indicates two variants in a multi-platform publish target the same platform.
+var ErrDuplicatePlatform = errors.New("duplicate platform in multi-platform publish")
+
+// _dockerLoadCmd creates the exec.Cmd for piping a Docker tarball into the local daemon.
+var _dockerLoadCmd = func(ctx context.Context) *exec.Cmd {
+	return exec.CommandContext(ctx, "docker", "load")
+}
+
 // Solver abstracts the BuildKit Solve RPC for testability.
 //
 // Channel close contract: the status channel passed to Solve is owned by the caller
@@ -38,6 +59,8 @@ type Solver interface {
 	// Solve returns or completes; ownership of the channel remains with the
 	// caller of Solve until it is closed.
 	Solve(ctx context.Context, def *llb.Definition, opt client.SolveOpt, statusChan chan *client.SolveStatus) (*client.SolveResponse, error)
+	// Build runs a gateway build function (used for multi-platform manifest assembly).
+	Build(ctx context.Context, opt client.SolveOpt, product string, buildFunc gateway.BuildFunc, statusChan chan *client.SolveStatus) (*client.SolveResponse, error)
 }
 
 // Job pairs an LLB definition with its human-readable job name and dependencies.
@@ -56,6 +79,17 @@ type Export struct {
 	Dir        bool   // true when exporting a directory (trailing / on container path)
 }
 
+// ImagePublish pairs an LLB definition with image publishing metadata.
+type ImagePublish struct {
+	Definition   *llb.Definition
+	JobName      string
+	Image        string
+	Push         bool
+	Insecure     bool
+	ExportDocker bool
+	Platform     string
+}
+
 // RunInput holds parameters for executing a pipeline against BuildKit.
 type RunInput struct {
 	// Solver is the BuildKit API client used to solve LLB definitions.
@@ -70,6 +104,8 @@ type RunInput struct {
 	Parallelism int
 	// Exports contains artifacts to export to the host after all jobs complete.
 	Exports []Export
+	// ImagePublishes contains image publish targets to solve after all jobs complete.
+	ImagePublishes []ImagePublish
 	// CacheExports configures cache export destinations (e.g. registry, gha, local).
 	CacheExports []client.CacheOptionsEntry
 	// CacheImports configures cache import sources.
@@ -152,7 +188,11 @@ func Run(ctx context.Context, in RunInput) error {
 			return nil
 		})
 	}
-	return eg.Wait()
+	if err := eg.Wait(); err != nil {
+		return err
+	}
+
+	return runPublishes(ctx, in, cfg)
 }
 
 // buildDAG creates the DAG node index and validates that all deps exist.
@@ -310,6 +350,308 @@ func solveExport(ctx context.Context, s Solver, display progress.Display, exp Ex
 		return fmt.Errorf("solving export: %w", err)
 	}
 	return nil
+}
+
+// runPublishes groups image publishes and solves them concurrently. Single-variant
+// groups use the simple image exporter; multi-variant groups use the gateway Build API.
+//
+//revive:disable-next-line:cognitive-complexity runPublishes is a flat dispatch over group size and export flags; splitting it hurts readability.
+func runPublishes(ctx context.Context, in RunInput, cfg solveConfig) error {
+	if len(in.ImagePublishes) == 0 {
+		return nil
+	}
+
+	groups, err := groupPublishes(in.ImagePublishes)
+	if err != nil {
+		return err
+	}
+	for _, grp := range groups {
+		if len(grp.Variants) > 1 && grp.ExportDocker {
+			return fmt.Errorf("image %q: %w", grp.Image, ErrExportDockerMultiPlatform)
+		}
+	}
+
+	pg, pctx := errgroup.WithContext(ctx)
+	for _, grp := range groups {
+		if len(grp.Variants) > 1 {
+			pg.Go(func() error {
+				if err := solveMultiPlatformPublish(pctx, in.Solver, in.Display, grp, cfg); err != nil {
+					return fmt.Errorf("publishing multi-platform %q: %w", grp.Image, err)
+				}
+				return nil
+			})
+			continue
+		}
+		pub := grp.Variants[0]
+		switch {
+		case pub.Push && pub.ExportDocker:
+			pg.Go(func() error {
+				eg, ectx := errgroup.WithContext(pctx)
+				eg.Go(func() error {
+					if err := solveImagePublish(ectx, in.Solver, in.Display, pub, cfg); err != nil {
+						return fmt.Errorf("publishing %q from job %q: %w", grp.Image, pub.JobName, err)
+					}
+					return nil
+				})
+				eg.Go(func() error {
+					if err := solveImageExportDocker(ectx, in.Solver, in.Display, pub, cfg); err != nil {
+						return fmt.Errorf("export-docker %q from job %q: %w", grp.Image, pub.JobName, err)
+					}
+					return nil
+				})
+				return eg.Wait()
+			})
+		case pub.ExportDocker:
+			pg.Go(func() error {
+				if err := solveImageExportDocker(pctx, in.Solver, in.Display, pub, cfg); err != nil {
+					return fmt.Errorf("export-docker %q from job %q: %w", grp.Image, pub.JobName, err)
+				}
+				return nil
+			})
+		default:
+			pg.Go(func() error {
+				if err := solveImagePublish(pctx, in.Solver, in.Display, pub, cfg); err != nil {
+					return fmt.Errorf("publishing %q from job %q: %w", grp.Image, pub.JobName, err)
+				}
+				return nil
+			})
+		}
+	}
+	return pg.Wait()
+}
+
+// publishGroup groups image publish variants targeting the same image reference.
+type publishGroup struct {
+	Image        string
+	Push         bool
+	Insecure     bool
+	ExportDocker bool
+	Variants     []ImagePublish
+}
+
+// groupPublishes groups image publishes by image reference. All variants
+// targeting the same image must agree on Push, Insecure, and ExportDocker;
+// a mismatch returns ErrPublishSettingConflict. Single-variant groups use
+// the simple image exporter; multi-variant groups use the gateway Build API.
+func groupPublishes(pubs []ImagePublish) ([]publishGroup, error) {
+	idx := make(map[string]int, len(pubs))
+	var groups []publishGroup
+	for _, pub := range pubs {
+		if i, ok := idx[pub.Image]; ok {
+			grp := &groups[i]
+			if pub.Push != grp.Push || pub.Insecure != grp.Insecure || pub.ExportDocker != grp.ExportDocker {
+				return nil, fmt.Errorf("image %q: %w", pub.Image, ErrPublishSettingConflict)
+			}
+			grp.Variants = append(grp.Variants, pub)
+			continue
+		}
+		idx[pub.Image] = len(groups)
+		groups = append(groups, publishGroup{
+			Image:        pub.Image,
+			Push:         pub.Push,
+			Insecure:     pub.Insecure,
+			ExportDocker: pub.ExportDocker,
+			Variants:     []ImagePublish{pub},
+		})
+	}
+	return groups, nil
+}
+
+// validateVariants checks that all variants have non-nil definitions and unique
+// platforms. Returns ErrNilDefinition or ErrDuplicatePlatform on failure.
+func validateVariants(variants []ImagePublish) error {
+	seen := make(map[string]string, len(variants))
+	for _, v := range variants {
+		if v.Definition == nil {
+			return fmt.Errorf("variant %q (%s): %w", v.JobName, v.Platform, ErrNilDefinition)
+		}
+		plat, err := platforms.Parse(v.Platform)
+		if err != nil {
+			return fmt.Errorf("parsing platform %q for job %q: %w", v.Platform, v.JobName, err)
+		}
+		pid := platforms.Format(plat)
+		if prev, ok := seen[pid]; ok {
+			return fmt.Errorf("platform %q: jobs %q and %q: %w", pid, prev, v.JobName, ErrDuplicatePlatform)
+		}
+		seen[pid] = v.JobName
+	}
+	return nil
+}
+
+// multiPlatformBuildFunc returns a gateway.BuildFunc that solves each variant's
+// definition and assembles them into a multi-platform result with platform metadata.
+func multiPlatformBuildFunc(variants []ImagePublish) gateway.BuildFunc {
+	return func(ctx context.Context, c gateway.Client) (*gateway.Result, error) {
+		if err := validateVariants(variants); err != nil {
+			return nil, err
+		}
+
+		res := gateway.NewResult()
+		platList := make([]exptypes.Platform, 0, len(variants))
+		for _, v := range variants {
+			plat, err := platforms.Parse(v.Platform)
+			if err != nil {
+				return nil, fmt.Errorf("parsing platform %q for job %q: %w", v.Platform, v.JobName, err)
+			}
+
+			solveRes, err := c.Solve(ctx, gateway.SolveRequest{
+				Definition: v.Definition.ToPB(),
+			})
+			if err != nil {
+				return nil, fmt.Errorf("solving variant %q (%s): %w", v.JobName, v.Platform, err)
+			}
+
+			ref, err := solveRes.SingleRef()
+			if err != nil {
+				return nil, fmt.Errorf("getting ref for %q (%s): %w", v.JobName, v.Platform, err)
+			}
+
+			platformID := platforms.Format(plat)
+			res.AddRef(platformID, ref)
+			platList = append(platList, exptypes.Platform{
+				ID:       platformID,
+				Platform: plat,
+			})
+		}
+
+		dt, err := json.Marshal(exptypes.Platforms{Platforms: platList})
+		if err != nil {
+			return nil, fmt.Errorf("marshaling platform metadata: %w", err)
+		}
+		res.AddMeta(exptypes.ExporterPlatformsKey, dt)
+
+		return res, nil
+	}
+}
+
+// solveMultiPlatformPublish assembles multiple platform variants into a manifest
+// list using the gateway Build API.
+func solveMultiPlatformPublish(ctx context.Context, s Solver, display progress.Display, grp publishGroup, cfg solveConfig) error {
+	attrs := map[string]string{"name": grp.Image}
+	if grp.Push {
+		attrs["push"] = "true"
+	}
+	if grp.Insecure {
+		attrs["registry.insecure"] = "true"
+	}
+
+	ch := make(chan *client.SolveStatus)
+	displayName := "publish:" + grp.Image
+	displayCh := teeStatus(ctx, ch, cfg.collector, displayName)
+
+	if err := display.Attach(ctx, displayName, displayCh); err != nil {
+		close(ch)
+		return fmt.Errorf("attaching multi-platform publish display: %w", err)
+	}
+
+	_, err := s.Build(ctx, client.SolveOpt{
+		Exports: []client.ExportEntry{{
+			Type:  client.ExporterImage,
+			Attrs: attrs,
+		}},
+		CacheExports: cfg.cacheExports,
+		CacheImports: cfg.cacheImports,
+	}, "", multiPlatformBuildFunc(grp.Variants), ch)
+	if err != nil {
+		return fmt.Errorf("solving multi-platform publish: %w", err)
+	}
+	return nil
+}
+
+// solveImagePublish solves a single-platform image publish using the image exporter.
+func solveImagePublish(ctx context.Context, s Solver, display progress.Display, pub ImagePublish, cfg solveConfig) error {
+	if pub.Definition == nil {
+		return ErrNilDefinition
+	}
+
+	attrs := map[string]string{"name": pub.Image}
+	if pub.Push {
+		attrs["push"] = "true"
+	}
+	if pub.Insecure {
+		attrs["registry.insecure"] = "true"
+	}
+
+	ch := make(chan *client.SolveStatus)
+	displayName := "publish:" + pub.JobName
+	displayCh := teeStatus(ctx, ch, cfg.collector, displayName)
+
+	if err := display.Attach(ctx, displayName, displayCh); err != nil {
+		close(ch)
+		return fmt.Errorf("attaching publish display: %w", err)
+	}
+
+	_, err := s.Solve(ctx, pub.Definition, client.SolveOpt{
+		Exports: []client.ExportEntry{{
+			Type:  client.ExporterImage,
+			Attrs: attrs,
+		}},
+		CacheExports: cfg.cacheExports,
+		CacheImports: cfg.cacheImports,
+	}, ch)
+	if err != nil {
+		return fmt.Errorf("solving publish: %w", err)
+	}
+	return nil
+}
+
+// solveImageExportDocker solves an image definition using the Docker exporter,
+// piping the tarball directly into `docker load` via an io.Pipe.
+func solveImageExportDocker(ctx context.Context, s Solver, display progress.Display, pub ImagePublish, cfg solveConfig) error {
+	if pub.Definition == nil {
+		return ErrNilDefinition
+	}
+
+	pr, pw := io.Pipe()
+
+	ch := make(chan *client.SolveStatus)
+	displayName := "export-docker:" + pub.JobName
+	displayCh := teeStatus(ctx, ch, cfg.collector, displayName)
+
+	if err := display.Attach(ctx, displayName, displayCh); err != nil {
+		close(ch)
+		_ = pw.Close()
+		_ = pr.Close()
+		return fmt.Errorf("attaching export-docker display: %w", err)
+	}
+
+	eg, ectx := errgroup.WithContext(ctx)
+
+	eg.Go(func() error {
+		cmd := _dockerLoadCmd(ectx)
+		cmd.Stdin = pr
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		defer func() { _ = pr.Close() }()
+		if err := cmd.Run(); err != nil {
+			if stderr.Len() > 0 {
+				return fmt.Errorf("docker load: %w: %s", err, stderr.String())
+			}
+			return fmt.Errorf("docker load: %w", err)
+		}
+		return nil
+	})
+
+	eg.Go(func() error {
+		defer func() { _ = pw.Close() }()
+		_, err := s.Solve(ectx, pub.Definition, client.SolveOpt{
+			Exports: []client.ExportEntry{{
+				Type:  client.ExporterDocker,
+				Attrs: map[string]string{"name": pub.Image},
+				Output: func(_ map[string]string) (io.WriteCloser, error) {
+					return pw, nil
+				},
+			}},
+			CacheExports: cfg.cacheExports,
+			CacheImports: cfg.cacheImports,
+		}, ch)
+		if err != nil {
+			return fmt.Errorf("solving export-docker: %w", err)
+		}
+		return nil
+	})
+
+	return eg.Wait()
 }
 
 // drainChannel discards remaining items from ch so the sender is not blocked.
