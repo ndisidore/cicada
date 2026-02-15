@@ -604,13 +604,37 @@ func parseExportNode(node *document.Node, filename, scopeName string) (pipeline.
 	return pipeline.Export{Path: path, Local: local}, nil
 }
 
-// parseArtifactNode extracts an artifact definition (three string args: from, source, target).
+// parseArtifactNode extracts an artifact definition (one positional arg + source/target properties).
 func parseArtifactNode(node *document.Node, filename, scopeName string) (pipeline.Artifact, error) {
-	args, err := stringArgs3(node, string(NodeTypeArtifact))
-	if err != nil {
-		return pipeline.Artifact{}, fmt.Errorf("%s: %q: %w", filename, scopeName, err)
+	if len(node.Arguments) > 1 {
+		return pipeline.Artifact{}, fmt.Errorf(
+			"%s: %q: artifact requires exactly one argument, got %d: %w",
+			filename, scopeName, len(node.Arguments), ErrExtraArgs,
+		)
 	}
-	return pipeline.Artifact{From: args[0], Source: args[1], Target: args[2]}, nil
+	from, err := requireStringArg(node, filename, string(NodeTypeArtifact))
+	if err != nil {
+		return pipeline.Artifact{}, fmt.Errorf("%s: %q: artifact: %w", filename, scopeName, err)
+	}
+	source, err := prop[string](node, PropSource)
+	if err != nil {
+		return pipeline.Artifact{}, fmt.Errorf("%s: %q: artifact: %w", filename, scopeName, err)
+	}
+	if source == "" {
+		return pipeline.Artifact{}, fmt.Errorf(
+			"%s: %q: artifact: source property: %w", filename, scopeName, ErrMissingField,
+		)
+	}
+	target, err := prop[string](node, PropTarget)
+	if err != nil {
+		return pipeline.Artifact{}, fmt.Errorf("%s: %q: artifact: %w", filename, scopeName, err)
+	}
+	if target == "" {
+		return pipeline.Artifact{}, fmt.Errorf(
+			"%s: %q: artifact: target property: %w", filename, scopeName, ErrMissingField,
+		)
+	}
+	return pipeline.Artifact{From: from, Source: source, Target: target}, nil
 }
 
 // parsePublishNode extracts a publish declaration from a KDL node.
@@ -640,35 +664,6 @@ func parsePublishNode(node *document.Node, filename, scopeName string) (pipeline
 		push = true
 	}
 	return pipeline.Publish{Image: image, Push: push, Insecure: insecure}, nil
-}
-
-// stringArgs3 extracts exactly three string arguments from a node.
-func stringArgs3(node *document.Node, field string) ([3]string, error) {
-	switch {
-	case len(node.Arguments) < 3:
-		return [3]string{}, fmt.Errorf(
-			"%s requires exactly three arguments, got %d: %w",
-			field, len(node.Arguments), ErrMissingField,
-		)
-	case len(node.Arguments) > 3:
-		return [3]string{}, fmt.Errorf(
-			"%s requires exactly three arguments, got %d: %w",
-			field, len(node.Arguments), ErrExtraArgs,
-		)
-	}
-	first, err := arg[string](node, 0)
-	if err != nil {
-		return [3]string{}, fmt.Errorf("%s first argument: %w", field, err)
-	}
-	second, err := arg[string](node, 1)
-	if err != nil {
-		return [3]string{}, fmt.Errorf("%s second argument: %w", field, err)
-	}
-	third, err := arg[string](node, 2)
-	if err != nil {
-		return [3]string{}, fmt.Errorf("%s third argument: %w", field, err)
-	}
-	return [3]string{first, second, third}, nil
 }
 
 // stringArgs2 extracts exactly two string arguments from a node.

@@ -13,7 +13,7 @@ step "build" {
 step "test" {
   depends-on "build"
   image "alpine:latest"
-  artifact "build" "/out/greet" "/usr/local/bin/greet"
+  artifact "build" source="/out/greet" target="/usr/local/bin/greet"
   run "echo CI=$CI Testing build from $BUILD_TS"
   run "greet"
 }

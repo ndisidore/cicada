@@ -33,6 +33,8 @@ const (
 	PropDefault    = "default"
 	PropAs         = "as"
 	PropLocal      = "local"
+	PropSource     = "source"
+	PropTarget     = "target"
 	PropPush       = "push"
 	PropInsecure   = "insecure"
 )

@@ -606,7 +606,7 @@ func TestParse(t *testing.T) {
 			step "deploy" {
 				image "alpine:latest"
 				depends-on "build"
-				artifact "build" "/out/myapp" "/usr/local/bin/myapp"
+				artifact "build" source="/out/myapp" target="/usr/local/bin/myapp"
 				run "echo deploying"
 			}`,
 			want: pipeline.Pipeline{
@@ -636,7 +636,7 @@ func TestParse(t *testing.T) {
 			}
 			step "deploy" {
 				image "alpine:latest"
-				artifact "build" "/out/myapp" "/usr/local/bin/myapp"
+				artifact "build" source="/out/myapp" target="/usr/local/bin/myapp"
 				run "echo deploying"
 			}`,
 			wantErr: pipeline.ErrArtifactNoDep,
@@ -660,7 +660,7 @@ func TestParse(t *testing.T) {
 			wantErr: ErrExtraArgs,
 		},
 		{
-			name: "artifact with wrong args",
+			name: "artifact missing properties",
 			input: `step "other" {
 				image "alpine:latest"
 				run "echo other"
@@ -668,10 +668,24 @@ func TestParse(t *testing.T) {
 			step "a" {
 				image "alpine:latest"
 				depends-on "other"
-				artifact "other" "/src"
+				artifact "other"
 				run "echo hi"
 			}`,
 			wantErr: ErrMissingField,
+		},
+		{
+			name: "artifact with extra positional args",
+			input: `step "other" {
+				image "alpine:latest"
+				run "echo other"
+			}
+			step "a" {
+				image "alpine:latest"
+				depends-on "other"
+				artifact "other" "/src" "/tgt"
+				run "echo hi"
+			}`,
+			wantErr: ErrExtraArgs,
 		},
 		{
 			name: "step with no-cache flag",

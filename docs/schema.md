@@ -126,7 +126,7 @@ job "test" {
 | `cache` | `<id>` `<target>` | 0..N | Persistent cache volume |
 | `env` | `<key>` `<value>` | 0..N | Environment variable |
 | `export` | `<container-path>` `local=<host-path>` | 0..N | Export file/dir to host |
-| `artifact` | `<from-job>` `<source>` `<target>` | 0..N | Import file from dependency |
+| `artifact` | `<from-job>` `source=<source>` `target=<target>` | 0..N | Import file from dependency |
 | `matrix` | (children) | 0..1 | Job-level matrix expansion |
 | `no-cache` | (none) | 0..1 | Disable caching for all steps |
 | `publish` | `<image-ref>` | 0..1 | Publish job filesystem as OCI image (see [publish](#publish)) |
@@ -157,7 +157,7 @@ step "install" {
 | `mount` | `<source>` `<target>` | 0..N | Step-specific bind mount (additive to job) |
 | `cache` | `<id>` `<target>` | 0..N | Step-specific cache volume (additive to job) |
 | `export` | `<container-path>` `local=<host-path>` | 0..N | Export to host (resolved from job's final state; see [Execution Model](#execution-model)) |
-| `artifact` | `<from-job>` `<source>` `<target>` | 0..N | Import file from dependency |
+| `artifact` | `<from-job>` `source=<source>` `target=<target>` | 0..N | Import file from dependency |
 | `no-cache` | (none) | 0..1 | Disable caching for this step |
 
 </details>
