@@ -162,3 +162,61 @@ type=<backend>[,<key>=<value>]*
 ```
 
 All attributes beyond `type` are passed directly to BuildKit. Refer to the [BuildKit cache documentation](https://github.com/moby/buildkit#cache) for the full set of supported attributes per backend.
+
+---
+
+# Image Publishing
+
+Jobs can publish their final container filesystem as an OCI image using the `publish` node. See the [schema reference](schema.md#publish) for the full property list.
+
+## Push to registry
+
+By default, `publish` pushes to a remote registry:
+
+```kdl
+job "build" {
+    image "golang:1.25"
+    step "compile" { run "go build -o /app ./cmd/app" }
+    publish "ghcr.io/user/app:latest"
+}
+```
+
+Use `insecure=true` for HTTP registries (e.g. `localhost:5000`).
+
+## Export to Docker
+
+The `--with-docker-export` CLI flag pipes published images into the local Docker daemon via `docker load`, making them available for `docker run`, `docker images`, and docker-compose. Each value is a job name; `*` selects all jobs with a `publish` node.
+
+```bash
+# Export all publish jobs to local Docker daemon
+cicada run pipeline.kdl --with-docker-export '*'
+
+# Export only "build" job's publish target
+cicada run pipeline.kdl --with-docker-export build
+
+# Export multiple specific jobs
+cicada run pipeline.kdl --with-docker-export build --with-docker-export deploy
+```
+
+Registry push (controlled by `push` in KDL) and Docker export (controlled by the CLI flag) can be combined -- the registry push and Docker load run concurrently:
+
+```bash
+cicada run pipeline.kdl --with-docker-export build
+# if "build" has publish "ghcr.io/user/app:latest", it pushes AND loads into Docker
+```
+
+## Multi-platform images
+
+When a matrix-expanded job publishes to the same image reference from multiple platform variants, BuildKit assembles a multi-platform manifest list automatically:
+
+```kdl
+job "build" {
+    image "golang:1.25"
+    platform "${matrix.platform}"
+    matrix { platform "linux/amd64" "linux/arm64" }
+    step "compile" { run "go build -o /app ./cmd/app" }
+    publish "ghcr.io/user/app:latest"
+}
+```
+
+`--with-docker-export` is not supported for multi-platform publishes -- the Docker exporter cannot produce manifest lists. Cicada will return an error before solving if a multi-platform image is matched by `--with-docker-export`.

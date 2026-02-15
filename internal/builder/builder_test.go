@@ -1106,6 +1106,72 @@ func TestBuild_directoryExportSetsDir(t *testing.T) {
 	assert.Equal(t, "./output/dist", result.Exports[0].Local)
 }
 
+func TestBuild_imageExportCollected(t *testing.T) {
+	t.Parallel()
+
+	p := pipeline.Pipeline{
+		Name: "publish-test",
+		Jobs: []pipeline.Job{
+			{
+				Name:    "build",
+				Image:   "alpine:latest",
+				Publish: &pipeline.Publish{Image: "ghcr.io/user/app:latest", Push: true, Insecure: false},
+				Steps:   []pipeline.Step{{Name: "build", Run: []string{"echo build"}}},
+			},
+		},
+	}
+
+	result, err := Build(context.Background(), p, BuildOpts{})
+	require.NoError(t, err)
+	require.Len(t, result.ImageExports, 1)
+	assert.Equal(t, "build", result.ImageExports[0].JobName)
+	assert.Equal(t, "ghcr.io/user/app:latest", result.ImageExports[0].Publish.Image)
+	assert.True(t, result.ImageExports[0].Publish.Push)
+	assert.False(t, result.ImageExports[0].Publish.Insecure)
+	assert.NotNil(t, result.ImageExports[0].Definition)
+}
+
+func TestBuild_imageExportWithPlatform(t *testing.T) {
+	t.Parallel()
+
+	p := pipeline.Pipeline{
+		Name: "platform-publish",
+		Jobs: []pipeline.Job{
+			{
+				Name:     "build",
+				Image:    "alpine:latest",
+				Platform: "linux/arm64",
+				Publish:  &pipeline.Publish{Image: "ghcr.io/user/app:latest", Push: true},
+				Steps:    []pipeline.Step{{Name: "build", Run: []string{"echo build"}}},
+			},
+		},
+	}
+
+	result, err := Build(context.Background(), p, BuildOpts{})
+	require.NoError(t, err)
+	require.Len(t, result.ImageExports, 1)
+	assert.Equal(t, "linux/arm64", result.ImageExports[0].Platform)
+}
+
+func TestBuild_noImageExportWithoutPublish(t *testing.T) {
+	t.Parallel()
+
+	p := pipeline.Pipeline{
+		Name: "no-publish",
+		Jobs: []pipeline.Job{
+			{
+				Name:  "build",
+				Image: "alpine:latest",
+				Steps: []pipeline.Step{{Name: "build", Run: []string{"echo build"}}},
+			},
+		},
+	}
+
+	result, err := Build(context.Background(), p, BuildOpts{})
+	require.NoError(t, err)
+	assert.Empty(t, result.ImageExports)
+}
+
 func TestBuild_fileExportClearsDirFlag(t *testing.T) {
 	t.Parallel()
 

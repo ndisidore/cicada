@@ -46,7 +46,7 @@ var (
 	ErrPipelineNoParams = errors.New("pipeline does not accept parameters")
 )
 
-// Sentinel errors for env vars, exports, and artifacts.
+// Sentinel errors for env vars, exports, artifacts, and publish.
 var (
 	ErrEmptyEnvKey            = errors.New("env key is empty")
 	ErrEmptyExportPath        = errors.New("export path is empty")
@@ -63,6 +63,7 @@ var (
 	ErrRootExport             = errors.New("export path must not be root")
 	ErrRootArtifact           = errors.New("artifact target must not be root")
 	ErrEmptyExportLocal       = errors.New("export local path is empty")
+	ErrEmptyPublishImage      = errors.New("publish image reference is empty")
 )
 
 // ConflictStrategy determines behavior when job names collide during merge.
@@ -175,6 +176,13 @@ type Cache struct {
 	Target string // absolute container path where the cache is mounted
 }
 
+// Publish declares an OCI image export for a job's final filesystem.
+type Publish struct {
+	Image    string // OCI image reference (e.g. "ghcr.io/user/app:latest")
+	Push     bool   // push to registry; parser defaults to true when omitted in KDL
+	Insecure bool   // allow insecure registry
+}
+
 // Defaults holds pipeline-wide configuration inherited by all jobs.
 // Image and Workdir fill empty job fields (set-if-absent). Mounts are
 // prepended (defaults first, then job-specific). Env is merged with
@@ -210,8 +218,9 @@ type Job struct {
 	Exports   []Export   // container paths this job produces
 	Artifacts []Artifact // files imported from dependency jobs
 	Steps     []Step
-	Matrix    *Matrix // job-level matrix; nil if not set
-	NoCache   bool    // disable cache for this job
+	Matrix    *Matrix  // job-level matrix; nil if not set
+	NoCache   bool     // disable cache for this job
+	Publish   *Publish // OCI image export; nil if not set
 }
 
 // Step represents a single execution unit within a job.
@@ -291,6 +300,9 @@ func validateJob(idx int, j *Job, g *jobGraph) error {
 		return err
 	}
 	if err := validateArtifacts(jobScope, j.Artifacts, j.DependsOn); err != nil {
+		return err
+	}
+	if err := validatePublish(jobScope, j.Publish); err != nil {
 		return err
 	}
 
@@ -413,6 +425,17 @@ func validateArtifacts(scope string, artifacts []Artifact, deps []string) error 
 			return fmt.Errorf("%s: artifact target %q: %w", scope, a.Target, ErrDuplicateArtifact)
 		}
 		targetSeen[a.Target] = struct{}{}
+	}
+	return nil
+}
+
+// validatePublish checks that a publish declaration has a non-empty image reference.
+func validatePublish(scope string, pub *Publish) error {
+	if pub == nil {
+		return nil
+	}
+	if strings.TrimSpace(pub.Image) == "" {
+		return fmt.Errorf("%s: %w", scope, ErrEmptyPublishImage)
 	}
 	return nil
 }

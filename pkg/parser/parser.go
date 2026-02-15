@@ -299,6 +299,12 @@ func applyJobField(j *pipeline.Job, node *document.Node, filename string) error 
 			return fmt.Errorf("%s: %s: %w: %q", filename, scope, ErrDuplicateField, string(nt))
 		}
 		j.NoCache = true
+	case NodeTypePublish:
+		pub, err := parsePublishNode(node, filename, j.Name)
+		if err != nil {
+			return err
+		}
+		return setOnce(&j.Publish, &pub, filename, scope, string(nt))
 	case NodeTypeStep:
 		step, err := parseJobStep(node, filename, j.Name)
 		if err != nil {
@@ -605,6 +611,35 @@ func parseArtifactNode(node *document.Node, filename, scopeName string) (pipelin
 		return pipeline.Artifact{}, fmt.Errorf("%s: %q: %w", filename, scopeName, err)
 	}
 	return pipeline.Artifact{From: args[0], Source: args[1], Target: args[2]}, nil
+}
+
+// parsePublishNode extracts a publish declaration from a KDL node.
+// One required string argument (image reference), optional push bool prop
+// (default true), optional insecure bool prop (default false).
+func parsePublishNode(node *document.Node, filename, scopeName string) (pipeline.Publish, error) {
+	if len(node.Arguments) > 1 {
+		return pipeline.Publish{}, fmt.Errorf(
+			"%s: %q: publish requires exactly one argument, got %d: %w",
+			filename, scopeName, len(node.Arguments), ErrExtraArgs,
+		)
+	}
+	image, err := requireStringArg(node, filename, string(NodeTypePublish))
+	if err != nil {
+		return pipeline.Publish{}, fmt.Errorf("%s: %q: publish: %w", filename, scopeName, err)
+	}
+	push, err := prop[bool](node, PropPush)
+	if err != nil {
+		return pipeline.Publish{}, fmt.Errorf("%s: %q: publish: %w", filename, scopeName, err)
+	}
+	insecure, err := prop[bool](node, PropInsecure)
+	if err != nil {
+		return pipeline.Publish{}, fmt.Errorf("%s: %q: publish: %w", filename, scopeName, err)
+	}
+	// Default push=true when the property is absent.
+	if _, hasPush := node.Properties[PropPush]; !hasPush {
+		push = true
+	}
+	return pipeline.Publish{Image: image, Push: push, Insecure: insecure}, nil
 }
 
 // stringArgs3 extracts exactly three string arguments from a node.

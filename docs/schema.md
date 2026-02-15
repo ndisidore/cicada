@@ -129,6 +129,7 @@ job "test" {
 | `artifact` | `<from-job>` `<source>` `<target>` | 0..N | Import file from dependency |
 | `matrix` | (children) | 0..1 | Job-level matrix expansion |
 | `no-cache` | (none) | 0..1 | Disable caching for all steps |
+| `publish` | `<image-ref>` | 0..1 | Publish job filesystem as OCI image (see [publish](#publish)) |
 | `step` | `<name>` | 1..N | Sequential execution unit |
 
 </details>
@@ -161,7 +162,30 @@ step "install" {
 
 </details>
 
-**What stays job-only:** `image`, `platform`, `depends-on`, and `matrix` are container-identity or DAG concerns that don't vary per step.
+**What stays job-only:** `image`, `platform`, `depends-on`, `publish`, and `matrix` are container-identity or DAG concerns that don't vary per step.
+
+---
+
+### `publish`
+
+Publishes the job's final container filesystem as an OCI image. Takes one argument (the image reference) and optional properties.
+
+```kdl
+// Push to registry (default)
+publish "ghcr.io/user/app:latest"
+
+// Local only -- store in BuildKit, skip registry push
+publish "myapp:dev" push=false
+```
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `push` | bool | `true` | Push to remote registry |
+| `insecure` | bool | `false` | Allow insecure (HTTP) registry |
+
+When multiple matrix variants publish to the same image reference, BuildKit assembles them into a multi-platform manifest list.
+
+To load published images into the local Docker daemon, use the `--with-docker-export` CLI flag on `cicada run` (see [usage](usage.md#export-to-docker)). Docker export is not supported for multi-platform publishes (the Docker exporter cannot produce manifest lists).
 
 ---
 
@@ -278,7 +302,7 @@ job "build" {
 }
 ```
 
-A bare step accepts the union of job and step fields. `run` goes to the inner step; everything else (`image`, `depends-on`, `mount`, `cache`, `env`, `export`, `artifact`, `platform`, `matrix`, `workdir`, `no-cache`) goes to the job.
+A bare step accepts the union of job and step fields. `run` goes to the inner step; everything else (`image`, `depends-on`, `mount`, `cache`, `env`, `export`, `artifact`, `platform`, `matrix`, `workdir`, `no-cache`, `publish`) goes to the job.
 
 ---
 

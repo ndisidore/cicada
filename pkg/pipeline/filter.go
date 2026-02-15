@@ -176,6 +176,7 @@ func FilterJobs(jobs []Job, opts FilterOpts) ([]Job, error) {
 		j := jobs[i].Clone()
 		if _, inWindow := executionWindow[j.Name]; !inWindow {
 			j.Exports = nil
+			j.Publish = nil
 			for si := range j.Steps {
 				j.Steps[si].Exports = nil
 			}

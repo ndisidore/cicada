@@ -23,6 +23,7 @@ const (
 	NodeTypeExport    NodeType = "export"
 	NodeTypeArtifact  NodeType = "artifact"
 	NodeTypeNoCache   NodeType = "no-cache"
+	NodeTypePublish   NodeType = "publish"
 )
 
 // Property keys.
@@ -32,4 +33,6 @@ const (
 	PropDefault    = "default"
 	PropAs         = "as"
 	PropLocal      = "local"
+	PropPush       = "push"
+	PropInsecure   = "insecure"
 )

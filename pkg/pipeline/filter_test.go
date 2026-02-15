@@ -476,6 +476,25 @@ func TestFilterJobs(t *testing.T) {
 			want: qualityPipeline,
 		},
 		{
+			name: "dep-only job has publish stripped",
+			jobs: []Job{
+				{
+					Name:    "a",
+					Image:   "alpine",
+					Publish: &Publish{Image: "ghcr.io/user/a:v1", Push: true},
+					Steps:   []Step{{Name: "a", Run: []string{"echo a"}}},
+				},
+				job("b", []string{"a"}, nil),
+				job("c", []string{"b"}, nil),
+			},
+			opts: FilterOpts{StartAt: "b"},
+			want: []Job{
+				{Name: "a", Image: "alpine", DependsOn: nil, Exports: nil, Publish: nil, Steps: []Step{{Name: "a", Run: []string{"echo a"}, Exports: nil}}},
+				job("b", []string{"a"}, nil),
+				job("c", []string{"b"}, nil),
+			},
+		},
+		{
 			name: "colon in matrix name no conflict",
 			jobs: []Job{
 				job("lint", nil, nil),

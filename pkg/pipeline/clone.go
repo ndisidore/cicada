@@ -22,6 +22,10 @@ func (j Job) Clone() Job {
 		m := j.Matrix.Clone()
 		j.Matrix = &m
 	}
+	if j.Publish != nil {
+		p := *j.Publish
+		j.Publish = &p
+	}
 	return j
 }
 
