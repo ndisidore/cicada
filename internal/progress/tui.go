@@ -57,7 +57,6 @@ func (t *TUI) Attach(ctx context.Context, jobName string, ch <-chan *client.Solv
 	if t.p == nil {
 		return ErrNotStarted
 	}
-	t.wg.Add(1)
 	// Spawn the monitor goroutine on first Attach. It waits for Seal before
 	// calling wg.Wait, ensuring all Attach calls (and their wg.Add) have
 	// completed before completion is checked.
@@ -70,8 +69,7 @@ func (t *TUI) Attach(ctx context.Context, jobName string, ch <-chan *client.Solv
 	})
 	t.p.Send(jobAddedMsg{name: jobName})
 
-	go func() {
-		defer t.wg.Done()
+	t.wg.Go(func() {
 		defer func() { t.p.Send(jobDoneMsg{name: jobName}) }()
 		for {
 			select {
@@ -91,7 +89,7 @@ func (t *TUI) Attach(ctx context.Context, jobName string, ch <-chan *client.Solv
 				t.p.Send(jobStatusMsg{name: jobName, status: status})
 			}
 		}
-	}()
+	})
 
 	return nil
 }

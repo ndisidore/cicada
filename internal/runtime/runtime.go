@@ -1,5 +1,7 @@
 // Package runtime abstracts container runtime operations (Docker, Podman, etc.)
 // for managing the BuildKit daemon container lifecycle.
+//
+//revive:disable:var-naming Package name conflict with standard library is intentional.
 package runtime
 
 import (

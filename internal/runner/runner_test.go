@@ -1610,5 +1610,5 @@ func TestRunNodeOutputExtractionFailure(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, extractionErr)
 	require.Contains(t, err.Error(), "output extraction")
-	require.NotNil(t, node.err)
+	require.Error(t, node.err)
 }
