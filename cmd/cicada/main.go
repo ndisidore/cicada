@@ -24,6 +24,8 @@ import (
 	"github.com/ndisidore/cicada/internal/runner"
 	"github.com/ndisidore/cicada/internal/runtime"
 	"github.com/ndisidore/cicada/internal/synccontext"
+	"github.com/ndisidore/cicada/pkg/conditional"
+	"github.com/ndisidore/cicada/pkg/gitinfo"
 	"github.com/ndisidore/cicada/pkg/parser"
 	"github.com/ndisidore/cicada/pkg/pipeline"
 	"github.com/ndisidore/cicada/pkg/slogctx"
@@ -402,6 +404,17 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 	}
 	p.TopoOrder = nil
 
+	wctx := conditional.Context{
+		Getenv: os.Getenv,
+		Branch: gitinfo.DetectBranch(ctx, os.Getenv),
+		Tag:    gitinfo.DetectTag(ctx, os.Getenv),
+	}
+	condResult, err := pipeline.EvaluateConditions(ctx, p, wctx)
+	if err != nil {
+		return fmt.Errorf("evaluating when conditions: %w", err)
+	}
+	p = condResult.Pipeline
+
 	cwd, err := a.getwd()
 	if err != nil {
 		return fmt.Errorf("getting working directory: %w", err)
@@ -425,7 +438,7 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("building %s: %w", path, err)
 	}
 
-	jobs, err := buildRunnerJobs(result, p)
+	jobs, err := buildRunnerJobs(result, p, condResult.SkippedSteps)
 	if err != nil {
 		return fmt.Errorf("converting build result: %w", err)
 	}
@@ -474,6 +487,8 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 		cacheExports:   cacheExports,
 		cacheImports:   cacheImports,
 		cacheCollector: collector,
+		whenCtx:        &wctx,
+		skippedJobs:    condResult.Skipped,
 	})
 }
 
@@ -488,6 +503,8 @@ type pipelineRunParams struct {
 	cacheExports   []bkclient.CacheOptionsEntry
 	cacheImports   []bkclient.CacheOptionsEntry
 	cacheCollector *cache.Collector
+	whenCtx        *conditional.Context
+	skippedJobs    []string
 }
 
 // executePipeline connects to BuildKit and runs the pipeline jobs.
@@ -530,6 +547,10 @@ func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipe
 	}
 	defer display.Seal()
 
+	for _, name := range params.skippedJobs {
+		display.Skip(ctx, name)
+	}
+
 	runErr := runner.Run(ctx, runner.RunInput{
 		Solver: solver,
 		Jobs:   params.jobs,
@@ -543,6 +564,7 @@ func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipe
 		CacheExports:   params.cacheExports,
 		CacheImports:   params.cacheImports,
 		CacheCollector: params.cacheCollector,
+		WhenContext:    params.whenCtx,
 	})
 
 	display.Seal()
@@ -588,32 +610,51 @@ func (a *app) printPipelineSummary(name string, jobs []pipeline.Job) {
 	}
 }
 
+// pipelineJobInfo holds pre-indexed per-job metadata from the pipeline.
+type pipelineJobInfo struct {
+	DependsOn []string
+	When      runner.DeferredEvaluator // deferred condition; nil = no deferred condition
+	Env       map[string]string        // pipeline-scoped env for deferred condition evaluation
+	Matrix    map[string]string        // matrix dimension values for deferred condition evaluation
+}
+
 // buildRunnerJobs converts a builder.Result into a slice of runner.Job,
 // carrying dependency information from the pipeline. Dependencies are resolved
 // by name rather than positional index, so builder output ordering need not
 // match pipeline declaration order.
-func buildRunnerJobs(r builder.Result, p pipeline.Pipeline) ([]runner.Job, error) {
+func buildRunnerJobs(r builder.Result, p pipeline.Pipeline, skippedSteps map[string][]string) ([]runner.Job, error) {
 	if len(r.Definitions) != len(r.JobNames) {
 		return nil, fmt.Errorf("%w: %d definitions, %d job names",
 			errResultMismatch, len(r.Definitions), len(r.JobNames))
 	}
 
-	// Index pipeline jobs by name for name-based dependency lookup.
-	pipelineIdx := make(map[string][]string, len(p.Jobs))
+	// Index pipeline jobs by name for dependency + deferred when lookup.
+	pipelineIdx := make(map[string]pipelineJobInfo, len(p.Jobs))
 	for i := range p.Jobs {
-		pipelineIdx[p.Jobs[i].Name] = p.Jobs[i].DependsOn
+		info := pipelineJobInfo{DependsOn: p.Jobs[i].DependsOn}
+		if p.Jobs[i].When != nil && p.Jobs[i].When.Deferred {
+			info.When = p.Jobs[i].When
+			info.Env = pipeline.BuildEnvScope(p.Env, p.Jobs[i].Env)
+			info.Matrix = p.Jobs[i].MatrixValues
+		}
+		pipelineIdx[p.Jobs[i].Name] = info
 	}
 
 	jobs := make([]runner.Job, len(r.Definitions))
 	for i := range r.Definitions {
-		deps, ok := pipelineIdx[r.JobNames[i]]
+		info, ok := pipelineIdx[r.JobNames[i]]
 		if !ok {
 			return nil, fmt.Errorf("%w: %q", errUnknownBuilderJob, r.JobNames[i])
 		}
 		jobs[i] = runner.Job{
-			Name:       r.JobNames[i],
-			Definition: r.Definitions[i],
-			DependsOn:  deps,
+			Name:         r.JobNames[i],
+			Definition:   r.Definitions[i],
+			DependsOn:    info.DependsOn,
+			When:         info.When,
+			Env:          info.Env,
+			Matrix:       info.Matrix,
+			OutputDef:    r.OutputDefs[r.JobNames[i]],
+			SkippedSteps: skippedSteps[r.JobNames[i]],
 		}
 	}
 	return jobs, nil

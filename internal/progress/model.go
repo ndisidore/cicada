@@ -57,12 +57,14 @@ const _maxLogs = 10
 
 // jobState tracks all vertex and log state for a single job.
 type jobState struct {
-	vertices map[digest.Digest]*stepState
-	order    []digest.Digest
-	logs     []string
-	done     bool
-	started  *time.Time // earliest vertex start
-	ended    *time.Time // latest vertex completion
+	vertices     map[digest.Digest]*stepState
+	order        []digest.Digest
+	logs         []string
+	done         bool
+	skipped      bool       // true if job was skipped by a when condition
+	skippedSteps []string   // step names skipped by static when conditions
+	started      *time.Time // earliest vertex start
+	ended        *time.Time // latest vertex completion
 }
 
 func newJobState() *jobState {
@@ -154,6 +156,15 @@ type jobStatusMsg struct {
 // jobDoneMsg signals a job's status channel has been closed.
 type jobDoneMsg struct{ name string }
 
+// jobSkippedMsg signals a job was skipped due to a when condition.
+type jobSkippedMsg struct{ name string }
+
+// stepSkippedMsg signals a step within a job was skipped due to a when condition.
+type stepSkippedMsg struct {
+	jobName  string
+	stepName string
+}
+
 // allDoneMsg signals all jobs have completed and the TUI should quit.
 type allDoneMsg struct{}
 
@@ -178,6 +189,23 @@ func (m *multiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if _, ok := m.jobs[msg.name]; !ok {
 			m.jobs[msg.name] = newJobState()
 			m.order = append(m.order, msg.name)
+		}
+	case jobSkippedMsg:
+		js, ok := m.jobs[msg.name]
+		if !ok {
+			js = newJobState()
+			m.jobs[msg.name] = js
+			m.order = append(m.order, msg.name)
+		}
+		if !js.done {
+			js.done = true
+			js.skipped = true
+		}
+	case stepSkippedMsg:
+		// stepSkippedMsg is sent after solveJob returns, which calls Attach
+		// (and thus jobAddedMsg) internally, so the job is guaranteed to exist.
+		if js, ok := m.jobs[msg.jobName]; ok {
+			js.skippedSteps = append(js.skippedSteps, msg.stepName)
 		}
 	case jobStatusMsg:
 		// jobAddedMsg is always sent before the goroutine that produces
@@ -211,6 +239,7 @@ var (
 	_stepErrorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))             // red
 	_stepRunningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))             // yellow
 	_stepCachedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))             // magenta
+	_skipStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("178"))           // gold
 )
 
 func statusStyle(s stepStatus) lipgloss.Style {
@@ -250,6 +279,12 @@ func (m *multiModel) View() string {
 }
 
 func (js *jobState) renderTo(b *strings.Builder, name string, icons map[stepStatus]string, frame int, spinnerFrames []string) {
+	if js.skipped {
+		_, _ = b.WriteString(_skipStyle.Render(fmt.Sprintf("Job: %s (skipped)", name)))
+		_ = b.WriteByte('\n')
+		return
+	}
+
 	resolvedCount := 0
 	for _, d := range js.order {
 		switch js.vertices[d].status {
@@ -280,6 +315,10 @@ func (js *jobState) renderTo(b *strings.Builder, name string, icons map[stepStat
 		}
 		styledName := statusStyle(st.status).Render(st.name)
 		_, _ = fmt.Fprintf(b, "  %s %s%s\n", icons[st.status], styledName, durStr)
+	}
+
+	for _, stepName := range js.skippedSteps {
+		_, _ = fmt.Fprintf(b, "  %s\n", _skipStyle.Render(fmt.Sprintf("%s (skipped)", stepName)))
 	}
 
 	for _, l := range js.logs {

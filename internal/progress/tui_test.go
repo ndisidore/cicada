@@ -91,6 +91,53 @@ func TestTUI(t *testing.T) {
 		})
 	})
 
+	t.Run("skip", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("skip before any attach exits cleanly", func(t *testing.T) {
+			t.Parallel()
+
+			tui := newTestTUI()
+			require.NoError(t, tui.Start(t.Context()))
+			tui.Skip(t.Context(), "deploy")
+			tui.Seal()
+			requireWaitReturns(t, tui)
+		})
+
+		t.Run("skip before start does not panic", func(t *testing.T) {
+			t.Parallel()
+
+			tui := newTestTUI()
+			tui.Skip(t.Context(), "deploy")
+		})
+	})
+
+	t.Run("skip step", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("skip step after start exits cleanly", func(t *testing.T) {
+			t.Parallel()
+
+			tui := newTestTUI()
+			require.NoError(t, tui.Start(t.Context()))
+
+			ch := make(chan *client.SolveStatus)
+			require.NoError(t, tui.Attach(t.Context(), "build", ch))
+			tui.SkipStep(t.Context(), "build", "notify")
+			close(ch)
+
+			tui.Seal()
+			requireWaitReturns(t, tui)
+		})
+
+		t.Run("skip step before start does not panic", func(t *testing.T) {
+			t.Parallel()
+
+			tui := newTestTUI()
+			tui.SkipStep(t.Context(), "build", "notify")
+		})
+	})
+
 	t.Run("idempotency", func(t *testing.T) {
 		t.Parallel()
 

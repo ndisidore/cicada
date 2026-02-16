@@ -40,6 +40,25 @@ func (p *Plain) Attach(ctx context.Context, jobName string, ch <-chan *client.So
 	return nil
 }
 
+// Skip reports that a job was skipped due to a when condition.
+func (*Plain) Skip(ctx context.Context, jobName string) {
+	log := slogctx.FromContext(ctx)
+	log.LogAttrs(ctx, slog.LevelInfo, "job skipped",
+		slog.String("job", jobName),
+		slog.String("event", "job.skipped"),
+	)
+}
+
+// SkipStep reports that a step within a job was skipped due to a when condition.
+func (*Plain) SkipStep(ctx context.Context, jobName, stepName string) {
+	log := slogctx.FromContext(ctx)
+	log.LogAttrs(ctx, slog.LevelInfo, "step skipped",
+		slog.String("job", jobName),
+		slog.String("step", stepName),
+		slog.String("event", "step.skipped"),
+	)
+}
+
 // Seal is a no-op for Plain; Wait uses WaitGroup which is safe since
 // all Attach calls complete before Wait is called by the caller.
 func (*Plain) Seal() {}

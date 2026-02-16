@@ -24,6 +24,7 @@ const (
 	NodeTypeArtifact  NodeType = "artifact"
 	NodeTypeNoCache   NodeType = "no-cache"
 	NodeTypePublish   NodeType = "publish"
+	NodeTypeWhen      NodeType = "when"
 )
 
 // Property keys.

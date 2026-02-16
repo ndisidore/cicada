@@ -13,8 +13,18 @@ import (
 
 	"github.com/ndisidore/cicada/internal/builder"
 	"github.com/ndisidore/cicada/internal/runner"
+	"github.com/ndisidore/cicada/pkg/conditional"
 	"github.com/ndisidore/cicada/pkg/pipeline"
 )
+
+func mustNewWhen(tb testing.TB, expr string) *conditional.When {
+	tb.Helper()
+	w, err := conditional.NewWhen(expr)
+	if err != nil {
+		tb.Fatalf("mustNewWhen(%q): %v", expr, err)
+	}
+	return w
+}
 
 // fakeEngine implements Engine for testing.
 type fakeEngine struct {
@@ -341,12 +351,68 @@ func TestBuildRunnerJobs(t *testing.T) {
 			},
 			wantSentinel: errUnknownBuilderJob,
 		},
+		{
+			name: "deferred job carries scoped Env",
+			result: builder.Result{
+				Definitions: []*llb.Definition{def, def},
+				JobNames:    []string{"build", "deploy"},
+			},
+			pipeline: pipeline.Pipeline{
+				Env: []pipeline.EnvVar{{Key: "STAGE", Value: "dev"}},
+				Jobs: []pipeline.Job{
+					{Name: "build"},
+					{
+						Name:      "deploy",
+						DependsOn: []string{"build"},
+						Env:       []pipeline.EnvVar{{Key: "STAGE", Value: "prod"}},
+						When:      mustNewWhen(t, `output("build", "ok") == "true"`),
+					},
+				},
+			},
+			want: []runner.Job{
+				{Name: "build", Definition: def},
+				{
+					Name: "deploy", Definition: def,
+					DependsOn: []string{"build"},
+					When:      mustNewWhen(t, `output("build", "ok") == "true"`),
+					Env:       map[string]string{"STAGE": "prod"},
+				},
+			},
+		},
+		{
+			name: "deferred matrix job carries MatrixValues",
+			result: builder.Result{
+				Definitions: []*llb.Definition{def, def},
+				JobNames:    []string{"build", "deploy[os=linux]"},
+			},
+			pipeline: pipeline.Pipeline{
+				Jobs: []pipeline.Job{
+					{Name: "build"},
+					{
+						Name:         "deploy[os=linux]",
+						DependsOn:    []string{"build"},
+						MatrixValues: map[string]string{"os": "linux"},
+						When:         mustNewWhen(t, `output("build", "ok") == "true" && matrix("os") == "linux"`),
+					},
+				},
+			},
+			want: []runner.Job{
+				{Name: "build", Definition: def},
+				{
+					Name: "deploy[os=linux]", Definition: def,
+					DependsOn: []string{"build"},
+					When:      mustNewWhen(t, `output("build", "ok") == "true" && matrix("os") == "linux"`),
+					Env:       map[string]string{},
+					Matrix:    map[string]string{"os": "linux"},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := buildRunnerJobs(tt.result, tt.pipeline)
+			got, err := buildRunnerJobs(tt.result, tt.pipeline, nil)
 			if tt.wantSentinel != nil {
 				require.ErrorIs(t, err, tt.wantSentinel)
 				return

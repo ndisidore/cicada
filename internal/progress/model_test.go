@@ -20,12 +20,14 @@ func TestMultiModelUpdate(t *testing.T) {
 	completed := now.Add(300 * time.Millisecond)
 
 	tests := []struct {
-		name       string
-		msgs       []tea.Msg
-		wantDone   bool
-		wantWidth  int
-		wantJobs   int
-		wantStatus map[string]map[string]stepStatus // job -> vertex name -> status
+		name             string
+		msgs             []tea.Msg
+		wantDone         bool
+		wantWidth        int
+		wantJobs         int
+		wantSkipped      map[string]bool
+		wantSkippedSteps map[string][]string
+		wantStatus       map[string]map[string]stepStatus
 	}{
 		{
 			name: "job added then status",
@@ -78,6 +80,32 @@ func TestMultiModelUpdate(t *testing.T) {
 			},
 			wantJobs:   1,
 			wantStatus: map[string]map[string]stepStatus{"deploy": {"push": statusError}},
+		},
+		{
+			name: "job skipped",
+			msgs: []tea.Msg{
+				jobSkippedMsg{name: "deploy"},
+			},
+			wantJobs:    1,
+			wantSkipped: map[string]bool{"deploy": true},
+		},
+		{
+			name: "job added then skipped marks existing job",
+			msgs: []tea.Msg{
+				jobAddedMsg{name: "deploy"},
+				jobSkippedMsg{name: "deploy"},
+			},
+			wantJobs:    1,
+			wantSkipped: map[string]bool{"deploy": true},
+		},
+		{
+			name: "step skipped within job",
+			msgs: []tea.Msg{
+				jobAddedMsg{name: "build"},
+				stepSkippedMsg{jobName: "build", stepName: "slow-test"},
+			},
+			wantJobs:         1,
+			wantSkippedSteps: map[string][]string{"build": {"slow-test"}},
 		},
 		{
 			name: "allDoneMsg quits",
@@ -149,6 +177,19 @@ func TestMultiModelUpdate(t *testing.T) {
 
 			if tt.wantJobs > 0 {
 				assert.Len(t, rm.jobs, tt.wantJobs)
+			}
+
+			for jobName, wantSkip := range tt.wantSkipped {
+				js, ok := rm.jobs[jobName]
+				require.True(t, ok, "job %q not found", jobName)
+				assert.Equal(t, wantSkip, js.skipped, "skipped mismatch for %q", jobName)
+				assert.True(t, js.done, "skipped job %q should be done", jobName)
+			}
+
+			for jobName, wantSteps := range tt.wantSkippedSteps {
+				js, ok := rm.jobs[jobName]
+				require.True(t, ok, "job %q not found", jobName)
+				assert.Equal(t, wantSteps, js.skippedSteps, "skippedSteps mismatch for %q", jobName)
 			}
 
 			for jobName, vertices := range tt.wantStatus {
@@ -264,6 +305,36 @@ func TestMultiModelView(t *testing.T) {
 				m.order = append(m.order, "build")
 			},
 			contains: []string{"Job: build (2/3)"},
+		},
+		{
+			name:   "skipped job renders header only",
+			boring: true,
+			setup: func(m *multiModel) {
+				js := newJobState()
+				js.done = true
+				js.skipped = true
+				m.jobs["deploy"] = js
+				m.order = append(m.order, "deploy")
+			},
+			contains: []string{"Job: deploy (skipped)"},
+		},
+		{
+			name:   "skipped step renders within job block",
+			boring: true,
+			setup: func(m *multiModel) {
+				js := newJobState()
+				d := digest.FromString("v1")
+				js.vertices[d] = &stepState{
+					name:     "compile",
+					status:   statusDone,
+					duration: 500 * time.Millisecond,
+				}
+				js.order = append(js.order, d)
+				js.skippedSteps = []string{"notify"}
+				m.jobs["deploy"] = js
+				m.order = append(m.order, "deploy")
+			},
+			contains: []string{"Job: deploy", "compile", "notify (skipped)"},
 		},
 		{
 			name:   "multi-job view",

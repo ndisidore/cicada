@@ -9,8 +9,18 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/ndisidore/cicada/pkg/conditional"
 	"github.com/ndisidore/cicada/pkg/pipeline"
 )
+
+func mustNewWhen(tb testing.TB, expr string) *conditional.When {
+	tb.Helper()
+	w, err := conditional.NewWhen(expr)
+	if err != nil {
+		tb.Fatalf("mustNewWhen(%q): %v", expr, err)
+	}
+	return w
+}
 
 // memResolver is a test Resolver that serves content from an in-memory map.
 type memResolver struct {
@@ -306,14 +316,16 @@ func TestParse(t *testing.T) {
 				Name: "",
 				Jobs: []pipeline.Job{
 					{
-						Name:  "build[os=linux]",
-						Image: "golang:1.23",
-						Steps: []pipeline.Step{{Name: "build", Run: []string{"GOOS=linux go build ./..."}}},
+						Name:         "build[os=linux]",
+						Image:        "golang:1.23",
+						MatrixValues: map[string]string{"os": "linux"},
+						Steps:        []pipeline.Step{{Name: "build", Run: []string{"GOOS=linux go build ./..."}}},
 					},
 					{
-						Name:  "build[os=darwin]",
-						Image: "golang:1.23",
-						Steps: []pipeline.Step{{Name: "build", Run: []string{"GOOS=darwin go build ./..."}}},
+						Name:         "build[os=darwin]",
+						Image:        "golang:1.23",
+						MatrixValues: map[string]string{"os": "darwin"},
+						Steps:        []pipeline.Step{{Name: "build", Run: []string{"GOOS=darwin go build ./..."}}},
 					},
 				},
 				TopoOrder: []int{0, 1},
@@ -332,14 +344,16 @@ func TestParse(t *testing.T) {
 				Name: "",
 				Jobs: []pipeline.Job{
 					{
-						Name:  "test[go-version=1.21]",
-						Image: "golang:1.21",
-						Steps: []pipeline.Step{{Name: "test", Run: []string{"go test ./..."}}},
+						Name:         "test[go-version=1.21]",
+						Image:        "golang:1.21",
+						MatrixValues: map[string]string{"go-version": "1.21"},
+						Steps:        []pipeline.Step{{Name: "test", Run: []string{"go test ./..."}}},
 					},
 					{
-						Name:  "test[go-version=1.22]",
-						Image: "golang:1.22",
-						Steps: []pipeline.Step{{Name: "test", Run: []string{"go test ./..."}}},
+						Name:         "test[go-version=1.22]",
+						Image:        "golang:1.22",
+						MatrixValues: map[string]string{"go-version": "1.22"},
+						Steps:        []pipeline.Step{{Name: "test", Run: []string{"go test ./..."}}},
 					},
 				},
 				TopoOrder: []int{0, 1},
@@ -366,38 +380,44 @@ func TestParse(t *testing.T) {
 				Name: "",
 				Jobs: []pipeline.Job{
 					{
-						Name:  "build[os=linux]",
-						Image: "golang:1.23",
-						Steps: []pipeline.Step{{Name: "build", Run: []string{"GOOS=linux go build ./..."}}},
+						Name:         "build[os=linux]",
+						Image:        "golang:1.23",
+						MatrixValues: map[string]string{"os": "linux"},
+						Steps:        []pipeline.Step{{Name: "build", Run: []string{"GOOS=linux go build ./..."}}},
 					},
 					{
-						Name:      "test[go-version=1.21,os=linux]",
-						Image:     "golang:1.21",
-						DependsOn: []string{"build[os=linux]"},
-						Steps:     []pipeline.Step{{Name: "test", Run: []string{"GOOS=linux go test ./..."}}},
+						Name:         "test[go-version=1.21,os=linux]",
+						Image:        "golang:1.21",
+						DependsOn:    []string{"build[os=linux]"},
+						MatrixValues: map[string]string{"os": "linux", "go-version": "1.21"},
+						Steps:        []pipeline.Step{{Name: "test", Run: []string{"GOOS=linux go test ./..."}}},
 					},
 					{
-						Name:      "test[go-version=1.22,os=linux]",
-						Image:     "golang:1.22",
-						DependsOn: []string{"build[os=linux]"},
-						Steps:     []pipeline.Step{{Name: "test", Run: []string{"GOOS=linux go test ./..."}}},
+						Name:         "test[go-version=1.22,os=linux]",
+						Image:        "golang:1.22",
+						DependsOn:    []string{"build[os=linux]"},
+						MatrixValues: map[string]string{"os": "linux", "go-version": "1.22"},
+						Steps:        []pipeline.Step{{Name: "test", Run: []string{"GOOS=linux go test ./..."}}},
 					},
 					{
-						Name:  "build[os=darwin]",
-						Image: "golang:1.23",
-						Steps: []pipeline.Step{{Name: "build", Run: []string{"GOOS=darwin go build ./..."}}},
+						Name:         "build[os=darwin]",
+						Image:        "golang:1.23",
+						MatrixValues: map[string]string{"os": "darwin"},
+						Steps:        []pipeline.Step{{Name: "build", Run: []string{"GOOS=darwin go build ./..."}}},
 					},
 					{
-						Name:      "test[go-version=1.21,os=darwin]",
-						Image:     "golang:1.21",
-						DependsOn: []string{"build[os=darwin]"},
-						Steps:     []pipeline.Step{{Name: "test", Run: []string{"GOOS=darwin go test ./..."}}},
+						Name:         "test[go-version=1.21,os=darwin]",
+						Image:        "golang:1.21",
+						DependsOn:    []string{"build[os=darwin]"},
+						MatrixValues: map[string]string{"os": "darwin", "go-version": "1.21"},
+						Steps:        []pipeline.Step{{Name: "test", Run: []string{"GOOS=darwin go test ./..."}}},
 					},
 					{
-						Name:      "test[go-version=1.22,os=darwin]",
-						Image:     "golang:1.22",
-						DependsOn: []string{"build[os=darwin]"},
-						Steps:     []pipeline.Step{{Name: "test", Run: []string{"GOOS=darwin go test ./..."}}},
+						Name:         "test[go-version=1.22,os=darwin]",
+						Image:        "golang:1.22",
+						DependsOn:    []string{"build[os=darwin]"},
+						MatrixValues: map[string]string{"os": "darwin", "go-version": "1.22"},
+						Steps:        []pipeline.Step{{Name: "test", Run: []string{"GOOS=darwin go test ./..."}}},
 					},
 				},
 				TopoOrder: []int{0, 1, 2, 3, 4, 5},
@@ -902,6 +922,173 @@ func TestParse(t *testing.T) {
 			}`,
 			wantErr: pipeline.ErrEmptyPublishImage,
 		},
+
+		// --- when conditions ---
+		{
+			name: "job with when",
+			input: `job "deploy" {
+				image "alpine:latest"
+				when "branch == \"main\""
+				step "push" {
+					run "echo deploy"
+				}
+			}`,
+			want: pipeline.Pipeline{
+				Jobs: []pipeline.Job{
+					{
+						Name:  "deploy",
+						Image: "alpine:latest",
+						When:  mustNewWhen(t, `branch == "main"`),
+						Steps: []pipeline.Step{{Name: "push", Run: []string{"echo deploy"}}},
+					},
+				},
+				TopoOrder: []int{0},
+			},
+		},
+		{
+			name: "step with when",
+			input: `job "test" {
+				image "alpine:latest"
+				step "fast" {
+					run "echo fast"
+				}
+				step "slow" {
+					when "env(\"CI\") == \"true\""
+					run "echo slow"
+				}
+			}`,
+			want: pipeline.Pipeline{
+				Jobs: []pipeline.Job{
+					{
+						Name:  "test",
+						Image: "alpine:latest",
+						Steps: []pipeline.Step{
+							{Name: "fast", Run: []string{"echo fast"}},
+							{Name: "slow", Run: []string{"echo slow"}, When: mustNewWhen(t, `env("CI") == "true"`)},
+						},
+					},
+				},
+				TopoOrder: []int{0},
+			},
+		},
+		{
+			name: "bare step with when",
+			input: `step "deploy" {
+				image "alpine:latest"
+				when "branch == \"main\""
+				run "echo deploy"
+			}`,
+			want: pipeline.Pipeline{
+				Jobs: []pipeline.Job{
+					{
+						Name:  "deploy",
+						Image: "alpine:latest",
+						When:  mustNewWhen(t, `branch == "main"`),
+						Steps: []pipeline.Step{{Name: "deploy", Run: []string{"echo deploy"}}},
+					},
+				},
+				TopoOrder: []int{0},
+			},
+		},
+		{
+			name: "when with empty expression",
+			input: `job "test" {
+				image "alpine:latest"
+				when "  "
+				step "s" {
+					run "echo"
+				}
+			}`,
+			wantErr: ErrMissingField,
+		},
+		{
+			name: "when with extra args",
+			input: `job "test" {
+				image "alpine:latest"
+				when "branch == \"main\"" "extra"
+				step "s" {
+					run "echo"
+				}
+			}`,
+			wantErr: ErrExtraArgs,
+		},
+		{
+			name: "when with invalid CEL",
+			input: `job "test" {
+				image "alpine:latest"
+				when "branch =="
+				step "s" {
+					run "echo"
+				}
+			}`,
+			wantErr: conditional.ErrInvalidWhenExpr,
+		},
+		{
+			name: "when with non-bool CEL",
+			input: `job "test" {
+				image "alpine:latest"
+				when "branch"
+				step "s" {
+					run "echo"
+				}
+			}`,
+			wantErr: conditional.ErrWhenNotBool,
+		},
+		{
+			name: "duplicate when in job",
+			input: `job "test" {
+				image "alpine:latest"
+				when "branch == \"main\""
+				when "tag == \"v1\""
+				step "s" {
+					run "echo"
+				}
+			}`,
+			wantErr: ErrDuplicateField,
+		},
+		{
+			name: "step when with output rejected",
+			input: `job "test" {
+				image "alpine:latest"
+				step "s" {
+					when "output(\"build\", \"status\") == \"ok\""
+					run "echo"
+				}
+			}`,
+			wantErr: conditional.ErrDeferredInStep,
+		},
+		{
+			name: "job when with output is deferred",
+			input: `step "build" {
+				image "alpine:latest"
+				run "echo build"
+			}
+			job "deploy" {
+				image "alpine:latest"
+				depends-on "build"
+				when "output(\"build\", \"status\") == \"ok\""
+				step "push" {
+					run "echo deploy"
+				}
+			}`,
+			want: pipeline.Pipeline{
+				Jobs: []pipeline.Job{
+					{
+						Name:  "build",
+						Image: "alpine:latest",
+						Steps: []pipeline.Step{{Name: "build", Run: []string{"echo build"}}},
+					},
+					{
+						Name:      "deploy",
+						Image:     "alpine:latest",
+						DependsOn: []string{"build"},
+						When:      mustNewWhen(t, `output("build", "status") == "ok"`),
+						Steps:     []pipeline.Step{{Name: "push", Run: []string{"echo deploy"}}},
+					},
+				},
+				TopoOrder: []int{0, 1},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1308,14 +1495,16 @@ func TestParseInclude(t *testing.T) {
 				Name: "ci",
 				Jobs: []pipeline.Job{
 					{
-						Name:  "test[os=linux]",
-						Image: "golang:1.23",
-						Steps: []pipeline.Step{{Name: "test", Run: []string{"GOOS=linux go test ./..."}}},
+						Name:         "test[os=linux]",
+						Image:        "golang:1.23",
+						MatrixValues: map[string]string{"os": "linux"},
+						Steps:        []pipeline.Step{{Name: "test", Run: []string{"GOOS=linux go test ./..."}}},
 					},
 					{
-						Name:  "test[os=darwin]",
-						Image: "golang:1.23",
-						Steps: []pipeline.Step{{Name: "test", Run: []string{"GOOS=darwin go test ./..."}}},
+						Name:         "test[os=darwin]",
+						Image:        "golang:1.23",
+						MatrixValues: map[string]string{"os": "darwin"},
+						Steps:        []pipeline.Step{{Name: "test", Run: []string{"GOOS=darwin go test ./..."}}},
 					},
 				},
 				TopoOrder: []int{0, 1},

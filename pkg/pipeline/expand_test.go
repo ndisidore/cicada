@@ -48,8 +48,8 @@ func TestExpand(t *testing.T) {
 				want: Pipeline{
 					Name: "ci",
 					Jobs: []Job{
-						{Name: "build[os=linux]", Image: "golang:1.23", Steps: []Step{{Name: "build", Run: []string{"GOOS=linux go build"}}}},
-						{Name: "build[os=darwin]", Image: "golang:1.23", Steps: []Step{{Name: "build", Run: []string{"GOOS=darwin go build"}}}},
+						{Name: "build[os=linux]", Image: "golang:1.23", MatrixValues: map[string]string{"os": "linux"}, Steps: []Step{{Name: "build", Run: []string{"GOOS=linux go build"}}}},
+						{Name: "build[os=darwin]", Image: "golang:1.23", MatrixValues: map[string]string{"os": "darwin"}, Steps: []Step{{Name: "build", Run: []string{"GOOS=darwin go build"}}}},
 					},
 				},
 			},
@@ -70,10 +70,10 @@ func TestExpand(t *testing.T) {
 				want: Pipeline{
 					Name: "ci",
 					Jobs: []Job{
-						{Name: "build[os=linux]", Image: "golang:1.23", Steps: []Step{{Name: "build", Run: []string{"GOOS=linux go build"}}}},
-						{Name: "test[os=linux]", Image: "golang:1.23", DependsOn: []string{"build[os=linux]"}, Steps: []Step{{Name: "test", Run: []string{"GOOS=linux go test"}}}},
-						{Name: "build[os=darwin]", Image: "golang:1.23", Steps: []Step{{Name: "build", Run: []string{"GOOS=darwin go build"}}}},
-						{Name: "test[os=darwin]", Image: "golang:1.23", DependsOn: []string{"build[os=darwin]"}, Steps: []Step{{Name: "test", Run: []string{"GOOS=darwin go test"}}}},
+						{Name: "build[os=linux]", Image: "golang:1.23", MatrixValues: map[string]string{"os": "linux"}, Steps: []Step{{Name: "build", Run: []string{"GOOS=linux go build"}}}},
+						{Name: "test[os=linux]", Image: "golang:1.23", MatrixValues: map[string]string{"os": "linux"}, DependsOn: []string{"build[os=linux]"}, Steps: []Step{{Name: "test", Run: []string{"GOOS=linux go test"}}}},
+						{Name: "build[os=darwin]", Image: "golang:1.23", MatrixValues: map[string]string{"os": "darwin"}, Steps: []Step{{Name: "build", Run: []string{"GOOS=darwin go build"}}}},
+						{Name: "test[os=darwin]", Image: "golang:1.23", MatrixValues: map[string]string{"os": "darwin"}, DependsOn: []string{"build[os=darwin]"}, Steps: []Step{{Name: "test", Run: []string{"GOOS=darwin go test"}}}},
 					},
 				},
 			},
@@ -99,16 +99,18 @@ func TestExpand(t *testing.T) {
 					Name: "ci",
 					Jobs: []Job{
 						{
-							Name:   "build[os=linux]",
-							Image:  "golang:1.23",
-							Caches: []Cache{{ID: "gomod--build[os=linux]", Target: "/go/pkg/mod"}},
-							Steps:  []Step{{Name: "build", Run: []string{"go build"}}},
+							Name:         "build[os=linux]",
+							Image:        "golang:1.23",
+							MatrixValues: map[string]string{"os": "linux"},
+							Caches:       []Cache{{ID: "gomod--build[os=linux]", Target: "/go/pkg/mod"}},
+							Steps:        []Step{{Name: "build", Run: []string{"go build"}}},
 						},
 						{
-							Name:   "build[os=darwin]",
-							Image:  "golang:1.23",
-							Caches: []Cache{{ID: "gomod--build[os=darwin]", Target: "/go/pkg/mod"}},
-							Steps:  []Step{{Name: "build", Run: []string{"go build"}}},
+							Name:         "build[os=darwin]",
+							Image:        "golang:1.23",
+							MatrixValues: map[string]string{"os": "darwin"},
+							Caches:       []Cache{{ID: "gomod--build[os=darwin]", Target: "/go/pkg/mod"}},
+							Steps:        []Step{{Name: "build", Run: []string{"go build"}}},
 						},
 					},
 				},
@@ -137,18 +139,18 @@ func TestExpand(t *testing.T) {
 				want: Pipeline{
 					Name: "ci",
 					Jobs: []Job{
-						{Name: "build[os=linux]", Image: "golang:1.23", Steps: []Step{{Name: "compile", Run: []string{"go build"}}}},
+						{Name: "build[os=linux]", Image: "golang:1.23", MatrixValues: map[string]string{"os": "linux"}, Steps: []Step{{Name: "compile", Run: []string{"go build"}}}},
 						{
-							Name: "test[os=linux]", Image: "golang:1.23", DependsOn: []string{"build[os=linux]"},
+							Name: "test[os=linux]", Image: "golang:1.23", MatrixValues: map[string]string{"os": "linux"}, DependsOn: []string{"build[os=linux]"},
 							Steps: []Step{{
 								Name:      "test",
 								Run:       []string{"go test"},
 								Artifacts: []Artifact{{From: "build[os=linux]", Source: "/out/bin", Target: "/usr/local/bin"}},
 							}},
 						},
-						{Name: "build[os=darwin]", Image: "golang:1.23", Steps: []Step{{Name: "compile", Run: []string{"go build"}}}},
+						{Name: "build[os=darwin]", Image: "golang:1.23", MatrixValues: map[string]string{"os": "darwin"}, Steps: []Step{{Name: "compile", Run: []string{"go build"}}}},
 						{
-							Name: "test[os=darwin]", Image: "golang:1.23", DependsOn: []string{"build[os=darwin]"},
+							Name: "test[os=darwin]", Image: "golang:1.23", MatrixValues: map[string]string{"os": "darwin"}, DependsOn: []string{"build[os=darwin]"},
 							Steps: []Step{{
 								Name:      "test",
 								Run:       []string{"go test"},
@@ -182,7 +184,7 @@ func TestExpand(t *testing.T) {
 					Name: "ci",
 					Jobs: []Job{
 						{
-							Name: "build[os=linux]", Image: "golang:1.23",
+							Name: "build[os=linux]", Image: "golang:1.23", MatrixValues: map[string]string{"os": "linux"},
 							Steps: []Step{{
 								Name:   "compile",
 								Run:    []string{"go build"},
@@ -190,7 +192,7 @@ func TestExpand(t *testing.T) {
 							}},
 						},
 						{
-							Name: "build[os=darwin]", Image: "golang:1.23",
+							Name: "build[os=darwin]", Image: "golang:1.23", MatrixValues: map[string]string{"os": "darwin"},
 							Steps: []Step{{
 								Name:   "compile",
 								Run:    []string{"go build"},
@@ -216,8 +218,8 @@ func TestExpand(t *testing.T) {
 				want: Pipeline{
 					Name: "ci",
 					Jobs: []Job{
-						{Name: "build[platform=linux/amd64]", Image: "golang:1.23", Platform: "linux/amd64", Steps: []Step{{Name: "build", Run: []string{"go version"}}}},
-						{Name: "build[platform=linux/arm64]", Image: "golang:1.23", Platform: "linux/arm64", Steps: []Step{{Name: "build", Run: []string{"go version"}}}},
+						{Name: "build[platform=linux/amd64]", Image: "golang:1.23", Platform: "linux/amd64", MatrixValues: map[string]string{"platform": "linux/amd64"}, Steps: []Step{{Name: "build", Run: []string{"go version"}}}},
+						{Name: "build[platform=linux/arm64]", Image: "golang:1.23", Platform: "linux/arm64", MatrixValues: map[string]string{"platform": "linux/arm64"}, Steps: []Step{{Name: "build", Run: []string{"go version"}}}},
 					},
 				},
 			},
@@ -261,9 +263,9 @@ func TestExpand(t *testing.T) {
 				want: Pipeline{
 					Name: "ci",
 					Jobs: []Job{
-						{Name: "test[go-version=1.21]", Image: "golang:1.21", Steps: []Step{{Name: "test", Run: []string{"go test"}}}},
-						{Name: "test[go-version=1.22]", Image: "golang:1.22", Steps: []Step{{Name: "test", Run: []string{"go test"}}}},
-						{Name: "test[go-version=1.23]", Image: "golang:1.23", Steps: []Step{{Name: "test", Run: []string{"go test"}}}},
+						{Name: "test[go-version=1.21]", Image: "golang:1.21", MatrixValues: map[string]string{"go-version": "1.21"}, Steps: []Step{{Name: "test", Run: []string{"go test"}}}},
+						{Name: "test[go-version=1.22]", Image: "golang:1.22", MatrixValues: map[string]string{"go-version": "1.22"}, Steps: []Step{{Name: "test", Run: []string{"go test"}}}},
+						{Name: "test[go-version=1.23]", Image: "golang:1.23", MatrixValues: map[string]string{"go-version": "1.23"}, Steps: []Step{{Name: "test", Run: []string{"go test"}}}},
 					},
 				},
 			},
@@ -293,8 +295,8 @@ func TestExpand(t *testing.T) {
 				want: Pipeline{
 					Name: "ci",
 					Jobs: []Job{
-						{Name: "test[go-version=1.21]", Image: "golang:1.21", Steps: []Step{{Name: "test", Run: []string{"go test"}}}},
-						{Name: "test[go-version=1.22]", Image: "golang:1.22", Steps: []Step{{Name: "test", Run: []string{"go test"}}}},
+						{Name: "test[go-version=1.21]", Image: "golang:1.21", MatrixValues: map[string]string{"go-version": "1.21"}, Steps: []Step{{Name: "test", Run: []string{"go test"}}}},
+						{Name: "test[go-version=1.22]", Image: "golang:1.22", MatrixValues: map[string]string{"go-version": "1.22"}, Steps: []Step{{Name: "test", Run: []string{"go test"}}}},
 						{Name: "deploy", Image: "alpine:latest", DependsOn: []string{"test[go-version=1.21]", "test[go-version=1.22]"}, Steps: []Step{{Name: "deploy", Run: []string{"echo deploy"}}}},
 					},
 				},
@@ -323,12 +325,13 @@ func TestExpand(t *testing.T) {
 					Name: "ci",
 					Jobs: []Job{
 						{
-							Name:    "build[go=1.21]",
-							Image:   "golang:1.21",
-							Workdir: "/src/1.21",
-							Mounts:  []Mount{{Source: "./1.21", Target: "/mnt/1.21"}},
-							Caches:  []Cache{{ID: "cache--build[go=1.21]", Target: "/cache/1.21"}},
-							Steps:   []Step{{Name: "build", Run: []string{"GOARCH=1.21 build"}}},
+							Name:         "build[go=1.21]",
+							Image:        "golang:1.21",
+							MatrixValues: map[string]string{"go": "1.21"},
+							Workdir:      "/src/1.21",
+							Mounts:       []Mount{{Source: "./1.21", Target: "/mnt/1.21"}},
+							Caches:       []Cache{{ID: "cache--build[go=1.21]", Target: "/cache/1.21"}},
+							Steps:        []Step{{Name: "build", Run: []string{"GOARCH=1.21 build"}}},
 						},
 					},
 				},
@@ -355,16 +358,18 @@ func TestExpand(t *testing.T) {
 					Name: "ci",
 					Jobs: []Job{
 						{
-							Name:   "build[os=linux]",
-							Image:  "golang:1.23",
-							Caches: []Cache{{ID: "gomod-linux--build[os=linux]", Target: "/go/pkg/mod"}},
-							Steps:  []Step{{Name: "build", Run: []string{"go build"}}},
+							Name:         "build[os=linux]",
+							Image:        "golang:1.23",
+							MatrixValues: map[string]string{"os": "linux"},
+							Caches:       []Cache{{ID: "gomod-linux--build[os=linux]", Target: "/go/pkg/mod"}},
+							Steps:        []Step{{Name: "build", Run: []string{"go build"}}},
 						},
 						{
-							Name:   "build[os=darwin]",
-							Image:  "golang:1.23",
-							Caches: []Cache{{ID: "gomod-darwin--build[os=darwin]", Target: "/go/pkg/mod"}},
-							Steps:  []Step{{Name: "build", Run: []string{"go build"}}},
+							Name:         "build[os=darwin]",
+							Image:        "golang:1.23",
+							MatrixValues: map[string]string{"os": "darwin"},
+							Caches:       []Cache{{ID: "gomod-darwin--build[os=darwin]", Target: "/go/pkg/mod"}},
+							Steps:        []Step{{Name: "build", Run: []string{"go build"}}},
 						},
 					},
 				},
@@ -401,7 +406,7 @@ func TestExpand(t *testing.T) {
 							Steps: []Step{{Name: "compile", Run: []string{"go build"}}},
 						},
 						{
-							Name: "test[v=1.21]", Image: "golang:1.21", DependsOn: []string{"build"},
+							Name: "test[v=1.21]", Image: "golang:1.21", MatrixValues: map[string]string{"v": "1.21"}, DependsOn: []string{"build"},
 							Steps: []Step{{
 								Name:      "test",
 								Run:       []string{"go test"},
@@ -409,7 +414,7 @@ func TestExpand(t *testing.T) {
 							}},
 						},
 						{
-							Name: "test[v=1.22]", Image: "golang:1.22", DependsOn: []string{"build"},
+							Name: "test[v=1.22]", Image: "golang:1.22", MatrixValues: map[string]string{"v": "1.22"}, DependsOn: []string{"build"},
 							Steps: []Step{{
 								Name:      "test",
 								Run:       []string{"go test"},
@@ -466,12 +471,12 @@ func TestExpand(t *testing.T) {
 				want: Pipeline{
 					Name: "ci",
 					Jobs: []Job{
-						{Name: "build[os=linux]", Image: "golang:1.23", Steps: []Step{{Name: "build", Run: []string{"GOOS=linux go build"}}}},
-						{Name: "test[go-version=1.21,os=linux]", Image: "golang:1.21", DependsOn: []string{"build[os=linux]"}, Steps: []Step{{Name: "test", Run: []string{"GOOS=linux go test"}}}},
-						{Name: "test[go-version=1.22,os=linux]", Image: "golang:1.22", DependsOn: []string{"build[os=linux]"}, Steps: []Step{{Name: "test", Run: []string{"GOOS=linux go test"}}}},
-						{Name: "build[os=darwin]", Image: "golang:1.23", Steps: []Step{{Name: "build", Run: []string{"GOOS=darwin go build"}}}},
-						{Name: "test[go-version=1.21,os=darwin]", Image: "golang:1.21", DependsOn: []string{"build[os=darwin]"}, Steps: []Step{{Name: "test", Run: []string{"GOOS=darwin go test"}}}},
-						{Name: "test[go-version=1.22,os=darwin]", Image: "golang:1.22", DependsOn: []string{"build[os=darwin]"}, Steps: []Step{{Name: "test", Run: []string{"GOOS=darwin go test"}}}},
+						{Name: "build[os=linux]", Image: "golang:1.23", MatrixValues: map[string]string{"os": "linux"}, Steps: []Step{{Name: "build", Run: []string{"GOOS=linux go build"}}}},
+						{Name: "test[go-version=1.21,os=linux]", Image: "golang:1.21", MatrixValues: map[string]string{"os": "linux", "go-version": "1.21"}, DependsOn: []string{"build[os=linux]"}, Steps: []Step{{Name: "test", Run: []string{"GOOS=linux go test"}}}},
+						{Name: "test[go-version=1.22,os=linux]", Image: "golang:1.22", MatrixValues: map[string]string{"os": "linux", "go-version": "1.22"}, DependsOn: []string{"build[os=linux]"}, Steps: []Step{{Name: "test", Run: []string{"GOOS=linux go test"}}}},
+						{Name: "build[os=darwin]", Image: "golang:1.23", MatrixValues: map[string]string{"os": "darwin"}, Steps: []Step{{Name: "build", Run: []string{"GOOS=darwin go build"}}}},
+						{Name: "test[go-version=1.21,os=darwin]", Image: "golang:1.21", MatrixValues: map[string]string{"os": "darwin", "go-version": "1.21"}, DependsOn: []string{"build[os=darwin]"}, Steps: []Step{{Name: "test", Run: []string{"GOOS=darwin go test"}}}},
+						{Name: "test[go-version=1.22,os=darwin]", Image: "golang:1.22", MatrixValues: map[string]string{"os": "darwin", "go-version": "1.22"}, DependsOn: []string{"build[os=darwin]"}, Steps: []Step{{Name: "test", Run: []string{"GOOS=darwin go test"}}}},
 					},
 				},
 			},
@@ -502,10 +507,11 @@ func TestExpand(t *testing.T) {
 					Name: "ci",
 					Jobs: []Job{
 						{
-							Name:   "test[go-version=1.21,os=linux]",
-							Image:  "golang:1.21",
-							Caches: []Cache{{ID: "gomod--test[os=linux]--test[go-version=1.21,os=linux]", Target: "/go/pkg/mod"}},
-							Steps:  []Step{{Name: "test", Run: []string{"go test"}}},
+							Name:         "test[go-version=1.21,os=linux]",
+							Image:        "golang:1.21",
+							MatrixValues: map[string]string{"os": "linux", "go-version": "1.21"},
+							Caches:       []Cache{{ID: "gomod--test[os=linux]--test[go-version=1.21,os=linux]", Target: "/go/pkg/mod"}},
+							Steps:        []Step{{Name: "test", Run: []string{"go test"}}},
 						},
 					},
 				},
@@ -651,6 +657,106 @@ func TestExpand(t *testing.T) {
 				t.Parallel()
 				_, err := Expand(tt.input)
 				require.ErrorIs(t, err, tt.wantErr)
+			})
+		}
+	})
+
+	t.Run("MatrixValues", func(t *testing.T) {
+		t.Parallel()
+
+		tests := []struct {
+			name       string
+			input      Pipeline
+			wantLen    int
+			wantValues []map[string]string // nil element asserts nil MatrixValues
+		}{
+			{
+				name: "pipeline matrix sets MatrixValues",
+				input: Pipeline{
+					Name: "ci",
+					Matrix: &Matrix{
+						Dimensions: []Dimension{
+							{Name: "os", Values: []string{"linux", "darwin"}},
+						},
+					},
+					Jobs: []Job{
+						{Name: "build", Image: "golang:1.23", Steps: []Step{{Name: "build", Run: []string{"go build"}}}},
+					},
+				},
+				wantLen:    2,
+				wantValues: []map[string]string{{"os": "linux"}, {"os": "darwin"}},
+			},
+			{
+				name: "job matrix sets MatrixValues",
+				input: Pipeline{
+					Name: "ci",
+					Jobs: []Job{
+						{
+							Name:  "test",
+							Image: "golang:${matrix.v}",
+							Steps: []Step{{Name: "test", Run: []string{"go test"}}},
+							Matrix: &Matrix{
+								Dimensions: []Dimension{
+									{Name: "v", Values: []string{"1.24", "1.25"}},
+								},
+							},
+						},
+					},
+				},
+				wantLen:    2,
+				wantValues: []map[string]string{{"v": "1.24"}, {"v": "1.25"}},
+			},
+			{
+				name: "combined pipeline and job matrix merges MatrixValues",
+				input: Pipeline{
+					Name: "ci",
+					Matrix: &Matrix{
+						Dimensions: []Dimension{
+							{Name: "os", Values: []string{"linux"}},
+						},
+					},
+					Jobs: []Job{
+						{
+							Name:  "test",
+							Image: "golang:${matrix.v}",
+							Steps: []Step{{Name: "test", Run: []string{"go test"}}},
+							Matrix: &Matrix{
+								Dimensions: []Dimension{
+									{Name: "v", Values: []string{"1.25"}},
+								},
+							},
+						},
+					},
+				},
+				wantLen:    1,
+				wantValues: []map[string]string{{"os": "linux", "v": "1.25"}},
+			},
+			{
+				name: "non-matrix job has nil MatrixValues",
+				input: Pipeline{
+					Name: "ci",
+					Jobs: []Job{
+						{Name: "build", Image: "golang:1.23", Steps: []Step{{Name: "build", Run: []string{"go build"}}}},
+					},
+				},
+				wantLen:    1,
+				wantValues: []map[string]string{nil},
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				got, err := Expand(tt.input)
+				require.NoError(t, err)
+				require.Len(t, got.Jobs, tt.wantLen)
+				for i, wv := range tt.wantValues {
+					if wv == nil {
+						assert.Nil(t, got.Jobs[i].MatrixValues)
+					} else {
+						assert.Equal(t, wv, got.Jobs[i].MatrixValues)
+					}
+				}
 			})
 		}
 	})

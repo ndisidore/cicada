@@ -1,0 +1,44 @@
+// Conditional execution with CEL expressions.
+//
+// Three levels of "when": bare-step (becomes a single-step job),
+// job-level (gates all steps), and step-level (gates one step).
+//
+// Static conditions (branch, tag, env) are evaluated before the build.
+// Dynamic conditions (output) are evaluated at runtime after deps complete.
+
+defaults {
+    image "alpine:latest"
+    workdir "/src"
+}
+
+step "build" {
+    image "oven/bun:latest"
+    run "echo 'console.log(\"hello\")' > index.ts"
+    run "bun build index.ts --compile --outfile /out/app"
+    run "echo BUILD_OK=true >> $CICADA_OUTPUT"
+    export "/out/app" local="./bin/app"
+}
+
+// Skipped locally -- only runs in CI.
+step "slow-tests" {
+    image "oven/bun:latest"
+    when "hostEnv('CI') == 'true'"
+    depends-on "build"
+    run "bun test"
+}
+
+// Deploys when build set BUILD_OK. Notification is gated by job-level env.
+job "deploy" {
+    depends-on "build"
+    env "NOTIFY" "false"
+    when "output('build', 'BUILD_OK') == 'true'"
+    artifact "build" source="/out/app" target="/usr/local/bin/app"
+    step "push" {
+        run "echo deploying app"
+    }
+    // Step-level when: uses pipeline-declared env to gate notification.
+    step "notify" {
+        when "env('NOTIFY') == 'true'"
+        run "echo notifying team"
+    }
+}

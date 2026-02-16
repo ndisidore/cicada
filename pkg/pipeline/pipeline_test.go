@@ -5,6 +5,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/ndisidore/cicada/pkg/conditional"
 )
 
 func TestMatrixCombinations(t *testing.T) {
@@ -837,6 +839,106 @@ func TestValidatePublish(t *testing.T) {
 
 			_, err := p.Validate()
 
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestValidateWhenCondition(t *testing.T) {
+	t.Parallel()
+
+	validStep := Step{Name: "s1", Run: []string{"echo ok"}}
+
+	tests := []struct {
+		name    string
+		jobs    []Job
+		wantErr error
+	}{
+		{
+			name: "valid job when passes",
+			jobs: []Job{{
+				Name:  "deploy",
+				Image: "alpine",
+				When:  &conditional.When{Expression: `branch == "main"`},
+				Steps: []Step{validStep},
+			}},
+		},
+		{
+			name: "nil when passes",
+			jobs: []Job{{
+				Name:  "build",
+				Image: "alpine",
+				Steps: []Step{validStep},
+			}},
+		},
+		{
+			name: "invalid job when expression rejected",
+			jobs: []Job{{
+				Name:  "deploy",
+				Image: "alpine",
+				When:  &conditional.When{Expression: `invalid!!!`},
+				Steps: []Step{validStep},
+			}},
+			wantErr: ErrInvalidCondition,
+		},
+		{
+			name: "valid step when passes",
+			jobs: []Job{{
+				Name:  "build",
+				Image: "alpine",
+				Steps: []Step{{
+					Name: "conditional",
+					Run:  []string{"echo ok"},
+					When: &conditional.When{Expression: `env("CI") == "true"`},
+				}},
+			}},
+		},
+		{
+			name: "invalid step when expression rejected",
+			jobs: []Job{{
+				Name:  "build",
+				Image: "alpine",
+				Steps: []Step{{
+					Name: "bad",
+					Run:  []string{"echo"},
+					When: &conditional.When{Expression: `invalid!!!`},
+				}},
+			}},
+			wantErr: ErrInvalidCondition,
+		},
+		{
+			name: "step when with output() rejected",
+			jobs: []Job{{
+				Name:  "build",
+				Image: "alpine",
+				Steps: []Step{{
+					Name: "deferred",
+					Run:  []string{"echo"},
+					When: &conditional.When{Expression: `output("check", "ready") == "yes"`},
+				}},
+			}},
+			wantErr: ErrDeferredStepWhen,
+		},
+		{
+			name: "job when with output() allowed",
+			jobs: []Job{{
+				Name:  "deploy",
+				Image: "alpine",
+				When:  &conditional.When{Expression: `output("check", "ready") == "yes"`, Deferred: true},
+				Steps: []Step{validStep},
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := Pipeline{Name: "test", Jobs: tt.jobs}
+			_, err := p.Validate()
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
 				return

@@ -15,9 +15,13 @@ import (
 	gateway "github.com/moby/buildkit/frontend/gateway/client"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"golang.org/x/sync/semaphore"
+
 	"github.com/ndisidore/cicada/internal/cache"
+	"github.com/ndisidore/cicada/pkg/conditional"
 	"github.com/ndisidore/cicada/pkg/pipeline"
 )
 
@@ -39,10 +43,22 @@ func (f *fakeSolver) Build(ctx context.Context, opt client.SolveOpt, product str
 	return &client.SolveResponse{}, nil
 }
 
+// MockCondition is a testify mock for the DeferredEvaluator interface.
+type MockCondition struct {
+	mock.Mock
+}
+
+func (m *MockCondition) EvaluateDeferred(ctx conditional.Context, depOutputs map[string]map[string]string) (bool, error) {
+	args := m.Called(ctx, depOutputs)
+	return args.Bool(0), args.Error(1)
+}
+
 // fakeDisplay implements progress.Display for testing.
 type fakeDisplay struct {
-	wg       sync.WaitGroup
-	attachFn func(ctx context.Context, name string, ch <-chan *client.SolveStatus) error
+	wg         sync.WaitGroup
+	attachFn   func(ctx context.Context, name string, ch <-chan *client.SolveStatus) error
+	skipFn     func(ctx context.Context, jobName string)
+	skipStepFn func(ctx context.Context, jobName, stepName string)
 }
 
 func (*fakeDisplay) Start(_ context.Context) error { return nil }
@@ -57,6 +73,18 @@ func (f *fakeDisplay) Attach(ctx context.Context, name string, ch <-chan *client
 		}
 	})
 	return nil
+}
+
+func (f *fakeDisplay) Skip(ctx context.Context, jobName string) {
+	if f.skipFn != nil {
+		f.skipFn(ctx, jobName)
+	}
+}
+
+func (f *fakeDisplay) SkipStep(ctx context.Context, jobName, stepName string) {
+	if f.skipStepFn != nil {
+		f.skipStepFn(ctx, jobName, stepName)
+	}
 }
 
 func (*fakeDisplay) Seal() {}
@@ -1298,4 +1326,289 @@ func TestTeeStatus(t *testing.T) {
 			}
 		})
 	})
+}
+
+func TestParseOutputLines(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		content string
+		want    map[string]string
+	}{
+		{
+			name:    "simple key-value",
+			content: "STATUS=ok\nBUILD=true\n",
+			want:    map[string]string{"STATUS": "ok", "BUILD": "true"},
+		},
+		{
+			name:    "empty content",
+			content: "",
+			want:    map[string]string{},
+		},
+		{
+			name:    "blank lines skipped",
+			content: "\nKEY=val\n\n",
+			want:    map[string]string{"KEY": "val"},
+		},
+		{
+			name:    "lines without equals skipped",
+			content: "invalid-line\nKEY=val\n",
+			want:    map[string]string{"KEY": "val"},
+		},
+		{
+			name:    "value contains equals",
+			content: "URL=https://example.com?a=1&b=2\n",
+			want:    map[string]string{"URL": "https://example.com?a=1&b=2"},
+		},
+		{
+			name:    "whitespace trimmed",
+			content: "  KEY=val  \n",
+			want:    map[string]string{"KEY": "val"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := parseOutputLines(tt.content)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestCollectDepOutputs(t *testing.T) {
+	t.Parallel()
+
+	nodes := map[string]*dagNode{
+		"a": {outputs: map[string]string{"status": "ok"}},
+		"b": {outputs: nil},
+		"c": {outputs: map[string]string{"ready": "yes"}},
+	}
+
+	result := collectDepOutputs(nodes, []string{"a", "b", "c"})
+	assert.Equal(t, map[string]string{"status": "ok"}, result["a"])
+	assert.Nil(t, result["b"])
+	assert.Equal(t, map[string]string{"ready": "yes"}, result["c"])
+}
+
+func TestRunNodeDeferredWhenSkip(t *testing.T) {
+	t.Parallel()
+
+	solver := &fakeSolver{
+		solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			close(ch)
+			return &client.SolveResponse{}, nil
+		},
+	}
+
+	var skippedJob string
+	display := &fakeDisplay{
+		skipFn: func(_ context.Context, jobName string) { skippedJob = jobName },
+	}
+
+	wctx := &conditional.Context{
+		Getenv:      func(string) string { return "" },
+		Branch:      "develop",
+		Tag:         "",
+		PipelineEnv: map[string]string{},
+	}
+
+	depNode := &dagNode{
+		job:     Job{Name: "build", Definition: &llb.Definition{Def: [][]byte{{}}}},
+		done:    make(chan struct{}),
+		outputs: map[string]string{"deploy": "no"},
+	}
+	close(depNode.done)
+
+	whenMock := &MockCondition{}
+	whenMock.On("EvaluateDeferred", mock.Anything, mock.Anything).Return(false, nil)
+
+	node := &dagNode{
+		job: Job{
+			Name:       "deploy",
+			Definition: &llb.Definition{Def: [][]byte{{}}},
+			DependsOn:  []string{"build"},
+			When:       whenMock,
+			Env:        map[string]string{},
+			Matrix:     map[string]string{},
+		},
+		done: make(chan struct{}),
+	}
+
+	nodes := map[string]*dagNode{
+		"build":  depNode,
+		"deploy": node,
+	}
+
+	cfg := runConfig{
+		solver:  solver,
+		display: display,
+		nodes:   nodes,
+		sem:     semaphore.NewWeighted(1),
+		whenCtx: wctx,
+	}
+
+	err := runNode(context.Background(), node, cfg)
+	require.NoError(t, err)
+	assert.True(t, node.skipped)
+	assert.Equal(t, "deploy", skippedJob)
+	whenMock.AssertExpectations(t)
+}
+
+func TestRunNodeSkippedDepPropagatesSkip(t *testing.T) {
+	t.Parallel()
+
+	solver := &fakeSolver{
+		solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			close(ch)
+			return &client.SolveResponse{}, nil
+		},
+	}
+
+	var skippedJobs []string
+	display := &fakeDisplay{
+		skipFn: func(_ context.Context, jobName string) { skippedJobs = append(skippedJobs, jobName) },
+	}
+
+	depNode := &dagNode{
+		job:     Job{Name: "build", Definition: &llb.Definition{Def: [][]byte{{}}}},
+		done:    make(chan struct{}),
+		skipped: true,
+	}
+	close(depNode.done)
+
+	// Downstream node has a deferred When that should never be called
+	// because its dependency was skipped.
+	whenMock := &MockCondition{}
+
+	node := &dagNode{
+		job: Job{
+			Name:       "deploy",
+			Definition: &llb.Definition{Def: [][]byte{{}}},
+			DependsOn:  []string{"build"},
+			When:       whenMock,
+			Env:        map[string]string{},
+			Matrix:     map[string]string{},
+		},
+		done: make(chan struct{}),
+	}
+
+	nodes := map[string]*dagNode{
+		"build":  depNode,
+		"deploy": node,
+	}
+
+	cfg := runConfig{
+		solver:  solver,
+		display: display,
+		nodes:   nodes,
+		sem:     semaphore.NewWeighted(1),
+		whenCtx: &conditional.Context{
+			Getenv:      func(string) string { return "" },
+			PipelineEnv: map[string]string{},
+		},
+	}
+
+	err := runNode(context.Background(), node, cfg)
+	require.NoError(t, err)
+	assert.True(t, node.skipped)
+	assert.Equal(t, []string{"deploy"}, skippedJobs)
+	// EvaluateDeferred must not be called when dep is skipped.
+	whenMock.AssertNotCalled(t, "EvaluateDeferred", mock.Anything, mock.Anything)
+}
+
+func TestRunNodeSkippedStepsReported(t *testing.T) {
+	t.Parallel()
+
+	def, err := llb.Scratch().Marshal(context.Background())
+	require.NoError(t, err)
+
+	solver := &fakeSolver{
+		solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			close(ch)
+			return &client.SolveResponse{}, nil
+		},
+	}
+
+	var mu sync.Mutex
+	var reported []string
+	display := &fakeDisplay{
+		skipStepFn: func(_ context.Context, jobName, stepName string) {
+			mu.Lock()
+			reported = append(reported, jobName+"/"+stepName)
+			mu.Unlock()
+		},
+	}
+
+	node := &dagNode{
+		job: Job{
+			Name:         "build",
+			Definition:   def,
+			SkippedSteps: []string{"slow-test", "lint"},
+		},
+		done: make(chan struct{}),
+	}
+
+	nodes := map[string]*dagNode{"build": node}
+
+	cfg := runConfig{
+		solver:  solver,
+		display: display,
+		nodes:   nodes,
+		sem:     semaphore.NewWeighted(1),
+	}
+
+	err = runNode(context.Background(), node, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"build/slow-test", "build/lint"}, reported)
+}
+
+func TestRunNodeOutputExtractionFailure(t *testing.T) {
+	t.Parallel()
+
+	def, err := llb.Scratch().Marshal(context.Background())
+	require.NoError(t, err)
+
+	outputDef, err := llb.Scratch().Marshal(context.Background())
+	require.NoError(t, err)
+
+	extractionErr := errors.New("daemon unavailable")
+	solver := &fakeSolver{
+		solveFn: func(_ context.Context, d *llb.Definition, opt client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			close(ch)
+			// The output extraction solve uses Exports (ExporterLocal);
+			// the job solve does not.
+			if len(opt.Exports) > 0 {
+				return nil, extractionErr
+			}
+			return &client.SolveResponse{}, nil
+		},
+	}
+
+	display := &fakeDisplay{}
+
+	node := &dagNode{
+		job: Job{
+			Name:       "build",
+			Definition: def,
+			OutputDef:  outputDef,
+		},
+		done: make(chan struct{}),
+	}
+
+	nodes := map[string]*dagNode{"build": node}
+
+	cfg := runConfig{
+		solver:  solver,
+		display: display,
+		nodes:   nodes,
+		sem:     semaphore.NewWeighted(1),
+	}
+
+	err = runNode(context.Background(), node, cfg)
+	require.Error(t, err)
+	require.ErrorIs(t, err, extractionErr)
+	require.Contains(t, err.Error(), "output extraction")
+	require.NotNil(t, node.err)
 }

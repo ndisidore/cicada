@@ -8,8 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/containerd/platforms"
 	"github.com/moby/buildkit/client"
@@ -22,7 +25,9 @@ import (
 
 	"github.com/ndisidore/cicada/internal/cache"
 	"github.com/ndisidore/cicada/internal/progress"
+	"github.com/ndisidore/cicada/pkg/conditional"
 	"github.com/ndisidore/cicada/pkg/pipeline"
+	"github.com/ndisidore/cicada/pkg/slogctx"
 )
 
 // ErrNilSolver indicates that Solver was not provided.
@@ -63,11 +68,24 @@ type Solver interface {
 	Build(ctx context.Context, opt client.SolveOpt, product string, buildFunc gateway.BuildFunc, statusChan chan *client.SolveStatus) (*client.SolveResponse, error)
 }
 
+// DeferredEvaluator evaluates a deferred when-condition after dependency
+// outputs become available. *conditional.When satisfies this interface.
+// A skipped dependency propagates skip status to all dependents, so
+// EvaluateDeferred is never called with missing output data from skipped jobs.
+type DeferredEvaluator interface {
+	EvaluateDeferred(ctx conditional.Context, depOutputs map[string]map[string]string) (bool, error)
+}
+
 // Job pairs an LLB definition with its human-readable job name and dependencies.
 type Job struct {
-	Name       string
-	Definition *llb.Definition
-	DependsOn  []string
+	Name         string
+	Definition   *llb.Definition
+	DependsOn    []string
+	When         DeferredEvaluator // deferred condition; nil = always run
+	Env          map[string]string // pipeline-scoped env for deferred condition evaluation
+	Matrix       map[string]string // matrix dimension values for deferred condition evaluation
+	OutputDef    *llb.Definition   // extracts /cicada/output for deferred conditions
+	SkippedSteps []string          // step names skipped by static when conditions
 }
 
 // Export pairs an LLB definition containing exported files with the
@@ -112,24 +130,33 @@ type RunInput struct {
 	CacheImports []client.CacheOptionsEntry
 	// CacheCollector accumulates vertex stats for cache analytics; nil disables.
 	CacheCollector *cache.Collector
+	// WhenContext provides static bindings for deferred When evaluation.
+	WhenContext *conditional.Context
 }
 
-// solveConfig groups parameters for solveJob and solveExport, keeping their
-// signatures under the CS-05 limit.
-type solveConfig struct {
+// runConfig groups shared dependencies for runNode, solveJob, solveExport, and
+// related helpers, keeping function signatures under the CS-05 limit.
+type runConfig struct {
+	solver       Solver
+	display      progress.Display
+	nodes        map[string]*dagNode
+	sem          *semaphore.Weighted
 	localMounts  map[string]fsutil.FS
 	cacheExports []client.CacheOptionsEntry
 	cacheImports []client.CacheOptionsEntry
 	collector    *cache.Collector
+	whenCtx      *conditional.Context
 }
 
 // dagNode tracks a job and a done channel that is closed on completion.
 // The err field is written before done is closed, establishing a
 // happens-before for any goroutine that reads err after <-done.
 type dagNode struct {
-	job  Job
-	done chan struct{}
-	err  error
+	job     Job
+	done    chan struct{}
+	err     error
+	skipped bool              // true if deferred When evaluated to false
+	outputs map[string]string // parsed $CICADA_OUTPUT key=value pairs
 }
 
 // Run executes jobs against a BuildKit daemon, respecting dependency ordering
@@ -158,18 +185,23 @@ func Run(ctx context.Context, in RunInput) error {
 	}
 	sem := semaphore.NewWeighted(limit)
 
-	cfg := solveConfig{
+	cfg := runConfig{
+		solver:       in.Solver,
+		display:      in.Display,
+		nodes:        nodes,
+		sem:          sem,
 		localMounts:  in.LocalMounts,
 		cacheExports: in.CacheExports,
 		cacheImports: in.CacheImports,
 		collector:    in.CacheCollector,
+		whenCtx:      in.WhenContext,
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
 	for i := range in.Jobs {
 		node := nodes[in.Jobs[i].Name]
 		g.Go(func() error {
-			return runNode(gctx, node, nodes, sem, in.Solver, in.Display, cfg)
+			return runNode(gctx, node, cfg)
 		})
 	}
 	if err := g.Wait(); err != nil {
@@ -182,7 +214,7 @@ func Run(ctx context.Context, in RunInput) error {
 	eg, ectx := errgroup.WithContext(ctx)
 	for _, exp := range in.Exports {
 		eg.Go(func() error {
-			if err := solveExport(ectx, in.Solver, in.Display, exp, cfg); err != nil {
+			if err := solveExport(ectx, exp, cfg); err != nil {
 				return fmt.Errorf("exporting %q from job %q: %w", exp.Local, exp.JobName, err)
 			}
 			return nil
@@ -254,15 +286,25 @@ func detectCycles(nodes map[string]*dagNode) error {
 }
 
 // runNode waits for dependencies, acquires a semaphore slot, solves, and signals done.
-func runNode(ctx context.Context, node *dagNode, nodes map[string]*dagNode, sem *semaphore.Weighted, solver Solver, display progress.Display, cfg solveConfig) error {
+//
+//revive:disable-next-line:cognitive-complexity,function-length runNode is a linear pipeline of wait-evaluate-solve-extract; splitting it hurts readability.
+func runNode(ctx context.Context, node *dagNode, cfg runConfig) error {
 	defer close(node.done)
 
+	// Wait for all dependencies. A failed or skipped dependency prevents
+	// this node from running: errors propagate as errors, skips propagate
+	// as skips so downstream nodes never see missing output data.
 	for _, dep := range node.job.DependsOn {
 		select {
-		case <-nodes[dep].done:
-			if nodes[dep].err != nil {
-				node.err = fmt.Errorf("dependency %q: %w", dep, nodes[dep].err)
+		case <-cfg.nodes[dep].done:
+			if cfg.nodes[dep].err != nil {
+				node.err = fmt.Errorf("dependency %q: %w", dep, cfg.nodes[dep].err)
 				return fmt.Errorf("job %q: %w", node.job.Name, node.err)
+			}
+			if cfg.nodes[dep].skipped {
+				node.skipped = true
+				cfg.display.Skip(ctx, node.job.Name)
+				return nil
 			}
 		case <-ctx.Done():
 			node.err = ctx.Err()
@@ -270,28 +312,57 @@ func runNode(ctx context.Context, node *dagNode, nodes map[string]*dagNode, sem 
 		}
 	}
 
-	if err := sem.Acquire(ctx, 1); err != nil {
+	// Evaluate deferred when condition after deps complete.
+	if node.job.When != nil && cfg.whenCtx == nil {
+		slogctx.FromContext(ctx).Warn("deferred when condition present but no WhenContext provided; running unconditionally",
+			slog.String("job", node.job.Name),
+		)
+	}
+	if node.job.When != nil && cfg.whenCtx != nil {
+		depOutputs := collectDepOutputs(cfg.nodes, node.job.DependsOn)
+		whenCtx := *cfg.whenCtx
+		whenCtx.PipelineEnv = node.job.Env
+		whenCtx.Matrix = node.job.Matrix
+		result, err := node.job.When.EvaluateDeferred(whenCtx, depOutputs)
+		if err != nil {
+			node.err = err
+			return fmt.Errorf("job %q when: %w", node.job.Name, err)
+		}
+		if !result {
+			node.skipped = true
+			cfg.display.Skip(ctx, node.job.Name)
+			return nil
+		}
+	}
+
+	if err := cfg.sem.Acquire(ctx, 1); err != nil {
 		node.err = err
 		return err
 	}
-	defer sem.Release(1)
+	defer cfg.sem.Release(1)
 
-	err := solveJob(ctx, solver, display, node.job.Name, node.job.Definition, cfg)
+	err := solveJob(ctx, node.job.Name, node.job.Definition, cfg)
 	if err != nil {
 		node.err = err
 		return fmt.Errorf("job %q: %w", node.job.Name, err)
 	}
+
+	for _, step := range node.job.SkippedSteps {
+		cfg.display.SkipStep(ctx, node.job.Name, step)
+	}
+
+	// Extract outputs for downstream deferred conditions.
+	if node.job.OutputDef != nil {
+		node.outputs, err = extractOutputs(ctx, node.job.OutputDef, cfg)
+		if err != nil {
+			node.err = err
+			return fmt.Errorf("job %q output extraction: %w", node.job.Name, err)
+		}
+	}
 	return nil
 }
 
-func solveJob(
-	ctx context.Context,
-	s Solver,
-	display progress.Display,
-	name string,
-	def *llb.Definition,
-	cfg solveConfig,
-) error {
+func solveJob(ctx context.Context, name string, def *llb.Definition, cfg runConfig) error {
 	if def == nil {
 		return ErrNilDefinition
 	}
@@ -299,12 +370,12 @@ func solveJob(
 	ch := make(chan *client.SolveStatus)
 	displayCh := teeStatus(ctx, ch, cfg.collector, name)
 
-	if err := display.Attach(ctx, name, displayCh); err != nil {
+	if err := cfg.display.Attach(ctx, name, displayCh); err != nil {
 		close(ch)
 		return fmt.Errorf("attaching display: %w", err)
 	}
 
-	_, err := s.Solve(ctx, def, client.SolveOpt{
+	_, err := cfg.solver.Solve(ctx, def, client.SolveOpt{
 		LocalMounts:  cfg.localMounts,
 		CacheExports: cfg.cacheExports,
 		CacheImports: cfg.cacheImports,
@@ -317,7 +388,7 @@ func solveJob(
 
 // solveExport solves an export LLB definition using the local exporter to
 // write files to the host filesystem.
-func solveExport(ctx context.Context, s Solver, display progress.Display, exp Export, cfg solveConfig) error {
+func solveExport(ctx context.Context, exp Export, cfg runConfig) error {
 	if exp.Definition == nil {
 		return ErrNilDefinition
 	}
@@ -333,12 +404,12 @@ func solveExport(ctx context.Context, s Solver, display progress.Display, exp Ex
 	displayName := "export:" + exp.JobName
 	displayCh := teeStatus(ctx, ch, cfg.collector, displayName)
 
-	if err := display.Attach(ctx, displayName, displayCh); err != nil {
+	if err := cfg.display.Attach(ctx, displayName, displayCh); err != nil {
 		close(ch)
 		return fmt.Errorf("attaching export display: %w", err)
 	}
 
-	_, err := s.Solve(ctx, exp.Definition, client.SolveOpt{
+	_, err := cfg.solver.Solve(ctx, exp.Definition, client.SolveOpt{
 		Exports: []client.ExportEntry{{
 			Type:      client.ExporterLocal,
 			OutputDir: outputDir,
@@ -356,7 +427,7 @@ func solveExport(ctx context.Context, s Solver, display progress.Display, exp Ex
 // groups use the simple image exporter; multi-variant groups use the gateway Build API.
 //
 //revive:disable-next-line:cognitive-complexity runPublishes is a flat dispatch over group size and export flags; splitting it hurts readability.
-func runPublishes(ctx context.Context, in RunInput, cfg solveConfig) error {
+func runPublishes(ctx context.Context, in RunInput, cfg runConfig) error {
 	if len(in.ImagePublishes) == 0 {
 		return nil
 	}
@@ -375,7 +446,7 @@ func runPublishes(ctx context.Context, in RunInput, cfg solveConfig) error {
 	for _, grp := range groups {
 		if len(grp.Variants) > 1 {
 			pg.Go(func() error {
-				if err := solveMultiPlatformPublish(pctx, in.Solver, in.Display, grp, cfg); err != nil {
+				if err := solveMultiPlatformPublish(pctx, grp, cfg); err != nil {
 					return fmt.Errorf("publishing multi-platform %q: %w", grp.Image, err)
 				}
 				return nil
@@ -388,13 +459,13 @@ func runPublishes(ctx context.Context, in RunInput, cfg solveConfig) error {
 			pg.Go(func() error {
 				eg, ectx := errgroup.WithContext(pctx)
 				eg.Go(func() error {
-					if err := solveImagePublish(ectx, in.Solver, in.Display, pub, cfg); err != nil {
+					if err := solveImagePublish(ectx, pub, cfg); err != nil {
 						return fmt.Errorf("publishing %q from job %q: %w", grp.Image, pub.JobName, err)
 					}
 					return nil
 				})
 				eg.Go(func() error {
-					if err := solveImageExportDocker(ectx, in.Solver, in.Display, pub, cfg); err != nil {
+					if err := solveImageExportDocker(ectx, pub, cfg); err != nil {
 						return fmt.Errorf("export-docker %q from job %q: %w", grp.Image, pub.JobName, err)
 					}
 					return nil
@@ -403,14 +474,14 @@ func runPublishes(ctx context.Context, in RunInput, cfg solveConfig) error {
 			})
 		case pub.ExportDocker:
 			pg.Go(func() error {
-				if err := solveImageExportDocker(pctx, in.Solver, in.Display, pub, cfg); err != nil {
+				if err := solveImageExportDocker(pctx, pub, cfg); err != nil {
 					return fmt.Errorf("export-docker %q from job %q: %w", grp.Image, pub.JobName, err)
 				}
 				return nil
 			})
 		default:
 			pg.Go(func() error {
-				if err := solveImagePublish(pctx, in.Solver, in.Display, pub, cfg); err != nil {
+				if err := solveImagePublish(pctx, pub, cfg); err != nil {
 					return fmt.Errorf("publishing %q from job %q: %w", grp.Image, pub.JobName, err)
 				}
 				return nil
@@ -526,7 +597,7 @@ func multiPlatformBuildFunc(variants []ImagePublish) gateway.BuildFunc {
 
 // solveMultiPlatformPublish assembles multiple platform variants into a manifest
 // list using the gateway Build API.
-func solveMultiPlatformPublish(ctx context.Context, s Solver, display progress.Display, grp publishGroup, cfg solveConfig) error {
+func solveMultiPlatformPublish(ctx context.Context, grp publishGroup, cfg runConfig) error {
 	attrs := map[string]string{"name": grp.Image}
 	if grp.Push {
 		attrs["push"] = "true"
@@ -539,12 +610,12 @@ func solveMultiPlatformPublish(ctx context.Context, s Solver, display progress.D
 	displayName := "publish:" + grp.Image
 	displayCh := teeStatus(ctx, ch, cfg.collector, displayName)
 
-	if err := display.Attach(ctx, displayName, displayCh); err != nil {
+	if err := cfg.display.Attach(ctx, displayName, displayCh); err != nil {
 		close(ch)
 		return fmt.Errorf("attaching multi-platform publish display: %w", err)
 	}
 
-	_, err := s.Build(ctx, client.SolveOpt{
+	_, err := cfg.solver.Build(ctx, client.SolveOpt{
 		Exports: []client.ExportEntry{{
 			Type:  client.ExporterImage,
 			Attrs: attrs,
@@ -559,7 +630,7 @@ func solveMultiPlatformPublish(ctx context.Context, s Solver, display progress.D
 }
 
 // solveImagePublish solves a single-platform image publish using the image exporter.
-func solveImagePublish(ctx context.Context, s Solver, display progress.Display, pub ImagePublish, cfg solveConfig) error {
+func solveImagePublish(ctx context.Context, pub ImagePublish, cfg runConfig) error {
 	if pub.Definition == nil {
 		return ErrNilDefinition
 	}
@@ -576,12 +647,12 @@ func solveImagePublish(ctx context.Context, s Solver, display progress.Display, 
 	displayName := "publish:" + pub.JobName
 	displayCh := teeStatus(ctx, ch, cfg.collector, displayName)
 
-	if err := display.Attach(ctx, displayName, displayCh); err != nil {
+	if err := cfg.display.Attach(ctx, displayName, displayCh); err != nil {
 		close(ch)
 		return fmt.Errorf("attaching publish display: %w", err)
 	}
 
-	_, err := s.Solve(ctx, pub.Definition, client.SolveOpt{
+	_, err := cfg.solver.Solve(ctx, pub.Definition, client.SolveOpt{
 		Exports: []client.ExportEntry{{
 			Type:  client.ExporterImage,
 			Attrs: attrs,
@@ -597,7 +668,7 @@ func solveImagePublish(ctx context.Context, s Solver, display progress.Display, 
 
 // solveImageExportDocker solves an image definition using the Docker exporter,
 // piping the tarball directly into `docker load` via an io.Pipe.
-func solveImageExportDocker(ctx context.Context, s Solver, display progress.Display, pub ImagePublish, cfg solveConfig) error {
+func solveImageExportDocker(ctx context.Context, pub ImagePublish, cfg runConfig) error {
 	if pub.Definition == nil {
 		return ErrNilDefinition
 	}
@@ -608,7 +679,7 @@ func solveImageExportDocker(ctx context.Context, s Solver, display progress.Disp
 	displayName := "export-docker:" + pub.JobName
 	displayCh := teeStatus(ctx, ch, cfg.collector, displayName)
 
-	if err := display.Attach(ctx, displayName, displayCh); err != nil {
+	if err := cfg.display.Attach(ctx, displayName, displayCh); err != nil {
 		close(ch)
 		_ = pw.Close()
 		_ = pr.Close()
@@ -634,7 +705,7 @@ func solveImageExportDocker(ctx context.Context, s Solver, display progress.Disp
 
 	eg.Go(func() error {
 		defer func() { _ = pw.Close() }()
-		_, err := s.Solve(ectx, pub.Definition, client.SolveOpt{
+		_, err := cfg.solver.Solve(ectx, pub.Definition, client.SolveOpt{
 			Exports: []client.ExportEntry{{
 				Type:  client.ExporterDocker,
 				Attrs: map[string]string{"name": pub.Image},
@@ -652,6 +723,69 @@ func solveImageExportDocker(ctx context.Context, s Solver, display progress.Disp
 	})
 
 	return eg.Wait()
+}
+
+// collectDepOutputs gathers parsed outputs from completed dependency nodes.
+func collectDepOutputs(nodes map[string]*dagNode, deps []string) map[string]map[string]string {
+	result := make(map[string]map[string]string, len(deps))
+	for _, dep := range deps {
+		if n, ok := nodes[dep]; ok && n.outputs != nil {
+			result[dep] = n.outputs
+		}
+	}
+	return result
+}
+
+// extractOutputs solves an output extraction definition to a temp directory,
+// reads the output file, parses KEY=VALUE lines, and returns the result.
+func extractOutputs(ctx context.Context, def *llb.Definition, cfg runConfig) (map[string]string, error) {
+	dir, err := os.MkdirTemp("", "cicada-output-*")
+	if err != nil {
+		return nil, fmt.Errorf("creating temp dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	ch := make(chan *client.SolveStatus)
+	go drainChannel(ch)
+
+	_, err = cfg.solver.Solve(ctx, def, client.SolveOpt{
+		Exports: []client.ExportEntry{{
+			Type:      client.ExporterLocal,
+			OutputDir: dir,
+		}},
+		CacheImports: cfg.cacheImports,
+	}, ch)
+	if err != nil {
+		return nil, fmt.Errorf("solving output extraction: %w", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "output"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]string{}, nil
+		}
+		return nil, fmt.Errorf("reading output file: %w", err)
+	}
+
+	return parseOutputLines(string(data)), nil
+}
+
+// parseOutputLines parses KEY=VALUE lines from a $CICADA_OUTPUT file.
+// Empty lines and lines without '=' are skipped.
+func parseOutputLines(content string) map[string]string {
+	result := make(map[string]string)
+	for line := range strings.SplitSeq(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || key == "" {
+			continue
+		}
+		result[key] = value
+	}
+	return result
 }
 
 // drainChannel discards remaining items from ch so the sender is not blocked.

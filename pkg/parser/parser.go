@@ -11,6 +11,7 @@ import (
 	kdl "github.com/sblinch/kdl-go"
 	"github.com/sblinch/kdl-go/document"
 
+	"github.com/ndisidore/cicada/pkg/conditional"
 	"github.com/ndisidore/cicada/pkg/pipeline"
 )
 
@@ -305,6 +306,12 @@ func applyJobField(j *pipeline.Job, node *document.Node, filename string) error 
 			return err
 		}
 		return setOnce(&j.Publish, &pub, filename, scope, string(nt))
+	case NodeTypeWhen:
+		w, err := parseWhenNode(node, filename, scope)
+		if err != nil {
+			return err
+		}
+		return setOnce(&j.When, w, filename, scope, string(nt))
 	case NodeTypeStep:
 		step, err := parseJobStep(node, filename, j.Name)
 		if err != nil {
@@ -392,6 +399,15 @@ func applyJobStepField(s *pipeline.Step, node *document.Node, filename, jobName 
 			return err
 		}
 		s.Artifacts = append(s.Artifacts, art)
+	case NodeTypeWhen:
+		w, err := parseWhenNode(node, filename, scope)
+		if err != nil {
+			return err
+		}
+		if w.Deferred {
+			return fmt.Errorf("%s: %s: when: %w", filename, scope, conditional.ErrDeferredInStep)
+		}
+		return setOnce(&s.When, w, filename, scope, string(nt))
 	case NodeTypeNoCache:
 		if len(node.Arguments) > 0 {
 			return fmt.Errorf("%s: %s: no-cache takes no arguments: %w", filename, scope, ErrExtraArgs)
@@ -664,6 +680,29 @@ func parsePublishNode(node *document.Node, filename, scopeName string) (pipeline
 		push = true
 	}
 	return pipeline.Publish{Image: image, Push: push, Insecure: insecure}, nil
+}
+
+// parseWhenNode extracts a when condition from a KDL node.
+func parseWhenNode(node *document.Node, filename, scopeName string) (*conditional.When, error) {
+	if len(node.Arguments) > 1 {
+		return nil, fmt.Errorf(
+			"%s: %s: when requires exactly one argument, got %d: %w",
+			filename, scopeName, len(node.Arguments), ErrExtraArgs,
+		)
+	}
+	expr, err := requireStringArg(node, filename, string(NodeTypeWhen))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %s: when: %w", filename, scopeName, err)
+	}
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return nil, fmt.Errorf("%s: %s: when expression: %w", filename, scopeName, ErrMissingField)
+	}
+	w, err := conditional.NewWhen(expr)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %s: when: %w", filename, scopeName, err)
+	}
+	return w, nil
 }
 
 // stringArgs2 extracts exactly two string arguments from a node.

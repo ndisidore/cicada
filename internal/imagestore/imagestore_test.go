@@ -38,6 +38,10 @@ func (f *fakeDisplay) Attach(_ context.Context, _ string, ch <-chan *client.Solv
 	return nil
 }
 
+func (*fakeDisplay) Skip(_ context.Context, _ string) {}
+
+func (*fakeDisplay) SkipStep(_ context.Context, _, _ string) {}
+
 func (*fakeDisplay) Seal() {}
 
 func (f *fakeDisplay) Wait() error { f.wg.Wait(); return nil }
