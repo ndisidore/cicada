@@ -186,17 +186,9 @@ func (m *multiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 	case jobAddedMsg:
-		if _, ok := m.jobs[msg.name]; !ok {
-			m.jobs[msg.name] = newJobState()
-			m.order = append(m.order, msg.name)
-		}
+		_ = m.getOrCreateJob(msg.name)
 	case jobSkippedMsg:
-		js, ok := m.jobs[msg.name]
-		if !ok {
-			js = newJobState()
-			m.jobs[msg.name] = js
-			m.order = append(m.order, msg.name)
-		}
+		js := m.getOrCreateJob(msg.name)
 		if !js.done {
 			js.done = true
 			js.skipped = true
@@ -227,8 +219,19 @@ func (m *multiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
+	default:
 	}
 	return m, nil
+}
+
+func (m *multiModel) getOrCreateJob(name string) *jobState {
+	js, ok := m.jobs[name]
+	if !ok {
+		js = newJobState()
+		m.jobs[name] = js
+		m.order = append(m.order, name)
+	}
+	return js
 }
 
 var (

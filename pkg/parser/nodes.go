@@ -1,3 +1,4 @@
+//revive:disable:var-naming Package name conflict with standard library is intentional.
 package parser
 
 // NodeType represents the type of a KDL node.

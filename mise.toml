@@ -1,6 +1,6 @@
 [tools]
-go = "1.25"
-"golangci-lint" = "2.8.0"
+go = "1.26.0"
+"golangci-lint" = "2.9.0"
 
 [tasks.build]
 description = "Build the cicada CLI binary"
