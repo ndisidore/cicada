@@ -70,6 +70,10 @@ func substituteJobVars(j Job, combo map[string]string, prefix string) Job {
 	if c.Publish != nil {
 		c.Publish.Image = sub(c.Publish.Image)
 	}
+	if c.When != nil {
+		c.When.Expression = sub(c.When.Expression)
+		c.When.InvalidateAST()
+	}
 	for i := range c.Steps {
 		substituteStepFields(&c.Steps[i], sub)
 	}
@@ -88,6 +92,10 @@ func substituteStepFields(s *Step, sub func(string) string) {
 	substituteEnvValues(s.Env, sub)
 	substituteExports(s.Exports, sub)
 	substituteArtifacts(s.Artifacts, sub)
+	if s.When != nil {
+		s.When.Expression = sub(s.When.Expression)
+		s.When.InvalidateAST()
+	}
 }
 
 // substituteMatrixValues applies in-place substitution to all dimension values.

@@ -36,6 +36,12 @@ func (q *Quiet) Attach(ctx context.Context, _ string, ch <-chan *client.SolveSta
 	return nil
 }
 
+// Skip is a no-op for Quiet.
+func (*Quiet) Skip(_ context.Context, _ string) {}
+
+// SkipStep is a no-op for Quiet.
+func (*Quiet) SkipStep(_ context.Context, _, _ string) {}
+
 // Seal is a no-op for Quiet; Wait uses WaitGroup which is safe since
 // all Attach calls complete before Wait is called by the caller.
 func (*Quiet) Seal() {}

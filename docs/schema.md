@@ -66,7 +66,7 @@ pipeline "my-pipeline" { ... }
 |-------|-------------|
 | `defaults` | Pipeline-wide config inherited by all jobs |
 | `matrix` | Correlated matrix expansion across all jobs |
-| `env` | Pipeline-level env vars (inherited by all jobs) |
+| `env` | Pipeline-level env vars (inherited by all jobs; accessible via `env()` in `when` conditions) |
 | `include` | Import jobs from fragment or pipeline files |
 | `job` | Multi-step job definition |
 | `step` | Bare step sugar (see [Bare Step Sugar](#bare-step-sugar)) |
@@ -126,8 +126,9 @@ job "test" {
 | `cache` | `<id>` `<target>` | 0..N | Persistent cache volume |
 | `env` | `<key>` `<value>` | 0..N | Environment variable |
 | `export` | `<container-path>` `local=<host-path>` | 0..N | Export file/dir to host |
-| `artifact` | `<from-job>` `<source>` `<target>` | 0..N | Import file from dependency |
+| `artifact` | `<from-job>` `source=<source>` `target=<target>` | 0..N | Import file from dependency |
 | `matrix` | (children) | 0..1 | Job-level matrix expansion |
+| `when` | `<CEL-expression>` | 0..1 | Conditional execution ([CEL](#when-conditions)) |
 | `no-cache` | (none) | 0..1 | Disable caching for all steps |
 | `publish` | `<image-ref>` | 0..1 | Publish job filesystem as OCI image (see [publish](#publish)) |
 | `step` | `<name>` | 1..N | Sequential execution unit |
@@ -157,7 +158,8 @@ step "install" {
 | `mount` | `<source>` `<target>` | 0..N | Step-specific bind mount (additive to job) |
 | `cache` | `<id>` `<target>` | 0..N | Step-specific cache volume (additive to job) |
 | `export` | `<container-path>` `local=<host-path>` | 0..N | Export to host (resolved from job's final state; see [Execution Model](#execution-model)) |
-| `artifact` | `<from-job>` `<source>` `<target>` | 0..N | Import file from dependency |
+| `artifact` | `<from-job>` `source=<source>` `target=<target>` | 0..N | Import file from dependency |
+| `when` | `<CEL-expression>` | 0..1 | Conditional execution ([CEL](#when-conditions)); `output()` not allowed at step level |
 | `no-cache` | (none) | 0..1 | Disable caching for this step |
 
 </details>
@@ -302,7 +304,83 @@ job "build" {
 }
 ```
 
-A bare step accepts the union of job and step fields. `run` goes to the inner step; everything else (`image`, `depends-on`, `mount`, `cache`, `env`, `export`, `artifact`, `platform`, `matrix`, `workdir`, `no-cache`, `publish`) goes to the job.
+A bare step accepts the union of job and step fields. `run` goes to the inner step; everything else (`image`, `depends-on`, `mount`, `cache`, `env`, `export`, `artifact`, `platform`, `matrix`, `workdir`, `no-cache`, `publish`, `when`) goes to the job.
+
+---
+
+## When (Conditions)
+
+The `when` node enables conditional execution using [Google's Common Expression Language (CEL)](https://github.com/google/cel-go). CEL is a non-Turing-complete, sandboxed expression language familiar to Kubernetes/platform engineers.
+
+```kdl
+// Skip job unless on main or release branch
+job "deploy" {
+    when "branch.matches('^(main|release/.*)$')"
+    image "alpine:latest"
+    step "push" {
+        run "deploy.sh"
+    }
+}
+
+// Skip step unless CI environment
+step "slow-tests" {
+    image "golang:1.25"
+    when "hostEnv('CI') == 'true'"
+    run "go test -tags=slow ./..."
+}
+```
+
+### CEL Environment
+
+| Binding | Type | Description |
+|---------|------|-------------|
+| `branch` | `string` | Current git branch (empty if detached/unknown) |
+| `tag` | `string` | Git tag pointing at HEAD (empty if none) |
+| `env(key)` | `function(string) -> string` | Pipeline-declared env var for the current scope (pipeline + defaults + job + step merge hierarchy; empty if unset) |
+| `hostEnv(key)` | `function(string) -> string` | Host OS env var value (empty if unset); reads from the host process environment |
+| `output(job, key)` | `function(string, string) -> string` | Dependency job's `$CICADA_OUTPUT` value (empty if unset/job skipped) |
+| `matrix(key)` | `function(string) -> string` | Matrix dimension value for current variant (empty if not a matrix job or key unset) |
+
+Available CEL operators and functions include: `string.matches(regex)` (RE2), `string.startsWith()`, `string.endsWith()`, `string.contains()`, `size()`, `==`, `!=`, `in`, `? :`, `&&`, `||`, `!`.
+
+### Two-Phase Evaluation
+
+Conditions are split into **static** and **dynamic**:
+
+| Phase | Timing | Available bindings | Applies to |
+|-------|--------|-------------------|------------|
+| **Static** | Pre-build | `branch`, `tag`, `env()`, `hostEnv()`, `matrix()` | Jobs + steps |
+| **Dynamic** | Runtime (after deps complete) | All static + `output()` | Jobs only |
+
+The parser detects whether `when` references `output()` and marks it as deferred. Static conditions are evaluated before the build phase; deferred conditions are evaluated at runtime after dependencies complete. In both phases, `matrix()` reflects the current variant's dimension values.
+
+### Semantics
+
+- **Skipped job (static)**: when a job is skipped by a static `when` condition (evaluated pre-build by `EvaluateConditions`), it is treated as succeeded. Dependents still run; dependency edges and artifact imports from the skipped job are pruned with a warning. Skipped jobs produce empty outputs.
+- **Skipped job (deferred)**: when a job is skipped at runtime by a deferred `when` condition (evaluated by the runner after dependencies complete), the skip cascades -- all downstream dependents are also skipped.
+- **Step-level skip**: subsequent steps in the same job continue.
+- If all steps in a job are conditionally skipped, the job itself is skipped.
+- One `when` per job/step. Use `&&`/`||` within the expression for compound logic.
+- `output()` is only allowed in **job-level** `when` (not step-level).
+- `env()` reads **pipeline-declared** env vars scoped to the evaluation context (pipeline + defaults + job + step, following the merge hierarchy). Use `hostEnv()` to read host OS environment variables.
+
+### Dynamic Conditions with `output()`
+
+```kdl
+step "check" {
+    image "alpine:latest"
+    run "echo should_deploy=yes >> $CICADA_OUTPUT"
+}
+
+job "deploy" {
+    image "alpine:latest"
+    depends-on "check"
+    when "output('check', 'should_deploy') == 'yes'"
+    step "push" {
+        run "deploy.sh"
+    }
+}
+```
 
 ---
 

@@ -59,6 +59,7 @@ func expandPipeline(p Pipeline) (Pipeline, error) {
 		for i := range p.Jobs {
 			job := replicateJob(&p.Jobs[i], combo)
 			job.Name = expandedName(p.Jobs[i].Name, combo)
+			job.MatrixValues = maps.Clone(combo)
 			job.DependsOn = correlateDeps(p.Jobs[i].DependsOn, combo)
 			correlateArtifactFroms(job.Artifacts, combo)
 			for j := range job.Caches {
@@ -95,7 +96,9 @@ func expandJobs(p Pipeline) (Pipeline, error) {
 		job := &p.Jobs[i]
 		if job.Matrix == nil {
 			expansionMap[job.Name] = []string{job.Name}
-			expanded = append(expanded, replicateJob(job, nil))
+			r := replicateJob(job, nil)
+			r.MatrixValues = maps.Clone(job.MatrixValues)
+			expanded = append(expanded, r)
 			continue
 		}
 
@@ -112,6 +115,7 @@ func expandJobs(p Pipeline) (Pipeline, error) {
 			variant := replicateJob(job, combo)
 			variant.Name = expandedName(job.Name, combo)
 			variant.Matrix = nil
+			variant.MatrixValues = mergeMatrixValues(job.MatrixValues, combo)
 			for j := range variant.Caches {
 				variant.Caches[j].ID = matrixCacheID(variant.Caches[j].ID, variant.Name)
 			}
@@ -202,6 +206,19 @@ func checkDimCollisions(pm *Matrix, jobs []Job) error {
 		}
 	}
 	return nil
+}
+
+// mergeMatrixValues combines existing matrix values (from phase 1) with new
+// combo values (from phase 2). New values win on key conflict. Returns nil
+// when both inputs are nil.
+func mergeMatrixValues(existing, combo map[string]string) map[string]string {
+	if existing == nil && combo == nil {
+		return nil
+	}
+	merged := make(map[string]string, len(existing)+len(combo))
+	maps.Copy(merged, existing)
+	maps.Copy(merged, combo)
+	return merged
 }
 
 // replicateJob creates a deep copy of a job with matrix variable substitution

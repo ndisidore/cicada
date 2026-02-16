@@ -148,3 +148,36 @@ func TestPlainAttach(t *testing.T) {
 		})
 	}
 }
+
+func TestPlainSkipStep(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	ctx := slogctx.ContextWithLogger(t.Context(), logger)
+
+	p := &Plain{}
+	p.SkipStep(ctx, "deploy", "notify")
+
+	output := buf.String()
+	assert.Contains(t, output, "step skipped")
+	assert.Contains(t, output, "deploy")
+	assert.Contains(t, output, "notify")
+	assert.Contains(t, output, "step.skipped")
+}
+
+func TestPlainSkip(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	ctx := slogctx.ContextWithLogger(t.Context(), logger)
+
+	p := &Plain{}
+	p.Skip(ctx, "deploy")
+
+	output := buf.String()
+	assert.Contains(t, output, "job skipped")
+	assert.Contains(t, output, "deploy")
+	assert.Contains(t, output, "job.skipped")
+}

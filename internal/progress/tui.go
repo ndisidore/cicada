@@ -96,6 +96,20 @@ func (t *TUI) Attach(ctx context.Context, jobName string, ch <-chan *client.Solv
 	return nil
 }
 
+// Skip reports that a job was skipped due to a when condition.
+func (t *TUI) Skip(_ context.Context, jobName string) {
+	if t.p != nil {
+		t.p.Send(jobSkippedMsg{name: jobName})
+	}
+}
+
+// SkipStep reports that a step within a job was skipped due to a when condition.
+func (t *TUI) SkipStep(_ context.Context, jobName, stepName string) {
+	if t.p != nil {
+		t.p.Send(stepSkippedMsg{jobName: jobName, stepName: stepName})
+	}
+}
+
 // Seal signals that no more Attach calls will be made. It is idempotent.
 // If no Attach calls occurred, Seal sends allDoneMsg directly so the
 // bubbletea program exits and Wait does not hang.

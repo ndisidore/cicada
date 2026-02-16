@@ -9,28 +9,32 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/ndisidore/cicada/pkg/conditional"
 )
 
 // Sentinel errors for pipeline validation.
 var (
-	ErrEmptyPipeline   = errors.New("pipeline has no jobs")
-	ErrEmptyJobName    = errors.New("job has empty name")
-	ErrDuplicateJob    = errors.New("duplicate job name")
-	ErrEmptyStepName   = errors.New("step has empty name")
-	ErrDuplicateStep   = errors.New("duplicate step name")
-	ErrInvalidName     = errors.New("name contains invalid characters")
-	ErrMissingImage    = errors.New("job missing image")
-	ErrMissingRun      = errors.New("step has no run commands")
-	ErrEmptyRunCommand = errors.New("run command is empty or whitespace-only")
-	ErrEmptyJob        = errors.New("job has no steps")
-	ErrSelfDependency  = errors.New("job depends on itself")
-	ErrUnknownDep      = errors.New("unknown dependency")
-	ErrCycleDetected   = errors.New("dependency cycle detected")
-	ErrEmptyMatrix     = errors.New("matrix has no dimensions")
-	ErrEmptyDimension  = errors.New("dimension has no values")
-	ErrInvalidDimName  = errors.New("invalid dimension name")
-	ErrDuplicateDim    = errors.New("duplicate dimension name")
-	ErrMatrixTooLarge  = errors.New("matrix produces too many combinations")
+	ErrEmptyPipeline    = errors.New("pipeline has no jobs")
+	ErrEmptyJobName     = errors.New("job has empty name")
+	ErrDuplicateJob     = errors.New("duplicate job name")
+	ErrEmptyStepName    = errors.New("step has empty name")
+	ErrDuplicateStep    = errors.New("duplicate step name")
+	ErrInvalidName      = errors.New("name contains invalid characters")
+	ErrMissingImage     = errors.New("job missing image")
+	ErrMissingRun       = errors.New("step has no run commands")
+	ErrEmptyRunCommand  = errors.New("run command is empty or whitespace-only")
+	ErrEmptyJob         = errors.New("job has no steps")
+	ErrSelfDependency   = errors.New("job depends on itself")
+	ErrUnknownDep       = errors.New("unknown dependency")
+	ErrCycleDetected    = errors.New("dependency cycle detected")
+	ErrEmptyMatrix      = errors.New("matrix has no dimensions")
+	ErrEmptyDimension   = errors.New("dimension has no values")
+	ErrInvalidDimName   = errors.New("invalid dimension name")
+	ErrDuplicateDim     = errors.New("duplicate dimension name")
+	ErrMatrixTooLarge   = errors.New("matrix produces too many combinations")
+	ErrInvalidCondition = errors.New("invalid when condition")
+	ErrDeferredStepWhen = errors.New("step when must not reference output()")
 )
 
 // Sentinel errors for modular configuration (includes, fragments, params).
@@ -207,20 +211,22 @@ type Pipeline struct {
 // Job represents a grouping of sequential steps that share a container context.
 // Jobs are the unit of parallelism, dependency, and matrix expansion.
 type Job struct {
-	Name      string
-	Image     string
-	Workdir   string
-	Platform  string // OCI platform specifier (e.g. "linux/amd64"); empty means default
-	DependsOn []string
-	Mounts    []Mount
-	Caches    []Cache
-	Env       []EnvVar   // job-level env vars (override pipeline-level)
-	Exports   []Export   // container paths this job produces
-	Artifacts []Artifact // files imported from dependency jobs
-	Steps     []Step
-	Matrix    *Matrix  // job-level matrix; nil if not set
-	NoCache   bool     // disable cache for this job
-	Publish   *Publish // OCI image export; nil if not set
+	Name         string
+	Image        string
+	Workdir      string
+	Platform     string // OCI platform specifier (e.g. "linux/amd64"); empty means default
+	DependsOn    []string
+	Mounts       []Mount
+	Caches       []Cache
+	Env          []EnvVar   // job-level env vars (override pipeline-level)
+	Exports      []Export   // container paths this job produces
+	Artifacts    []Artifact // files imported from dependency jobs
+	Steps        []Step
+	When         *conditional.When // conditional execution; nil = always run
+	Matrix       *Matrix           // job-level matrix; nil if not set
+	MatrixValues map[string]string // concrete dimension values for this expanded variant; nil for non-matrix jobs
+	NoCache      bool              // disable cache for this job
+	Publish      *Publish          // OCI image export; nil if not set
 }
 
 // Step represents a single execution unit within a job.
@@ -228,13 +234,14 @@ type Job struct {
 type Step struct {
 	Name      string
 	Run       []string
-	Env       []EnvVar   // step-scoped env vars (additive to job)
-	Workdir   string     // set workdir from this step onward (like Docker WORKDIR)
-	Mounts    []Mount    // step-specific bind mounts (additive to job)
-	Caches    []Cache    // step-specific cache volumes (additive to job)
-	Exports   []Export   // declares this step produces files for export
-	Artifacts []Artifact // files imported from dependency jobs at this point
-	NoCache   bool       // disable caching for this step
+	Env       []EnvVar          // step-scoped env vars (additive to job)
+	Workdir   string            // set workdir from this step onward (like Docker WORKDIR)
+	Mounts    []Mount           // step-specific bind mounts (additive to job)
+	Caches    []Cache           // step-specific cache volumes (additive to job)
+	Exports   []Export          // declares this step produces files for export
+	Artifacts []Artifact        // files imported from dependency jobs at this point
+	When      *conditional.When // conditional execution; nil = always run
+	NoCache   bool              // disable caching for this step
 }
 
 // Validate checks that the pipeline is well-formed and returns job indices
@@ -305,6 +312,13 @@ func validateJob(idx int, j *Job, g *jobGraph) error {
 	if err := validatePublish(jobScope, j.Publish); err != nil {
 		return err
 	}
+	// Jobs allow both static and deferred (output()-referencing) conditions,
+	// so only syntax/type validation is needed here.
+	if j.When != nil {
+		if err := j.When.Validate(); err != nil {
+			return fmt.Errorf("%s: %w: %w", jobScope, ErrInvalidCondition, err)
+		}
+	}
 
 	// Validate steps within the job.
 	stepNames := make(map[string]struct{}, len(j.Steps))
@@ -339,6 +353,16 @@ func validateStep(jobName string, idx int, s *Step, seen map[string]struct{}) er
 	for _, cmd := range s.Run {
 		if strings.TrimSpace(cmd) == "" {
 			return fmt.Errorf("job %q: step %q: %w", jobName, s.Name, ErrEmptyRunCommand)
+		}
+	}
+	// Steps cannot reference output() (deferred expressions), so validate
+	// and reject them explicitly.
+	if s.When != nil {
+		if err := s.When.Validate(); err != nil {
+			return fmt.Errorf("job %q step %q: %w: %w", jobName, s.Name, ErrInvalidCondition, err)
+		}
+		if s.When.Deferred {
+			return fmt.Errorf("job %q step %q: %w", jobName, s.Name, ErrDeferredStepWhen)
 		}
 	}
 	if err := validateEnvVars(fmt.Sprintf("job %q step %q", jobName, s.Name), s.Env); err != nil {
@@ -547,6 +571,19 @@ func mergeEnv(base, override []EnvVar) []EnvVar {
 		}
 	}
 	return append(merged, override...)
+}
+
+// BuildEnvScope merges pipeline-level and job-level env vars into a flat map
+// suitable for conditional.Context.PipelineEnv. Job values win on key conflict.
+// For step-level evaluation, callers should additionally merge step.Env into the
+// returned map.
+func BuildEnvScope(pipelineEnv, jobEnv []EnvVar) map[string]string {
+	merged := mergeEnv(pipelineEnv, jobEnv)
+	m := make(map[string]string, len(merged))
+	for _, e := range merged {
+		m[e.Key] = e.Value
+	}
+	return m
 }
 
 // CollectImages extracts unique image references from a pipeline.

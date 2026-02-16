@@ -1,6 +1,9 @@
 package pipeline
 
-import "slices"
+import (
+	"maps"
+	"slices"
+)
 
 // Clone returns a deep copy of the Job. All slice fields and the Matrix
 // pointer are cloned to prevent aliasing. Steps are recursively deep-cloned.
@@ -18,10 +21,15 @@ func (j Job) Clone() Job {
 		}
 		j.Steps = steps
 	}
+	if j.When != nil {
+		w := *j.When
+		j.When = &w
+	}
 	if j.Matrix != nil {
 		m := j.Matrix.Clone()
 		j.Matrix = &m
 	}
+	j.MatrixValues = maps.Clone(j.MatrixValues)
 	if j.Publish != nil {
 		p := *j.Publish
 		j.Publish = &p
@@ -37,6 +45,10 @@ func (s Step) Clone() Step {
 	s.Caches = slices.Clone(s.Caches)
 	s.Exports = slices.Clone(s.Exports)
 	s.Artifacts = slices.Clone(s.Artifacts)
+	if s.When != nil {
+		w := *s.When
+		s.When = &w
+	}
 	return s
 }
 

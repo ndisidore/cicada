@@ -24,6 +24,7 @@ const (
 	NodeTypeArtifact  NodeType = "artifact"
 	NodeTypeNoCache   NodeType = "no-cache"
 	NodeTypePublish   NodeType = "publish"
+	NodeTypeWhen      NodeType = "when"
 )
 
 // Property keys.
@@ -33,6 +34,8 @@ const (
 	PropDefault    = "default"
 	PropAs         = "as"
 	PropLocal      = "local"
+	PropSource     = "source"
+	PropTarget     = "target"
 	PropPush       = "push"
 	PropInsecure   = "insecure"
 )

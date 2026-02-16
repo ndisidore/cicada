@@ -44,6 +44,8 @@ type Result struct {
 	Exports []LocalExport
 	// ImageExports contains image publish targets for jobs with Publish set.
 	ImageExports []ImageExport
+	// OutputDefs maps job names to LLB definitions that extract /cicada/output.
+	OutputDefs map[string]*llb.Definition
 }
 
 // BuildOpts configures the LLB build process.
@@ -101,6 +103,7 @@ func Build(ctx context.Context, p pipeline.Pipeline, opts BuildOpts) (Result, er
 	result := Result{
 		Definitions: make([]*llb.Definition, 0, len(order)),
 		JobNames:    make([]string, 0, len(order)),
+		OutputDefs:  make(map[string]*llb.Definition, len(order)),
 	}
 
 	states := make(map[string]llb.State, len(order))
@@ -113,6 +116,13 @@ func Build(ctx context.Context, p pipeline.Pipeline, opts BuildOpts) (Result, er
 		result.Definitions = append(result.Definitions, def)
 		result.JobNames = append(result.JobNames, job.Name)
 		states[job.Name] = st
+
+		// Build output extraction definition for deferred when conditions.
+		outputDef, err := buildExportDef(ctx, st, "/cicada/output")
+		if err != nil {
+			return Result{}, fmt.Errorf("building output def for job %q: %w", job.Name, err)
+		}
+		result.OutputDefs[job.Name] = outputDef
 
 		// Collect exports from job-level and step-level, all from final state.
 		allExports := collectExports(job)
@@ -225,6 +235,7 @@ func buildJob(
 		st = st.AddEnv(e.Key, e.Value)
 	}
 	st = st.File(llb.Mkdir("/cicada", 0o755))
+	st = st.File(llb.Mkfile("/cicada/output", 0o644, nil))
 	// Set after user env vars so it cannot be overridden.
 	st = st.AddEnv("CICADA_OUTPUT", "/cicada/output")
 

@@ -11,6 +11,7 @@ import (
 	kdl "github.com/sblinch/kdl-go"
 	"github.com/sblinch/kdl-go/document"
 
+	"github.com/ndisidore/cicada/pkg/conditional"
 	"github.com/ndisidore/cicada/pkg/pipeline"
 )
 
@@ -305,6 +306,12 @@ func applyJobField(j *pipeline.Job, node *document.Node, filename string) error 
 			return err
 		}
 		return setOnce(&j.Publish, &pub, filename, scope, string(nt))
+	case NodeTypeWhen:
+		w, err := parseWhenNode(node, filename, scope)
+		if err != nil {
+			return err
+		}
+		return setOnce(&j.When, w, filename, scope, string(nt))
 	case NodeTypeStep:
 		step, err := parseJobStep(node, filename, j.Name)
 		if err != nil {
@@ -392,6 +399,15 @@ func applyJobStepField(s *pipeline.Step, node *document.Node, filename, jobName 
 			return err
 		}
 		s.Artifacts = append(s.Artifacts, art)
+	case NodeTypeWhen:
+		w, err := parseWhenNode(node, filename, scope)
+		if err != nil {
+			return err
+		}
+		if w.Deferred {
+			return fmt.Errorf("%s: %s: when: %w", filename, scope, conditional.ErrDeferredInStep)
+		}
+		return setOnce(&s.When, w, filename, scope, string(nt))
 	case NodeTypeNoCache:
 		if len(node.Arguments) > 0 {
 			return fmt.Errorf("%s: %s: no-cache takes no arguments: %w", filename, scope, ErrExtraArgs)
@@ -604,13 +620,37 @@ func parseExportNode(node *document.Node, filename, scopeName string) (pipeline.
 	return pipeline.Export{Path: path, Local: local}, nil
 }
 
-// parseArtifactNode extracts an artifact definition (three string args: from, source, target).
+// parseArtifactNode extracts an artifact definition (one positional arg + source/target properties).
 func parseArtifactNode(node *document.Node, filename, scopeName string) (pipeline.Artifact, error) {
-	args, err := stringArgs3(node, string(NodeTypeArtifact))
-	if err != nil {
-		return pipeline.Artifact{}, fmt.Errorf("%s: %q: %w", filename, scopeName, err)
+	if len(node.Arguments) > 1 {
+		return pipeline.Artifact{}, fmt.Errorf(
+			"%s: %q: artifact requires exactly one argument, got %d: %w",
+			filename, scopeName, len(node.Arguments), ErrExtraArgs,
+		)
 	}
-	return pipeline.Artifact{From: args[0], Source: args[1], Target: args[2]}, nil
+	from, err := requireStringArg(node, filename, string(NodeTypeArtifact))
+	if err != nil {
+		return pipeline.Artifact{}, fmt.Errorf("%s: %q: artifact: %w", filename, scopeName, err)
+	}
+	source, err := prop[string](node, PropSource)
+	if err != nil {
+		return pipeline.Artifact{}, fmt.Errorf("%s: %q: artifact: %w", filename, scopeName, err)
+	}
+	if source == "" {
+		return pipeline.Artifact{}, fmt.Errorf(
+			"%s: %q: artifact: source property: %w", filename, scopeName, ErrMissingField,
+		)
+	}
+	target, err := prop[string](node, PropTarget)
+	if err != nil {
+		return pipeline.Artifact{}, fmt.Errorf("%s: %q: artifact: %w", filename, scopeName, err)
+	}
+	if target == "" {
+		return pipeline.Artifact{}, fmt.Errorf(
+			"%s: %q: artifact: target property: %w", filename, scopeName, ErrMissingField,
+		)
+	}
+	return pipeline.Artifact{From: from, Source: source, Target: target}, nil
 }
 
 // parsePublishNode extracts a publish declaration from a KDL node.
@@ -642,33 +682,27 @@ func parsePublishNode(node *document.Node, filename, scopeName string) (pipeline
 	return pipeline.Publish{Image: image, Push: push, Insecure: insecure}, nil
 }
 
-// stringArgs3 extracts exactly three string arguments from a node.
-func stringArgs3(node *document.Node, field string) ([3]string, error) {
-	switch {
-	case len(node.Arguments) < 3:
-		return [3]string{}, fmt.Errorf(
-			"%s requires exactly three arguments, got %d: %w",
-			field, len(node.Arguments), ErrMissingField,
-		)
-	case len(node.Arguments) > 3:
-		return [3]string{}, fmt.Errorf(
-			"%s requires exactly three arguments, got %d: %w",
-			field, len(node.Arguments), ErrExtraArgs,
+// parseWhenNode extracts a when condition from a KDL node.
+func parseWhenNode(node *document.Node, filename, scopeName string) (*conditional.When, error) {
+	if len(node.Arguments) > 1 {
+		return nil, fmt.Errorf(
+			"%s: %s: when requires exactly one argument, got %d: %w",
+			filename, scopeName, len(node.Arguments), ErrExtraArgs,
 		)
 	}
-	first, err := arg[string](node, 0)
+	expr, err := requireStringArg(node, filename, string(NodeTypeWhen))
 	if err != nil {
-		return [3]string{}, fmt.Errorf("%s first argument: %w", field, err)
+		return nil, fmt.Errorf("%s: %s: when: %w", filename, scopeName, err)
 	}
-	second, err := arg[string](node, 1)
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return nil, fmt.Errorf("%s: %s: when expression: %w", filename, scopeName, ErrMissingField)
+	}
+	w, err := conditional.NewWhen(expr)
 	if err != nil {
-		return [3]string{}, fmt.Errorf("%s second argument: %w", field, err)
+		return nil, fmt.Errorf("%s: %s: when: %w", filename, scopeName, err)
 	}
-	third, err := arg[string](node, 2)
-	if err != nil {
-		return [3]string{}, fmt.Errorf("%s third argument: %w", field, err)
-	}
-	return [3]string{first, second, third}, nil
+	return w, nil
 }
 
 // stringArgs2 extracts exactly two string arguments from a node.
