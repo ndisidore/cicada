@@ -3,7 +3,6 @@ package runner
 import (
 	"context"
 	"errors"
-	"os/exec"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -21,6 +20,7 @@ import (
 	"golang.org/x/sync/semaphore"
 
 	"github.com/ndisidore/cicada/internal/cache"
+	"github.com/ndisidore/cicada/internal/runtime/runtimetest"
 	"github.com/ndisidore/cicada/pkg/conditional"
 	"github.com/ndisidore/cicada/pkg/pipeline"
 )
@@ -181,6 +181,19 @@ func TestRun(t *testing.T) {
 				Display: nil,
 			},
 			wantSentinel: ErrNilDisplay,
+		},
+		{
+			name: "nil runtime with export-docker returns error",
+			input: RunInput{
+				Solver:  &fakeSolver{},
+				Jobs:    []Job{{Name: "x", Definition: def}},
+				Display: &fakeDisplay{},
+				Runtime: nil,
+				ImagePublishes: []ImagePublish{
+					{ExportDocker: true, Image: "test:latest"},
+				},
+			},
+			wantSentinel: ErrNilRuntime,
 		},
 		{
 			name: "unknown dependency",
@@ -1128,8 +1141,10 @@ func TestRun_exportDockerMultiPlatformError(t *testing.T) {
 		return &client.SolveResponse{}, nil
 	}}
 
+	rt := new(runtimetest.MockRuntime)
 	err = Run(context.Background(), RunInput{
 		Solver:  solver,
+		Runtime: rt,
 		Jobs:    []Job{{Name: "build", Definition: def}},
 		Display: &fakeDisplay{},
 		ImagePublishes: []ImagePublish{
@@ -1138,6 +1153,7 @@ func TestRun_exportDockerMultiPlatformError(t *testing.T) {
 		},
 	})
 	require.ErrorIs(t, err, ErrExportDockerMultiPlatform)
+	rt.AssertNotCalled(t, "LoadImage")
 }
 
 func TestRun_duplicatePlatformError(t *testing.T) {
@@ -1171,20 +1187,19 @@ func TestRun_duplicatePlatformError(t *testing.T) {
 	require.ErrorIs(t, err, ErrDuplicatePlatform)
 }
 
-// TestRun_exportDocker tests the export-docker path. Subtests are sequential
-// because they override the package-level _dockerLoadCmd variable.
+// TestRun_exportDocker tests the export-docker path using a mock runtime.
 func TestRun_exportDocker(t *testing.T) {
+	t.Parallel()
+
 	def, err := llb.Scratch().Marshal(context.Background())
 	require.NoError(t, err)
 
-	origCmd := _dockerLoadCmd
-	t.Cleanup(func() { _dockerLoadCmd = origCmd })
-
-	_dockerLoadCmd = func(ctx context.Context) *exec.Cmd {
-		return exec.CommandContext(ctx, "cat")
-	}
-
 	t.Run("solves with docker exporter and Output set", func(t *testing.T) {
+		t.Parallel()
+
+		rt := new(runtimetest.MockRuntime)
+		rt.On("LoadImage", mock.Anything).Return(nil)
+
 		var capturedOpt atomic.Pointer[client.SolveOpt]
 		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, opt client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 			if len(opt.Exports) > 0 && opt.Exports[0].Type == client.ExporterDocker {
@@ -1196,6 +1211,7 @@ func TestRun_exportDocker(t *testing.T) {
 
 		err := Run(context.Background(), RunInput{
 			Solver:  solver,
+			Runtime: rt,
 			Jobs:    []Job{{Name: "build", Definition: def}},
 			Display: &fakeDisplay{},
 			ImagePublishes: []ImagePublish{
@@ -1210,9 +1226,15 @@ func TestRun_exportDocker(t *testing.T) {
 		assert.Equal(t, client.ExporterDocker, opt.Exports[0].Type)
 		assert.Equal(t, "myapp:dev", opt.Exports[0].Attrs["name"])
 		assert.NotNil(t, opt.Exports[0].Output, "Output callback must be set for docker exporter")
+		rt.AssertExpectations(t)
 	})
 
 	t.Run("push and export-docker run concurrently", func(t *testing.T) {
+		t.Parallel()
+
+		rt := new(runtimetest.MockRuntime)
+		rt.On("LoadImage", mock.Anything).Return(nil)
+
 		var imageExporterCalled, dockerExporterCalled atomic.Bool
 		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, opt client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 			if len(opt.Exports) > 0 {
@@ -1230,6 +1252,7 @@ func TestRun_exportDocker(t *testing.T) {
 
 		err := Run(context.Background(), RunInput{
 			Solver:  solver,
+			Runtime: rt,
 			Jobs:    []Job{{Name: "build", Definition: def}},
 			Display: &fakeDisplay{},
 			ImagePublishes: []ImagePublish{
@@ -1239,9 +1262,13 @@ func TestRun_exportDocker(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, imageExporterCalled.Load(), "image exporter should be called for push")
 		assert.True(t, dockerExporterCalled.Load(), "docker exporter should be called for export-docker")
+		rt.AssertExpectations(t)
 	})
 
 	t.Run("nil definition returns error", func(t *testing.T) {
+		t.Parallel()
+
+		rt := new(runtimetest.MockRuntime)
 		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 			close(ch)
 			return &client.SolveResponse{}, nil
@@ -1249,6 +1276,7 @@ func TestRun_exportDocker(t *testing.T) {
 
 		err := Run(context.Background(), RunInput{
 			Solver:  solver,
+			Runtime: rt,
 			Jobs:    []Job{{Name: "build", Definition: def}},
 			Display: &fakeDisplay{},
 			ImagePublishes: []ImagePublish{
@@ -1256,6 +1284,7 @@ func TestRun_exportDocker(t *testing.T) {
 			},
 		})
 		require.ErrorIs(t, err, ErrNilDefinition)
+		rt.AssertNotCalled(t, "LoadImage")
 	})
 }
 

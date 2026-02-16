@@ -2,7 +2,6 @@
 package runner
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,8 +9,8 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/containerd/platforms"
@@ -25,6 +24,7 @@ import (
 
 	"github.com/ndisidore/cicada/internal/cache"
 	"github.com/ndisidore/cicada/internal/progress"
+	"github.com/ndisidore/cicada/internal/runtime"
 	"github.com/ndisidore/cicada/pkg/conditional"
 	"github.com/ndisidore/cicada/pkg/pipeline"
 	"github.com/ndisidore/cicada/pkg/slogctx"
@@ -39,6 +39,9 @@ var ErrNilDisplay = errors.New("display must not be nil")
 // ErrNilDefinition indicates that an LLB Definition is unexpectedly nil.
 var ErrNilDefinition = errors.New("definition must not be nil")
 
+// ErrNilRuntime indicates that Runtime was not provided but export-docker requires it.
+var ErrNilRuntime = errors.New("runtime must not be nil for export-docker")
+
 // ErrExportDockerMultiPlatform indicates export-docker was set on a multi-platform publish.
 var ErrExportDockerMultiPlatform = errors.New("export-docker is not supported for multi-platform publishes")
 
@@ -47,11 +50,6 @@ var ErrPublishSettingConflict = errors.New("conflicting publish settings for sam
 
 // ErrDuplicatePlatform indicates two variants in a multi-platform publish target the same platform.
 var ErrDuplicatePlatform = errors.New("duplicate platform in multi-platform publish")
-
-// _dockerLoadCmd creates the exec.Cmd for piping a Docker tarball into the local daemon.
-var _dockerLoadCmd = func(ctx context.Context) *exec.Cmd {
-	return exec.CommandContext(ctx, "docker", "load")
-}
 
 // Solver abstracts the BuildKit Solve RPC for testability.
 //
@@ -112,6 +110,8 @@ type ImagePublish struct {
 type RunInput struct {
 	// Solver is the BuildKit API client used to solve LLB definitions.
 	Solver Solver
+	// Runtime is the container runtime used for image loading (export-docker).
+	Runtime runtime.Runtime
 	// Jobs contains the LLB definitions and job names to execute.
 	Jobs []Job
 	// LocalMounts maps mount names to local filesystem sources.
@@ -138,6 +138,7 @@ type RunInput struct {
 // related helpers, keeping function signatures under the CS-05 limit.
 type runConfig struct {
 	solver       Solver
+	rt           runtime.Runtime
 	display      progress.Display
 	nodes        map[string]*dagNode
 	sem          *semaphore.Weighted
@@ -170,6 +171,9 @@ func Run(ctx context.Context, in RunInput) error {
 	if in.Display == nil {
 		return ErrNilDisplay
 	}
+	if in.Runtime == nil && slices.ContainsFunc(in.ImagePublishes, func(p ImagePublish) bool { return p.ExportDocker }) {
+		return ErrNilRuntime
+	}
 	if len(in.Jobs) == 0 {
 		return nil
 	}
@@ -187,6 +191,7 @@ func Run(ctx context.Context, in RunInput) error {
 
 	cfg := runConfig{
 		solver:       in.Solver,
+		rt:           in.Runtime,
 		display:      in.Display,
 		nodes:        nodes,
 		sem:          sem,
@@ -689,16 +694,9 @@ func solveImageExportDocker(ctx context.Context, pub ImagePublish, cfg runConfig
 	eg, ectx := errgroup.WithContext(ctx)
 
 	eg.Go(func() error {
-		cmd := _dockerLoadCmd(ectx)
-		cmd.Stdin = pr
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
 		defer func() { _ = pr.Close() }()
-		if err := cmd.Run(); err != nil {
-			if stderr.Len() > 0 {
-				return fmt.Errorf("docker load: %w: %s", err, stderr.String())
-			}
-			return fmt.Errorf("docker load: %w", err)
+		if err := cfg.rt.LoadImage(ectx, pr); err != nil {
+			return fmt.Errorf("loading image: %w", err)
 		}
 		return nil
 	})

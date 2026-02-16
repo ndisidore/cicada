@@ -1,5 +1,4 @@
-//revive:disable:var-naming Package name conflict with standard library is intentional.
-package runtime
+package cliutil
 
 import (
 	"context"
@@ -8,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/ndisidore/cicada/internal/runtime"
 )
 
 func TestCLIRuntimeRun(t *testing.T) {
@@ -15,15 +16,15 @@ func TestCLIRuntimeRun(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		cfg        RunConfig
-		exec       execFunc
+		cfg        runtime.RunConfig
+		exec       ExecFunc
 		want       string
 		wantErr    error
 		wantAnyErr bool
 	}{
 		{
 			name: "simple run returns trimmed container ID",
-			cfg: RunConfig{
+			cfg: runtime.RunConfig{
 				Name:  "test-container",
 				Image: "alpine:latest",
 			},
@@ -34,12 +35,12 @@ func TestCLIRuntimeRun(t *testing.T) {
 		},
 		{
 			name:    "empty image returns ErrEmptyImage",
-			cfg:     RunConfig{Name: "test-container"},
-			wantErr: ErrEmptyImage,
+			cfg:     runtime.RunConfig{Name: "test-container"},
+			wantErr: runtime.ErrEmptyImage,
 		},
 		{
 			name: "exec error wraps with binary name",
-			cfg: RunConfig{
+			cfg: runtime.RunConfig{
 				Image: "alpine:latest",
 			},
 			exec: func(_ context.Context, args ...string) (string, error) {
@@ -52,7 +53,7 @@ func TestCLIRuntimeRun(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			c := &cliRuntime{binary: "test", exec: tt.exec}
+			c := &CLIRuntime{Binary: "test", Exec: tt.exec}
 			got, err := c.Run(context.Background(), tt.cfg)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
@@ -73,7 +74,7 @@ func TestCLIRuntimeStart(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		exec    execFunc
+		exec    ExecFunc
 		wantErr bool
 	}{
 		{
@@ -94,7 +95,7 @@ func TestCLIRuntimeStart(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			c := &cliRuntime{binary: "test", exec: tt.exec}
+			c := &CLIRuntime{Binary: "test", Exec: tt.exec}
 			err := c.Start(context.Background(), "my-container")
 			if tt.wantErr {
 				require.Error(t, err)
@@ -111,7 +112,7 @@ func TestCLIRuntimeStop(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		exec    execFunc
+		exec    ExecFunc
 		wantErr bool
 	}{
 		{
@@ -132,7 +133,7 @@ func TestCLIRuntimeStop(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			c := &cliRuntime{binary: "test", exec: tt.exec}
+			c := &CLIRuntime{Binary: "test", Exec: tt.exec}
 			err := c.Stop(context.Background(), "my-container")
 			if tt.wantErr {
 				require.Error(t, err)
@@ -149,7 +150,7 @@ func TestCLIRuntimeRemove(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		exec    execFunc
+		exec    ExecFunc
 		wantErr bool
 	}{
 		{
@@ -170,7 +171,7 @@ func TestCLIRuntimeRemove(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			c := &cliRuntime{binary: "test", exec: tt.exec}
+			c := &CLIRuntime{Binary: "test", Exec: tt.exec}
 			err := c.Remove(context.Background(), "my-container")
 			if tt.wantErr {
 				require.Error(t, err)
@@ -187,8 +188,8 @@ func TestCLIRuntimeInspect(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		exec       execFunc
-		wantState  ContainerState
+		exec       ExecFunc
+		wantState  runtime.ContainerState
 		wantErr    error
 		wantAnyErr bool
 	}{
@@ -197,37 +198,37 @@ func TestCLIRuntimeInspect(t *testing.T) {
 			exec: func(_ context.Context, args ...string) (string, error) {
 				return `{"Status":"running"}`, nil
 			},
-			wantState: StateRunning,
+			wantState: runtime.StateRunning,
 		},
 		{
 			name: "exited container",
 			exec: func(_ context.Context, args ...string) (string, error) {
 				return `{"Status":"exited"}`, nil
 			},
-			wantState: StateExited,
+			wantState: runtime.StateExited,
 		},
 		{
 			name: "created container",
 			exec: func(_ context.Context, args ...string) (string, error) {
 				return `{"Status":"created"}`, nil
 			},
-			wantState: StateCreated,
+			wantState: runtime.StateCreated,
 		},
 		{
 			name: "missing container returns ErrContainerNotFound",
 			exec: func(_ context.Context, args ...string) (string, error) {
 				return "Error: No such container: foo", errors.New("exit 1")
 			},
-			wantState: StateUnknown,
-			wantErr:   ErrContainerNotFound,
+			wantState: runtime.StateUnknown,
+			wantErr:   runtime.ErrContainerNotFound,
 		},
 		{
 			name: "no such object returns ErrContainerNotFound",
 			exec: func(_ context.Context, args ...string) (string, error) {
 				return "Error: No such object: foo", errors.New("exit 1")
 			},
-			wantState: StateUnknown,
-			wantErr:   ErrContainerNotFound,
+			wantState: runtime.StateUnknown,
+			wantErr:   runtime.ErrContainerNotFound,
 		},
 		{
 			name: "unexpected error propagates",
@@ -248,7 +249,7 @@ func TestCLIRuntimeInspect(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			c := &cliRuntime{binary: "test", exec: tt.exec}
+			c := &CLIRuntime{Binary: "test", Exec: tt.exec}
 			state, err := c.Inspect(context.Background(), "my-container")
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
@@ -270,28 +271,28 @@ func TestBuildRunArgs(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		cfg     RunConfig
+		cfg     runtime.RunConfig
 		want    []string
 		wantErr error
 	}{
 		{
 			name: "minimal config",
-			cfg: RunConfig{
+			cfg: runtime.RunConfig{
 				Image: "alpine:latest",
 			},
 			want: []string{"run", "alpine:latest"},
 		},
 		{
 			name: "full config",
-			cfg: RunConfig{
+			cfg: runtime.RunConfig{
 				Name:       "my-container",
 				Image:      "moby/buildkit:latest",
 				Privileged: true,
 				Detach:     true,
-				Ports: []PortBinding{
+				Ports: []runtime.PortBinding{
 					{HostAddr: "127.0.0.1", HostPort: "1234", ContPort: "1234"},
 				},
-				Volumes: []VolumeMount{
+				Volumes: []runtime.VolumeMount{
 					{Name: "my-vol", Target: "/var/lib/data"},
 				},
 				Args: []string{"--addr", "tcp://0.0.0.0:1234"},
@@ -308,13 +309,13 @@ func TestBuildRunArgs(t *testing.T) {
 		},
 		{
 			name: "multiple ports and volumes",
-			cfg: RunConfig{
+			cfg: runtime.RunConfig{
 				Image: "nginx",
-				Ports: []PortBinding{
+				Ports: []runtime.PortBinding{
 					{HostAddr: "0.0.0.0", HostPort: "80", ContPort: "80"},
 					{HostAddr: "0.0.0.0", HostPort: "443", ContPort: "443"},
 				},
-				Volumes: []VolumeMount{
+				Volumes: []runtime.VolumeMount{
 					{Name: "conf", Target: "/etc/nginx"},
 					{Name: "data", Target: "/usr/share/nginx/html"},
 				},
@@ -330,9 +331,9 @@ func TestBuildRunArgs(t *testing.T) {
 		},
 		{
 			name: "port without HostAddr omits host binding",
-			cfg: RunConfig{
+			cfg: runtime.RunConfig{
 				Image: "nginx",
-				Ports: []PortBinding{
+				Ports: []runtime.PortBinding{
 					{HostPort: "8080", ContPort: "80"},
 				},
 			},
@@ -340,42 +341,42 @@ func TestBuildRunArgs(t *testing.T) {
 		},
 		{
 			name: "empty HostPort returns ErrInvalidPort",
-			cfg: RunConfig{
+			cfg: runtime.RunConfig{
 				Image: "nginx",
-				Ports: []PortBinding{{HostAddr: "0.0.0.0", ContPort: "80"}},
+				Ports: []runtime.PortBinding{{HostAddr: "0.0.0.0", ContPort: "80"}},
 			},
-			wantErr: ErrInvalidPort,
+			wantErr: runtime.ErrInvalidPort,
 		},
 		{
 			name: "empty ContPort returns ErrInvalidPort",
-			cfg: RunConfig{
+			cfg: runtime.RunConfig{
 				Image: "nginx",
-				Ports: []PortBinding{{HostPort: "80"}},
+				Ports: []runtime.PortBinding{{HostPort: "80"}},
 			},
-			wantErr: ErrInvalidPort,
+			wantErr: runtime.ErrInvalidPort,
 		},
 		{
 			name: "empty volume name returns ErrInvalidVolume",
-			cfg: RunConfig{
+			cfg: runtime.RunConfig{
 				Image:   "nginx",
-				Volumes: []VolumeMount{{Target: "/data"}},
+				Volumes: []runtime.VolumeMount{{Target: "/data"}},
 			},
-			wantErr: ErrInvalidVolume,
+			wantErr: runtime.ErrInvalidVolume,
 		},
 		{
 			name: "empty volume target returns ErrInvalidVolume",
-			cfg: RunConfig{
+			cfg: runtime.RunConfig{
 				Image:   "nginx",
-				Volumes: []VolumeMount{{Name: "vol"}},
+				Volumes: []runtime.VolumeMount{{Name: "vol"}},
 			},
-			wantErr: ErrInvalidVolume,
+			wantErr: runtime.ErrInvalidVolume,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := buildRunArgs(tt.cfg)
+			got, err := BuildRunArgs(tt.cfg)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
 				return
@@ -392,21 +393,21 @@ func TestParseState(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
-		want  ContainerState
+		want  runtime.ContainerState
 	}{
-		{name: "running", input: "running", want: StateRunning},
-		{name: "Running mixed case", input: "Running", want: StateRunning},
-		{name: "exited", input: "exited", want: StateExited},
-		{name: "created", input: "created", want: StateCreated},
-		{name: "paused", input: "paused", want: StatePaused},
-		{name: "unknown value", input: "restarting", want: StateUnknown},
-		{name: "empty string", input: "", want: StateUnknown},
+		{name: "running", input: "running", want: runtime.StateRunning},
+		{name: "Running mixed case", input: "Running", want: runtime.StateRunning},
+		{name: "exited", input: "exited", want: runtime.StateExited},
+		{name: "created", input: "created", want: runtime.StateCreated},
+		{name: "paused", input: "paused", want: runtime.StatePaused},
+		{name: "unknown value", input: "restarting", want: runtime.StateUnknown},
+		{name: "empty string", input: "", want: runtime.StateUnknown},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.want, parseState(tt.input))
+			assert.Equal(t, tt.want, ParseState(tt.input))
 		})
 	}
 }
@@ -429,7 +430,7 @@ func TestIsNotFound(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.want, isNotFound(tt.output))
+			assert.Equal(t, tt.want, IsNotFound(tt.output))
 		})
 	}
 }
