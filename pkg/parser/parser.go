@@ -9,6 +9,7 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+	"time"
 
 	kdl "github.com/sblinch/kdl-go"
 	"github.com/sblinch/kdl-go/document"
@@ -314,6 +315,31 @@ func applyJobField(j *pipeline.Job, node *document.Node, filename string) error 
 			return err
 		}
 		return setOnce(&j.When, w, filename, scope, string(nt))
+	case NodeTypeTimeout:
+		v, err := requireStringArg(node, filename, string(nt))
+		if err != nil {
+			return err
+		}
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("%s: %s: timeout: %w", filename, scope, err)
+		}
+		return setOnce(&j.Timeout, d, filename, scope, string(nt))
+	case NodeTypeRetry:
+		r, err := parseRetryNode(node, filename, scope)
+		if err != nil {
+			return err
+		}
+		return setOnce(&j.Retry, r, filename, scope, string(nt))
+	case NodeTypeShell:
+		s, err := parseShellNode(node, filename)
+		if err != nil {
+			return err
+		}
+		if j.Shell != nil {
+			return fmt.Errorf("%s: %s: %w: %q", filename, scope, ErrDuplicateField, string(nt))
+		}
+		j.Shell = s
 	case NodeTypeStep:
 		step, err := parseJobStep(node, filename, j.Name)
 		if err != nil {
@@ -350,7 +376,7 @@ func parseJobStep(node *document.Node, filename, jobName string) (pipeline.Step,
 
 // applyJobStepField dispatches a single child node of a step block within a job.
 //
-//revive:disable-next-line:cognitive-complexity,cyclomatic applyJobStepField is a flat switch dispatch over node types; splitting it hurts readability.
+//revive:disable-next-line:cognitive-complexity,cyclomatic,function-length applyJobStepField is a flat switch dispatch over node types; splitting it hurts readability.
 func applyJobStepField(s *pipeline.Step, node *document.Node, filename, jobName string) error {
 	nt := NodeType(node.Name.ValueString())
 	scope := fmt.Sprintf("job %q step %q", jobName, s.Name)
@@ -410,6 +436,25 @@ func applyJobStepField(s *pipeline.Step, node *document.Node, filename, jobName 
 			return fmt.Errorf("%s: %s: when: %w", filename, scope, conditional.ErrDeferredInStep)
 		}
 		return setOnce(&s.When, w, filename, scope, string(nt))
+	case NodeTypeTimeout:
+		v, err := requireStringArg(node, filename, string(nt))
+		if err != nil {
+			return err
+		}
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("%s: %s: timeout: %w", filename, scope, err)
+		}
+		return setOnce(&s.Timeout, d, filename, scope, string(nt))
+	case NodeTypeShell:
+		sh, err := parseShellNode(node, filename)
+		if err != nil {
+			return err
+		}
+		if s.Shell != nil {
+			return fmt.Errorf("%s: %s: %w: %q", filename, scope, ErrDuplicateField, string(nt))
+		}
+		s.Shell = sh
 	case NodeTypeNoCache:
 		if len(node.Arguments) > 0 {
 			return fmt.Errorf("%s: %s: no-cache takes no arguments: %w", filename, scope, ErrExtraArgs)
@@ -475,7 +520,7 @@ func parseBareStep(node *document.Node, filename string) (pipeline.Job, error) {
 
 // parseDefaults parses a defaults KDL node into a pipeline.Defaults.
 //
-//revive:disable-next-line:cognitive-complexity parseDefaults is a flat switch dispatch over child node types; splitting it hurts readability.
+//revive:disable-next-line:cognitive-complexity,cyclomatic parseDefaults is a flat switch dispatch over child node types; splitting it hurts readability.
 func parseDefaults(node *document.Node, filename string) (pipeline.Defaults, error) {
 	if len(node.Arguments) > 0 {
 		return pipeline.Defaults{}, fmt.Errorf(
@@ -518,9 +563,18 @@ func parseDefaults(node *document.Node, filename string) (pipeline.Defaults, err
 				return pipeline.Defaults{}, err
 			}
 			d.Env = append(d.Env, ev)
+		case NodeTypeShell:
+			s, err := parseShellNode(child, filename)
+			if err != nil {
+				return pipeline.Defaults{}, err
+			}
+			if d.Shell != nil {
+				return pipeline.Defaults{}, fmt.Errorf("%s: defaults: %w: %q", filename, ErrDuplicateField, string(nt))
+			}
+			d.Shell = s
 		default:
 			return pipeline.Defaults{}, fmt.Errorf(
-				"%s: defaults: %w: %q (expected image, workdir, mount, or env)",
+				"%s: defaults: %w: %q (expected image, workdir, mount, env, or shell)",
 				filename, ErrUnknownNode, string(nt),
 			)
 		}
@@ -705,6 +759,72 @@ func parseWhenNode(node *document.Node, filename, scopeName string) (*conditiona
 		return nil, fmt.Errorf("%s: %s: when: %w", filename, scopeName, err)
 	}
 	return w, nil
+}
+
+// parseRetryNode parses a retry block into a *pipeline.Retry.
+// Children: attempts (int arg), delay (string arg, parsed as duration), backoff (string arg).
+// All optional. Defaults: attempts=1, delay=0, backoff="none".
+//
+//revive:disable-next-line:cognitive-complexity parseRetryNode is a linear field-dispatch parser; splitting it hurts readability.
+func parseRetryNode(node *document.Node, filename, scope string) (*pipeline.Retry, error) {
+	r := &pipeline.Retry{
+		Attempts: 1,
+		Backoff:  pipeline.BackoffNone,
+	}
+	if len(node.Arguments) > 0 {
+		return nil, fmt.Errorf("%s: %s: retry takes no arguments: %w", filename, scope, ErrExtraArgs)
+	}
+	seen := make(map[string]bool, 3)
+	for _, child := range node.Children {
+		name := child.Name.ValueString()
+		if seen[name] {
+			return nil, fmt.Errorf("%s: %s: retry: %w: %q", filename, scope, ErrDuplicateField, name)
+		}
+		seen[name] = true
+		switch name {
+		case PropAttempts:
+			v, err := arg[int64](child, 0)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s: retry attempts: %w", filename, scope, err)
+			}
+			r.Attempts = int(v)
+		case PropDelay:
+			v, err := requireStringArg(child, filename, name)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s: retry delay: %w", filename, scope, err)
+			}
+			d, err := time.ParseDuration(v)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s: retry delay: %w", filename, scope, err)
+			}
+			r.Delay = d
+		case PropBackoff:
+			v, err := requireStringArg(child, filename, name)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s: retry backoff: %w", filename, scope, err)
+			}
+			r.Backoff = pipeline.BackoffStrategy(v)
+		default:
+			return nil, fmt.Errorf("%s: %s: retry: %w: %q", filename, scope, ErrUnknownNode, name)
+		}
+	}
+	return r, nil
+}
+
+// parseShellNode parses variadic string arguments from a shell node.
+func parseShellNode(node *document.Node, filename string) ([]string, error) {
+	if len(node.Arguments) == 0 {
+		return nil, fmt.Errorf("%s: shell: %w", filename, pipeline.ErrEmptyShell)
+	}
+	args := make([]string, 0, len(node.Arguments))
+	for i := range node.Arguments {
+		v, err := arg[string](node, i)
+		if err != nil {
+			return nil, fmt.Errorf("%s: shell argument %d: %w", filename, i, err)
+		}
+		args = append(args, v)
+	}
+	return args, nil
 }
 
 // stringArgs2 extracts exactly two string arguments from a node.

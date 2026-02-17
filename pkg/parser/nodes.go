@@ -26,6 +26,9 @@ const (
 	NodeTypeNoCache   NodeType = "no-cache"
 	NodeTypePublish   NodeType = "publish"
 	NodeTypeWhen      NodeType = "when"
+	NodeTypeRetry     NodeType = "retry"
+	NodeTypeTimeout   NodeType = "timeout"
+	NodeTypeShell     NodeType = "shell"
 )
 
 // Property keys.
@@ -39,4 +42,7 @@ const (
 	PropTarget     = "target"
 	PropPush       = "push"
 	PropInsecure   = "insecure"
+	PropAttempts   = "attempts"
+	PropDelay      = "delay"
+	PropBackoff    = "backoff"
 )

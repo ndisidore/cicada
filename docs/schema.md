@@ -96,6 +96,7 @@ defaults {
 | `workdir` | `<path>` | Default working directory |
 | `mount` | `<source>` `<target>` | Bind mount (supports `readonly=true`) |
 | `env` | `<key>` `<value>` | Environment variable |
+| `shell` | `<arg>...` | Default shell (see [Shell](#shell)) |
 
 </details>
 
@@ -131,6 +132,9 @@ job "test" {
 | `when` | `<CEL-expression>` | 0..1 | Conditional execution ([CEL](#when-conditions)) |
 | `no-cache` | (none) | 0..1 | Disable caching for all steps |
 | `publish` | `<image-ref>` | 0..1 | Publish job filesystem as OCI image (see [publish](#publish)) |
+| `timeout` | `<duration>` | 0..1 | Job-level timeout (see [Timeouts](#timeouts)) |
+| `retry` | (children) | 0..1 | Retry on failure (see [Retry](#retry)) |
+| `shell` | `<arg>...` | 0..1 | Override default shell (see [Shell](#shell)) |
 | `step` | `<name>` | 1..N | Sequential execution unit |
 
 </details>
@@ -160,6 +164,8 @@ step "install" {
 | `export` | `<container-path>` `local=<host-path>` | 0..N | Export to host (resolved from job's final state; see [Execution Model](#execution-model)) |
 | `artifact` | `<from-job>` `source=<source>` `target=<target>` | 0..N | Import file from dependency |
 | `when` | `<CEL-expression>` | 0..1 | Conditional execution ([CEL](#when-conditions)); `output()` not allowed at step level |
+| `timeout` | `<duration>` | 0..1 | Step-level timeout (see [Timeouts](#timeouts)) |
+| `shell` | `<arg>...` | 0..1 | Override shell for this step (see [Shell](#shell)) |
 | `no-cache` | (none) | 0..1 | Disable caching for this step |
 
 </details>
@@ -188,6 +194,93 @@ publish "myapp:dev" push=false
 When multiple matrix variants publish to the same image reference, BuildKit assembles them into a multi-platform manifest list.
 
 To load published images into the local Docker daemon, use the `--with-docker-export` CLI flag on `cicada run` (see [usage](usage.md#export-to-docker)). Docker export is not supported for multi-platform publishes (the Docker exporter cannot produce manifest lists).
+
+---
+
+### Timeouts
+
+Timeouts can be set at the job level, the step level, or both.
+
+**Job-level timeout** cancels the entire job (including retries) after the specified duration:
+
+```kdl
+job "slow-build" {
+    image "golang:1.25"
+    timeout "10m"
+    step "compile" { run "make build" }
+}
+```
+
+**Step-level timeout** wraps individual `run` commands so they are killed if they exceed the duration:
+
+```kdl
+job "test" {
+    image "golang:1.25"
+    step "unit" {
+        timeout "5m"
+        run "go test -race ./..."
+    }
+}
+```
+
+When both are set, the step timeout applies per-command and the job timeout applies to the overall job. The duration format follows Go's `time.ParseDuration` syntax (e.g. `"30s"`, `"5m"`, `"1h30m"`).
+
+**Limitation:** Step-level timeouts use the `timeout` command (from GNU coreutils or BusyBox) inside the container. The container image must provide `timeout` in its `$PATH`. Most common base images (Alpine, Debian, Ubuntu, etc.) include it, but minimal images like `scratch` or `distroless` do not. If your image lacks `timeout`, use a job-level timeout instead, or install coreutils in an earlier step.
+
+---
+
+### Retry
+
+Configures automatic retry on job failure. The `retry` node accepts child nodes for `attempts`, `delay`, and `backoff`.
+
+```kdl
+job "flaky-integration" {
+    image "node:22"
+    retry {
+        attempts 3
+        delay "5s"
+        backoff "exponential"
+    }
+    step "test" { run "npm test" }
+}
+```
+
+| Child | Type | Default | Description |
+|-------|------|---------|-------------|
+| `attempts` | int | `1` | Number of retry attempts (in addition to the initial run) |
+| `delay` | duration | `0` | Wait time before the first retry |
+| `backoff` | string | `"none"` | Delay scaling: `"none"`, `"linear"`, or `"exponential"` |
+
+Backoff strategies scale the delay for subsequent retries:
+- **none**: constant delay on every retry
+- **linear**: delay * (attempt number), e.g. 5s, 10s, 15s
+- **exponential**: delay * 2^(attempt number), e.g. 5s, 10s, 20s
+
+Retry interacts with job-level timeout: the timeout covers all attempts combined, so a job with `timeout "1m"` and `retry { attempts 3 }` gets at most 1 minute total across all attempts.
+
+---
+
+### Shell
+
+Overrides the default shell (`/bin/sh -c`) used to execute `run` commands. Can be set in `defaults` (pipeline-wide), on a `job`, or on a `step`. Step-level overrides job-level, which overrides defaults.
+
+```kdl
+defaults {
+    shell "/bin/bash" "-e" "-o" "pipefail" "-c"
+}
+
+job "strict" {
+    image "ubuntu:24.04"
+    shell "/bin/bash" "-e" "-c"
+    step "build" { run "make build" }
+    step "test" {
+        shell "/bin/sh" "-c"
+        run "echo 'using plain sh for this step'"
+    }
+}
+```
+
+The last argument should typically be `-c` so the shell accepts a command string. All arguments are passed as the exec entry point; the `run` command string is appended as the final argument.
 
 ---
 
@@ -304,7 +397,7 @@ job "build" {
 }
 ```
 
-A bare step accepts the union of job and step fields. `run` goes to the inner step; everything else (`image`, `depends-on`, `mount`, `cache`, `env`, `export`, `artifact`, `platform`, `matrix`, `workdir`, `no-cache`, `publish`, `when`) goes to the job.
+A bare step accepts the union of job and step fields. `run` goes to the inner step; everything else (`image`, `depends-on`, `mount`, `cache`, `env`, `export`, `artifact`, `platform`, `matrix`, `workdir`, `no-cache`, `publish`, `when`, `timeout`, `retry`, `shell`) goes to the job.
 
 ---
 

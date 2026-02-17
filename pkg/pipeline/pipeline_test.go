@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -946,4 +947,153 @@ func TestValidateWhenCondition(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+func TestValidateRetry(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		retry   *Retry
+		wantErr error
+	}{
+		{
+			name:  "valid retry",
+			retry: &Retry{Attempts: 3, Delay: 5 * time.Second, Backoff: BackoffExponential},
+		},
+		{
+			name:  "nil retry is valid",
+			retry: nil,
+		},
+		{
+			name:    "zero attempts",
+			retry:   &Retry{Attempts: 0, Backoff: BackoffNone},
+			wantErr: ErrInvalidRetryAttempts,
+		},
+		{
+			name:    "negative attempts",
+			retry:   &Retry{Attempts: -1, Backoff: BackoffNone},
+			wantErr: ErrInvalidRetryAttempts,
+		},
+		{
+			name:    "invalid backoff strategy",
+			retry:   &Retry{Attempts: 1, Backoff: "quadratic"},
+			wantErr: ErrInvalidBackoff,
+		},
+		{
+			name:    "negative delay",
+			retry:   &Retry{Attempts: 1, Delay: -time.Second, Backoff: BackoffNone},
+			wantErr: ErrNegativeDelay,
+		},
+		{
+			name:  "linear backoff valid",
+			retry: &Retry{Attempts: 2, Delay: time.Second, Backoff: BackoffLinear},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := Pipeline{
+				Name: "test",
+				Jobs: []Job{
+					{
+						Name:  "build",
+						Image: "alpine:latest",
+						Steps: []Step{{Name: "build", Run: []string{"echo hi"}}},
+						Retry: tt.retry,
+					},
+				},
+			}
+			_, err := p.Validate()
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestValidateTimeout(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		timeout time.Duration
+		wantErr error
+	}{
+		{
+			name:    "valid timeout",
+			timeout: 10 * time.Minute,
+		},
+		{
+			name:    "zero timeout is valid",
+			timeout: 0,
+		},
+		{
+			name:    "negative timeout",
+			timeout: -1 * time.Second,
+			wantErr: ErrNegativeTimeout,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := Pipeline{
+				Name: "test",
+				Jobs: []Job{
+					{
+						Name:    "build",
+						Image:   "alpine:latest",
+						Steps:   []Step{{Name: "build", Run: []string{"echo hi"}}},
+						Timeout: tt.timeout,
+					},
+				},
+			}
+			_, err := p.Validate()
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestValidateStepTimeout(t *testing.T) {
+	t.Parallel()
+
+	p := Pipeline{
+		Name: "test",
+		Jobs: []Job{
+			{
+				Name:  "build",
+				Image: "alpine:latest",
+				Steps: []Step{{
+					Name:    "build",
+					Run:     []string{"echo hi"},
+					Timeout: -5 * time.Second,
+				}},
+			},
+		},
+	}
+	_, err := p.Validate()
+	require.ErrorIs(t, err, ErrNegativeTimeout)
+}
+
+func TestApplyDefaultsShell(t *testing.T) {
+	t.Parallel()
+
+	defaults := &Defaults{Shell: []string{"/bin/bash", "-c"}}
+	jobs := []Job{
+		{Name: "no-shell", Image: "alpine:latest"},
+		{Name: "has-shell", Image: "alpine:latest", Shell: []string{"/bin/zsh", "-c"}},
+	}
+
+	result := ApplyDefaults(jobs, defaults)
+
+	assert.Equal(t, []string{"/bin/bash", "-c"}, result[0].Shell, "job without shell inherits defaults")
+	assert.Equal(t, []string{"/bin/zsh", "-c"}, result[1].Shell, "job with shell keeps its own")
 }

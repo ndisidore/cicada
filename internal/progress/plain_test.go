@@ -124,7 +124,7 @@ func TestPlainAttach(t *testing.T) {
 
 			p := &Plain{}
 			require.NoError(t, p.Start(ctx))
-			err := p.Attach(ctx, "test-step", ch)
+			err := p.Attach(ctx, "test-step", ch, nil)
 			require.NoError(t, err)
 
 			p.Seal()

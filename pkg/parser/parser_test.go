@@ -6,6 +6,7 @@ import (
 	"path"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1739,4 +1740,384 @@ func TestParseInclude(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestParseRetryTimeoutShell(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		input   string
+		want    pipeline.Pipeline
+		wantErr error
+	}{
+		{
+			name: "job with full retry config",
+			input: `step "flaky" {
+				image "alpine:latest"
+				retry {
+					attempts 3
+					delay "5s"
+					backoff "exponential"
+				}
+				run "echo test"
+			}`,
+			want: pipeline.Pipeline{
+				Jobs: []pipeline.Job{
+					{
+						Name:  "flaky",
+						Image: "alpine:latest",
+						Retry: &pipeline.Retry{
+							Attempts: 3,
+							Delay:    5 * time.Second,
+							Backoff:  pipeline.BackoffExponential,
+						},
+						Steps: []pipeline.Step{{Name: "flaky", Run: []string{"echo test"}}},
+					},
+				},
+				TopoOrder: []int{0},
+			},
+		},
+		{
+			name: "job with empty retry uses defaults",
+			input: `step "flaky" {
+				image "alpine:latest"
+				retry {
+				}
+				run "echo test"
+			}`,
+			want: pipeline.Pipeline{
+				Jobs: []pipeline.Job{
+					{
+						Name:  "flaky",
+						Image: "alpine:latest",
+						Retry: &pipeline.Retry{
+							Attempts: 1,
+							Backoff:  pipeline.BackoffNone,
+						},
+						Steps: []pipeline.Step{{Name: "flaky", Run: []string{"echo test"}}},
+					},
+				},
+				TopoOrder: []int{0},
+			},
+		},
+		{
+			name: "job with timeout",
+			input: `step "slow" {
+				image "alpine:latest"
+				timeout "10m"
+				run "sleep 300"
+			}`,
+			want: pipeline.Pipeline{
+				Jobs: []pipeline.Job{
+					{
+						Name:    "slow",
+						Image:   "alpine:latest",
+						Timeout: 10 * time.Minute,
+						Steps:   []pipeline.Step{{Name: "slow", Run: []string{"sleep 300"}}},
+					},
+				},
+				TopoOrder: []int{0},
+			},
+		},
+		{
+			name: "step with timeout",
+			input: `job "build" {
+				image "alpine:latest"
+				step "compile" {
+					timeout "2m"
+					run "make build"
+				}
+			}`,
+			want: pipeline.Pipeline{
+				Jobs: []pipeline.Job{
+					{
+						Name:  "build",
+						Image: "alpine:latest",
+						Steps: []pipeline.Step{{
+							Name:    "compile",
+							Run:     []string{"make build"},
+							Timeout: 2 * time.Minute,
+						}},
+					},
+				},
+				TopoOrder: []int{0},
+			},
+		},
+		{
+			name: "job with shell",
+			input: `step "bash" {
+				image "alpine:latest"
+				shell "/bin/bash" "-c"
+				run "echo hello"
+			}`,
+			want: pipeline.Pipeline{
+				Jobs: []pipeline.Job{
+					{
+						Name:  "bash",
+						Image: "alpine:latest",
+						Shell: []string{"/bin/bash", "-c"},
+						Steps: []pipeline.Step{{Name: "bash", Run: []string{"echo hello"}}},
+					},
+				},
+				TopoOrder: []int{0},
+			},
+		},
+		{
+			name: "step with shell override",
+			input: `job "build" {
+				image "alpine:latest"
+				shell "/bin/bash" "-c"
+				step "zsh-step" {
+					shell "/bin/zsh" "-c"
+					run "echo zsh"
+				}
+			}`,
+			want: pipeline.Pipeline{
+				Jobs: []pipeline.Job{
+					{
+						Name:  "build",
+						Image: "alpine:latest",
+						Shell: []string{"/bin/bash", "-c"},
+						Steps: []pipeline.Step{{
+							Name:  "zsh-step",
+							Run:   []string{"echo zsh"},
+							Shell: []string{"/bin/zsh", "-c"},
+						}},
+					},
+				},
+				TopoOrder: []int{0},
+			},
+		},
+		{
+			name: "defaults with shell",
+			input: `defaults {
+				image "alpine:latest"
+				shell "/bin/bash" "-e" "-o" "pipefail" "-c"
+			}
+			step "test" {
+				run "echo test"
+			}`,
+			want: pipeline.Pipeline{
+				Jobs: []pipeline.Job{
+					{
+						Name:  "test",
+						Image: "alpine:latest",
+						Shell: []string{"/bin/bash", "-e", "-o", "pipefail", "-c"},
+						Steps: []pipeline.Step{{Name: "test", Run: []string{"echo test"}}},
+					},
+				},
+				Defaults: &pipeline.Defaults{
+					Image: "alpine:latest",
+					Shell: []string{"/bin/bash", "-e", "-o", "pipefail", "-c"},
+				},
+				TopoOrder: []int{0},
+			},
+		},
+		{
+			name: "duplicate retry",
+			input: `step "a" {
+				image "alpine:latest"
+				retry {}
+				retry {}
+				run "echo hi"
+			}`,
+			wantErr: ErrDuplicateField,
+		},
+		{
+			name: "duplicate timeout",
+			input: `step "a" {
+				image "alpine:latest"
+				timeout "1m"
+				timeout "2m"
+				run "echo hi"
+			}`,
+			wantErr: ErrDuplicateField,
+		},
+		{
+			name: "duplicate shell",
+			input: `step "a" {
+				image "alpine:latest"
+				shell "/bin/bash" "-c"
+				shell "/bin/zsh" "-c"
+				run "echo hi"
+			}`,
+			wantErr: ErrDuplicateField,
+		},
+		{
+			name: "duplicate step timeout",
+			input: `job "a" {
+				image "alpine:latest"
+				step "s" {
+					timeout "1m"
+					timeout "2m"
+					run "echo hi"
+				}
+			}`,
+			wantErr: ErrDuplicateField,
+		},
+		{
+			name: "duplicate step shell",
+			input: `job "a" {
+				image "alpine:latest"
+				step "s" {
+					shell "/bin/bash" "-c"
+					shell "/bin/zsh" "-c"
+					run "echo hi"
+				}
+			}`,
+			wantErr: ErrDuplicateField,
+		},
+		{
+			name: "shell with no args",
+			input: `step "a" {
+				image "alpine:latest"
+				shell
+				run "echo hi"
+			}`,
+			wantErr: pipeline.ErrEmptyShell,
+		},
+		{
+			name: "multi-line run with KDL raw string",
+			input: `step "multi" {
+				image "alpine:latest"
+				run "echo line1\necho line2"
+			}`,
+			want: pipeline.Pipeline{
+				Jobs: []pipeline.Job{
+					{
+						Name:  "multi",
+						Image: "alpine:latest",
+						Steps: []pipeline.Step{{
+							Name: "multi",
+							Run:  []string{"echo line1\necho line2"},
+						}},
+					},
+				},
+				TopoOrder: []int{0},
+			},
+		},
+		{
+			name: "retry with unknown child",
+			input: `step "a" {
+				image "alpine:latest"
+				retry {
+					jitter "100ms"
+				}
+				run "echo hi"
+			}`,
+			wantErr: ErrUnknownNode,
+		},
+		{
+			name: "duplicate defaults shell",
+			input: `defaults {
+				image "alpine:latest"
+				shell "/bin/bash" "-c"
+				shell "/bin/zsh" "-c"
+			}
+			step "a" {
+				run "echo hi"
+			}`,
+			wantErr: ErrDuplicateField,
+		},
+		{
+			name: "retry with invalid backoff",
+			input: `step "a" {
+				image "alpine:latest"
+				retry {
+					backoff "quadratic"
+				}
+				run "echo hi"
+			}`,
+			wantErr: pipeline.ErrInvalidBackoff,
+		},
+		{
+			name: "retry with zero attempts",
+			input: `step "a" {
+				image "alpine:latest"
+				retry {
+					attempts 0
+				}
+				run "echo hi"
+			}`,
+			wantErr: pipeline.ErrInvalidRetryAttempts,
+		},
+		{
+			name: "retry with negative attempts",
+			input: `step "a" {
+				image "alpine:latest"
+				retry {
+					attempts -1
+				}
+				run "echo hi"
+			}`,
+			wantErr: pipeline.ErrInvalidRetryAttempts,
+		},
+		{
+			name: "retry with duplicate attempts",
+			input: `step "a" {
+				image "alpine:latest"
+				retry {
+					attempts 2
+					attempts 3
+				}
+				run "echo hi"
+			}`,
+			wantErr: ErrDuplicateField,
+		},
+		{
+			name: "retry with duplicate delay",
+			input: `step "a" {
+				image "alpine:latest"
+				retry {
+					delay "1s"
+					delay "2s"
+				}
+				run "echo hi"
+			}`,
+			wantErr: ErrDuplicateField,
+		},
+		{
+			name: "retry with duplicate backoff",
+			input: `step "a" {
+				image "alpine:latest"
+				retry {
+					backoff "linear"
+					backoff "exponential"
+				}
+				run "echo hi"
+			}`,
+			wantErr: ErrDuplicateField,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			p := stringParser()
+			got, err := p.ParseString(tt.input)
+
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+
+	t.Run("invalid timeout duration", func(t *testing.T) {
+		t.Parallel()
+
+		p := stringParser()
+		_, err := p.ParseString(`step "a" {
+			image "alpine:latest"
+			timeout "not-a-duration"
+			run "echo hi"
+		}`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid duration")
+	})
 }

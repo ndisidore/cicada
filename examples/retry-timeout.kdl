@@ -1,0 +1,49 @@
+// Demonstrates retry and timeout features.
+//
+// Job "baseline" runs a simple passing step to show normal output.
+//
+// Job "step-timeout" has a step that sleeps longer than its timeout,
+// triggering exit code 124 from the container's `timeout` command.
+// The TUI renders this with a dedicated timeout icon.
+//
+// Job "job-retry" always fails (exit 1) but retries up to 3 attempts
+// with linear backoff. The TUI shows retry annotations on the header.
+//
+// Job "job-timeout" has a 5s job-level timeout wrapping a 30s sleep,
+// so the Go context cancels the entire job. The TUI shows a timeout
+// annotation on the job header.
+
+job "baseline" {
+    image "alpine:latest"
+    step "greet" {
+        run "echo 'Hello from Cicada!'"
+    }
+}
+
+job "step-timeout" {
+    image "alpine:latest"
+    step "slow" {
+        timeout "3s"
+        run "echo 'sleeping too long...' && sleep 10"
+    }
+}
+
+job "job-retry" {
+    image "alpine:latest"
+    retry {
+        attempts 3
+        delay "1s"
+        backoff "linear"
+    }
+    step "flaky" {
+        run "echo 'attempt will fail' && exit 1"
+    }
+}
+
+job "job-timeout" {
+    image "alpine:latest"
+    timeout "5s"
+    step "forever" {
+        run "echo 'sleeping forever...' && sleep 30"
+    }
+}

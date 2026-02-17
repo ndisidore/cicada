@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/moby/buildkit/client"
@@ -53,7 +54,7 @@ func (t *TUI) Start(ctx context.Context) error {
 // Attach registers a job's status channel and spawns a consumer goroutine.
 // Start must be called before Attach. Concurrent Attach calls are safe, but
 // Start and Attach must not race (Start must return before any Attach call).
-func (t *TUI) Attach(ctx context.Context, jobName string, ch <-chan *client.SolveStatus) error {
+func (t *TUI) Attach(ctx context.Context, jobName string, ch <-chan *client.SolveStatus, stepTimeouts map[string]time.Duration) error {
 	if t.p == nil {
 		return ErrNotStarted
 	}
@@ -67,7 +68,7 @@ func (t *TUI) Attach(ctx context.Context, jobName string, ch <-chan *client.Solv
 			t.p.Send(allDoneMsg{})
 		}()
 	})
-	t.p.Send(jobAddedMsg{name: jobName})
+	t.p.Send(jobAddedMsg{name: jobName, stepTimeouts: stepTimeouts})
 
 	t.wg.Go(func() {
 		defer func() { t.p.Send(jobDoneMsg{name: jobName}) }()
@@ -105,6 +106,20 @@ func (t *TUI) Skip(_ context.Context, jobName string) {
 func (t *TUI) SkipStep(_ context.Context, jobName, stepName string) {
 	if t.p != nil {
 		t.p.Send(stepSkippedMsg{jobName: jobName, stepName: stepName})
+	}
+}
+
+// Retry reports that a job is being retried after a failure.
+func (t *TUI) Retry(_ context.Context, jobName string, attempt, maxAttempts int, _ error) {
+	if t.p != nil {
+		t.p.Send(jobRetryMsg{name: jobName, attempt: attempt, maxAttempts: maxAttempts})
+	}
+}
+
+// Timeout reports that a job exceeded its configured timeout.
+func (t *TUI) Timeout(_ context.Context, jobName string, timeout time.Duration) {
+	if t.p != nil {
+		t.p.Send(jobTimeoutMsg{name: jobName, timeout: timeout})
 	}
 }
 

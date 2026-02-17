@@ -46,7 +46,7 @@ func pullImage(ctx context.Context, c Solver, ref string, display progress.Displ
 
 	ch := make(chan *client.SolveStatus)
 
-	if err := display.Attach(ctx, "pull "+ref, ch); err != nil {
+	if err := display.Attach(ctx, "pull "+ref, ch, nil); err != nil {
 		close(ch)
 		return fmt.Errorf("attaching pull display: %w", err)
 	}

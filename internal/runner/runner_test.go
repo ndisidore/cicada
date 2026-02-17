@@ -3,6 +3,8 @@ package runner
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,6 +14,7 @@ import (
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb"
 	gateway "github.com/moby/buildkit/frontend/gateway/client"
+	gatewaypb "github.com/moby/buildkit/frontend/gateway/pb"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -56,16 +59,18 @@ func (m *MockCondition) EvaluateDeferred(ctx conditional.Context, depOutputs map
 // fakeDisplay implements progress.Display for testing.
 type fakeDisplay struct {
 	wg         sync.WaitGroup
-	attachFn   func(ctx context.Context, name string, ch <-chan *client.SolveStatus) error
+	attachFn   func(ctx context.Context, name string, ch <-chan *client.SolveStatus, stepTimeouts map[string]time.Duration) error
 	skipFn     func(ctx context.Context, jobName string)
 	skipStepFn func(ctx context.Context, jobName, stepName string)
+	retryFn    func(ctx context.Context, jobName string, attempt, maxAttempts int, err error)
+	timeoutFn  func(ctx context.Context, jobName string, timeout time.Duration)
 }
 
 func (*fakeDisplay) Start(_ context.Context) error { return nil }
 
-func (f *fakeDisplay) Attach(ctx context.Context, name string, ch <-chan *client.SolveStatus) error {
+func (f *fakeDisplay) Attach(ctx context.Context, name string, ch <-chan *client.SolveStatus, stepTimeouts map[string]time.Duration) error {
 	if f.attachFn != nil {
-		return f.attachFn(ctx, name, ch)
+		return f.attachFn(ctx, name, ch, stepTimeouts)
 	}
 	f.wg.Go(func() {
 		//revive:disable-next-line:empty-block // drain
@@ -84,6 +89,18 @@ func (f *fakeDisplay) Skip(ctx context.Context, jobName string) {
 func (f *fakeDisplay) SkipStep(ctx context.Context, jobName, stepName string) {
 	if f.skipStepFn != nil {
 		f.skipStepFn(ctx, jobName, stepName)
+	}
+}
+
+func (f *fakeDisplay) Retry(ctx context.Context, jobName string, attempt, maxAttempts int, err error) {
+	if f.retryFn != nil {
+		f.retryFn(ctx, jobName, attempt, maxAttempts, err)
+	}
+}
+
+func (f *fakeDisplay) Timeout(ctx context.Context, jobName string, timeout time.Duration) {
+	if f.timeoutFn != nil {
+		f.timeoutFn(ctx, jobName, timeout)
 	}
 }
 
@@ -302,7 +319,7 @@ func TestRun_ordering(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 		display := &fakeDisplay{}
-		display.attachFn = func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
+		display.attachFn = func(_ context.Context, name string, ch <-chan *client.SolveStatus, _ map[string]time.Duration) error {
 			mu.Lock()
 			order = append(order, name)
 			mu.Unlock()
@@ -345,7 +362,7 @@ func TestRun_ordering(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 		display := &fakeDisplay{}
-		display.attachFn = func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
+		display.attachFn = func(_ context.Context, name string, ch <-chan *client.SolveStatus, _ map[string]time.Duration) error {
 			mu.Lock()
 			switch name {
 			case "b", "c":
@@ -480,7 +497,7 @@ func TestRun_errorPropagation(t *testing.T) {
 		var cExecuted atomic.Bool
 
 		display := &fakeDisplay{}
-		display.attachFn = func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
+		display.attachFn = func(_ context.Context, name string, ch <-chan *client.SolveStatus, _ map[string]time.Duration) error {
 			if name == "c" {
 				cExecuted.Store(true)
 			}
@@ -525,7 +542,7 @@ func TestRun_errorPropagation(t *testing.T) {
 			return nil, errors.New("job a failed")
 		}}
 		display := &fakeDisplay{}
-		display.attachFn = func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
+		display.attachFn = func(_ context.Context, name string, ch <-chan *client.SolveStatus, _ map[string]time.Duration) error {
 			if name == "c" {
 				cSolved.Store(true)
 			}
@@ -588,7 +605,7 @@ func TestRun_errorPropagation(t *testing.T) {
 			return nil, errors.New("job a failed")
 		}}
 		display := &fakeDisplay{}
-		display.attachFn = func(_ context.Context, name string, ch <-chan *client.SolveStatus) error {
+		display.attachFn = func(_ context.Context, name string, ch <-chan *client.SolveStatus, _ map[string]time.Duration) error {
 			if name == "b" {
 				bSolved.Store(true)
 			}
@@ -631,7 +648,7 @@ func TestRun_display(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 		display := &fakeDisplay{}
-		display.attachFn = func(_ context.Context, _ string, ch <-chan *client.SolveStatus) error {
+		display.attachFn = func(_ context.Context, _ string, ch <-chan *client.SolveStatus, _ map[string]time.Duration) error {
 			display.wg.Go(func() {
 				for range ch {
 					received.Add(1)
@@ -1640,4 +1657,514 @@ func TestRunNodeOutputExtractionFailure(t *testing.T) {
 	require.ErrorIs(t, err, extractionErr)
 	require.Contains(t, err.Error(), "output extraction")
 	require.Error(t, node.err)
+}
+
+func TestRunNode_jobTimeout(t *testing.T) {
+	t.Parallel()
+
+	t.Run("timeout fires on slow solver", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			def, err := llb.Scratch().Marshal(t.Context())
+			require.NoError(t, err)
+
+			solver := &fakeSolver{solveFn: func(ctx context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+				defer close(ch)
+				time.Sleep(10 * time.Second)
+				return nil, ctx.Err()
+			}}
+
+			err = Run(t.Context(), RunInput{
+				Solver: solver,
+				Jobs: []Job{{
+					Name:       "slow",
+					Definition: def,
+					Timeout:    1 * time.Second,
+				}},
+				Display: &fakeDisplay{},
+			})
+			require.Error(t, err)
+			assert.ErrorIs(t, err, context.DeadlineExceeded)
+		})
+	})
+
+	t.Run("no timeout when job completes quickly", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			def, err := llb.Scratch().Marshal(t.Context())
+			require.NoError(t, err)
+
+			solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+				close(ch)
+				return &client.SolveResponse{}, nil
+			}}
+
+			err = Run(t.Context(), RunInput{
+				Solver: solver,
+				Jobs: []Job{{
+					Name:       "fast",
+					Definition: def,
+					Timeout:    5 * time.Second,
+				}},
+				Display: &fakeDisplay{},
+			})
+			require.NoError(t, err)
+		})
+	})
+}
+
+func TestRunNode_retry(t *testing.T) {
+	t.Parallel()
+
+	t.Run("succeeds on third attempt", func(t *testing.T) {
+		t.Parallel()
+
+		def, err := llb.Scratch().Marshal(context.Background())
+		require.NoError(t, err)
+
+		var attempts atomic.Int64
+		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			defer close(ch)
+			n := attempts.Add(1)
+			if n < 3 {
+				return nil, errors.New("transient failure")
+			}
+			return &client.SolveResponse{}, nil
+		}}
+
+		err = Run(context.Background(), RunInput{
+			Solver: solver,
+			Jobs: []Job{{
+				Name:       "flaky",
+				Definition: def,
+				Retry:      &pipeline.Retry{Attempts: 3, Backoff: pipeline.BackoffNone},
+			}},
+			Display: &fakeDisplay{},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(3), attempts.Load())
+	})
+
+	t.Run("exhausted retries return last error", func(t *testing.T) {
+		t.Parallel()
+
+		def, err := llb.Scratch().Marshal(context.Background())
+		require.NoError(t, err)
+
+		solveErr := errors.New("permanent failure")
+		var attempts atomic.Int64
+		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			defer close(ch)
+			attempts.Add(1)
+			return nil, solveErr
+		}}
+
+		err = Run(context.Background(), RunInput{
+			Solver: solver,
+			Jobs: []Job{{
+				Name:       "always-fails",
+				Definition: def,
+				Retry:      &pipeline.Retry{Attempts: 2, Backoff: pipeline.BackoffNone},
+			}},
+			Display: &fakeDisplay{},
+		})
+		require.ErrorIs(t, err, solveErr)
+		assert.Equal(t, int64(3), attempts.Load(), "1 initial + 2 retries = 3 attempts")
+	})
+
+	t.Run("retry with delay and backoff", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			def, err := llb.Scratch().Marshal(t.Context())
+			require.NoError(t, err)
+
+			var attempts atomic.Int64
+			solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+				defer close(ch)
+				n := attempts.Add(1)
+				if n < 3 {
+					return nil, errors.New("transient")
+				}
+				return &client.SolveResponse{}, nil
+			}}
+
+			err = Run(t.Context(), RunInput{
+				Solver: solver,
+				Jobs: []Job{{
+					Name:       "backoff",
+					Definition: def,
+					Retry: &pipeline.Retry{
+						Attempts: 3,
+						Delay:    100 * time.Millisecond,
+						Backoff:  pipeline.BackoffExponential,
+					},
+				}},
+				Display: &fakeDisplay{},
+			})
+			require.NoError(t, err)
+			assert.Equal(t, int64(3), attempts.Load())
+		})
+	})
+
+	t.Run("timeout cancels retry", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			def, err := llb.Scratch().Marshal(t.Context())
+			require.NoError(t, err)
+
+			solver := &fakeSolver{solveFn: func(ctx context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+				defer close(ch)
+				return nil, errors.New("always fails")
+			}}
+
+			err = Run(t.Context(), RunInput{
+				Solver: solver,
+				Jobs: []Job{{
+					Name:       "timeout-retry",
+					Definition: def,
+					Timeout:    500 * time.Millisecond,
+					Retry: &pipeline.Retry{
+						Attempts: 100,
+						Delay:    200 * time.Millisecond,
+						Backoff:  pipeline.BackoffNone,
+					},
+				}},
+				Display: &fakeDisplay{},
+			})
+			require.Error(t, err)
+		})
+	})
+}
+
+func TestRetryDelay(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		retry   *pipeline.Retry
+		attempt int
+		want    time.Duration
+	}{
+		{
+			name:    "none backoff returns base delay",
+			retry:   &pipeline.Retry{Delay: time.Second, Backoff: pipeline.BackoffNone},
+			attempt: 3,
+			want:    time.Second,
+		},
+		{
+			name:    "linear backoff",
+			retry:   &pipeline.Retry{Delay: time.Second, Backoff: pipeline.BackoffLinear},
+			attempt: 2,
+			want:    3 * time.Second,
+		},
+		{
+			name:    "exponential backoff attempt 0",
+			retry:   &pipeline.Retry{Delay: time.Second, Backoff: pipeline.BackoffExponential},
+			attempt: 0,
+			want:    time.Second,
+		},
+		{
+			name:    "exponential backoff attempt 3",
+			retry:   &pipeline.Retry{Delay: time.Second, Backoff: pipeline.BackoffExponential},
+			attempt: 3,
+			want:    8 * time.Second,
+		},
+		{
+			name:    "exponential overflow capped at attempt 63",
+			retry:   &pipeline.Retry{Delay: time.Hour, Backoff: pipeline.BackoffExponential},
+			attempt: 63,
+			want:    _maxDelay,
+		},
+		{
+			name:    "linear overflow capped",
+			retry:   &pipeline.Retry{Delay: time.Duration(math.MaxInt64 / 2), Backoff: pipeline.BackoffLinear},
+			attempt: 2,
+			want:    _maxDelay,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := retryDelay(tt.retry, tt.attempt)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestJobTimeoutError(t *testing.T) {
+	t.Parallel()
+
+	jte := &JobTimeoutError{JobName: "deploy", Timeout: 30 * time.Second}
+
+	t.Run("errors.Is matches ErrJobTimeout", func(t *testing.T) {
+		t.Parallel()
+		assert.ErrorIs(t, jte, ErrJobTimeout)
+	})
+
+	t.Run("errors.As extracts fields", func(t *testing.T) {
+		t.Parallel()
+		var target *JobTimeoutError
+		require.ErrorAs(t, jte, &target)
+		assert.Equal(t, "deploy", target.JobName)
+		assert.Equal(t, 30*time.Second, target.Timeout)
+	})
+
+	t.Run("Error message format", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, `job "deploy" exceeded 30s timeout`, jte.Error())
+	})
+}
+
+func TestStepTimeoutError(t *testing.T) {
+	t.Parallel()
+
+	ste := &StepTimeoutError{JobName: "build", StepName: "compile", Timeout: 5 * time.Minute}
+
+	t.Run("errors.Is matches ErrStepTimeout", func(t *testing.T) {
+		t.Parallel()
+		assert.ErrorIs(t, ste, ErrStepTimeout)
+	})
+
+	t.Run("errors.As extracts fields", func(t *testing.T) {
+		t.Parallel()
+		var target *StepTimeoutError
+		require.ErrorAs(t, ste, &target)
+		assert.Equal(t, "build", target.JobName)
+		assert.Equal(t, "compile", target.StepName)
+		assert.Equal(t, 5*time.Minute, target.Timeout)
+	})
+
+	t.Run("Error message format", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, `step "compile" in job "build" exceeded 5m0s timeout`, ste.Error())
+	})
+}
+
+func TestRunNode_jobTimeout_sentinelError(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		def, err := llb.Scratch().Marshal(t.Context())
+		require.NoError(t, err)
+
+		// Capture the context.Cause from inside the solver where solveCtx
+		// is the context with the timeout cause set.
+		var capturedCause atomic.Pointer[error]
+		solver := &fakeSolver{solveFn: func(ctx context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			defer close(ch)
+			time.Sleep(10 * time.Second)
+			cause := context.Cause(ctx)
+			capturedCause.Store(&cause)
+			return nil, ctx.Err()
+		}}
+
+		node := &dagNode{
+			job: Job{
+				Name:       "slow-job",
+				Definition: def,
+				Timeout:    1 * time.Second,
+			},
+			done: make(chan struct{}),
+		}
+
+		nodes := map[string]*dagNode{"slow-job": node}
+
+		cfg := runConfig{
+			solver:  solver,
+			display: &fakeDisplay{},
+			nodes:   nodes,
+			sem:     semaphore.NewWeighted(1),
+		}
+
+		err = runNode(t.Context(), node, cfg)
+		require.Error(t, err)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+
+		// The context cause carries the structured JobTimeoutError.
+		cause := capturedCause.Load()
+		require.NotNil(t, cause)
+		require.ErrorIs(t, *cause, ErrJobTimeout)
+
+		var jte *JobTimeoutError
+		require.ErrorAs(t, *cause, &jte)
+		assert.Equal(t, "slow-job", jte.JobName)
+		assert.Equal(t, 1*time.Second, jte.Timeout)
+	})
+}
+
+func TestRunNode_retry_displaysRetry(t *testing.T) {
+	t.Parallel()
+
+	def, err := llb.Scratch().Marshal(context.Background())
+	require.NoError(t, err)
+
+	var solveAttempts atomic.Int64
+	solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+		defer close(ch)
+		n := solveAttempts.Add(1)
+		if n < 3 {
+			return nil, errors.New("transient")
+		}
+		return &client.SolveResponse{}, nil
+	}}
+
+	type retryCall struct {
+		jobName     string
+		attempt     int
+		maxAttempts int
+	}
+	var mu sync.Mutex
+	var retryCalls []retryCall
+
+	display := &fakeDisplay{
+		retryFn: func(_ context.Context, jobName string, attempt, maxAttempts int, _ error) {
+			mu.Lock()
+			retryCalls = append(retryCalls, retryCall{jobName, attempt, maxAttempts})
+			mu.Unlock()
+		},
+	}
+
+	node := &dagNode{
+		job: Job{
+			Name:       "flaky",
+			Definition: def,
+			Retry:      &pipeline.Retry{Attempts: 3, Backoff: pipeline.BackoffNone},
+		},
+		done: make(chan struct{}),
+	}
+
+	nodes := map[string]*dagNode{"flaky": node}
+
+	cfg := runConfig{
+		solver:  solver,
+		display: display,
+		nodes:   nodes,
+		sem:     semaphore.NewWeighted(1),
+	}
+
+	err = runNode(context.Background(), node, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), solveAttempts.Load())
+
+	require.Len(t, retryCalls, 2, "retryFn called before each retry attempt")
+	// First retry: attempt 2 of 4 (1 initial + 3 retries).
+	assert.Equal(t, "flaky", retryCalls[0].jobName)
+	assert.Equal(t, 2, retryCalls[0].attempt)
+	assert.Equal(t, 4, retryCalls[0].maxAttempts)
+	// Second retry: attempt 3 of 4.
+	assert.Equal(t, "flaky", retryCalls[1].jobName)
+	assert.Equal(t, 3, retryCalls[1].attempt)
+	assert.Equal(t, 4, retryCalls[1].maxAttempts)
+}
+
+func TestRunNode_jobTimeout_displaysTimeout(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		def, err := llb.Scratch().Marshal(t.Context())
+		require.NoError(t, err)
+
+		solver := &fakeSolver{solveFn: func(ctx context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			defer close(ch)
+			time.Sleep(10 * time.Second)
+			return nil, ctx.Err()
+		}}
+
+		type timeoutCall struct {
+			jobName string
+			timeout time.Duration
+		}
+		var timeoutCalls []timeoutCall
+
+		display := &fakeDisplay{
+			timeoutFn: func(_ context.Context, jobName string, timeout time.Duration) {
+				timeoutCalls = append(timeoutCalls, timeoutCall{jobName, timeout})
+			},
+		}
+
+		node := &dagNode{
+			job: Job{
+				Name:       "slow-job",
+				Definition: def,
+				Timeout:    1 * time.Second,
+			},
+			done: make(chan struct{}),
+		}
+
+		nodes := map[string]*dagNode{"slow-job": node}
+
+		cfg := runConfig{
+			solver:  solver,
+			display: display,
+			nodes:   nodes,
+			sem:     semaphore.NewWeighted(1),
+		}
+
+		err = runNode(t.Context(), node, cfg)
+		require.Error(t, err)
+
+		require.Len(t, timeoutCalls, 1)
+		assert.Equal(t, "slow-job", timeoutCalls[0].jobName)
+		assert.Equal(t, 1*time.Second, timeoutCalls[0].timeout)
+	})
+}
+
+func TestCleanTimeoutError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		err         error
+		want        string
+		wantErr     error
+		wantExitErr bool // original ExitError should be chained
+	}{
+		{
+			name:        "exit code 124 detected as timeout",
+			err:         &gatewaypb.ExitError{ExitCode: 124, Err: errors.New("process failed")},
+			want:        "step timed out: step timeout: process failed",
+			wantErr:     ErrStepTimeout,
+			wantExitErr: true,
+		},
+		{
+			name:        "wrapped ExitError 124 found through chain",
+			err:         fmt.Errorf("solving job: %w", &gatewaypb.ExitError{ExitCode: 124, Err: errors.New("process failed")}),
+			want:        "step timed out: step timeout: process failed",
+			wantErr:     ErrStepTimeout,
+			wantExitErr: true,
+		},
+		{
+			name:        "exit code 137 detected as timeout (BusyBox timeout -s KILL)",
+			err:         &gatewaypb.ExitError{ExitCode: 137, Err: errors.New("process failed")},
+			want:        "step timed out: step timeout: process failed",
+			wantErr:     ErrStepTimeout,
+			wantExitErr: true,
+		},
+		{
+			name: "non-timeout exit code passes through",
+			err:  &gatewaypb.ExitError{ExitCode: 1, Err: errors.New("process failed")},
+			want: "process failed",
+		},
+		{
+			name: "non-ExitError passes through",
+			err:  errors.New("connection refused"),
+			want: "connection refused",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := cleanTimeoutError(tt.err)
+
+			assert.Equal(t, tt.want, got.Error())
+			if tt.wantErr != nil {
+				require.ErrorIs(t, got, tt.wantErr)
+			}
+			if tt.wantExitErr {
+				var exitErr *gatewaypb.ExitError
+				assert.ErrorAs(t, got, &exitErr)
+			}
+		})
+	}
 }

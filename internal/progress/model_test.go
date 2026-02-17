@@ -19,6 +19,16 @@ func TestMultiModelUpdate(t *testing.T) {
 	now := time.Now()
 	completed := now.Add(300 * time.Millisecond)
 
+	type wantRetry struct {
+		jobName     string
+		attempt     int
+		maxAttempts int
+	}
+	type wantTimeout struct {
+		jobName string
+		timeout time.Duration
+	}
+
 	tests := []struct {
 		name             string
 		msgs             []tea.Msg
@@ -28,6 +38,8 @@ func TestMultiModelUpdate(t *testing.T) {
 		wantSkipped      map[string]bool
 		wantSkippedSteps map[string][]string
 		wantStatus       map[string]map[string]stepStatus
+		wantRetry        *wantRetry
+		wantTimedOut     *wantTimeout
 	}{
 		{
 			name: "job added then status",
@@ -122,6 +134,108 @@ func TestMultiModelUpdate(t *testing.T) {
 			wantWidth: 120,
 		},
 		{
+			name: "job retry sets attempt fields",
+			msgs: []tea.Msg{
+				jobAddedMsg{name: "flaky"},
+				jobRetryMsg{name: "flaky", attempt: 2, maxAttempts: 4},
+			},
+			wantJobs:  1,
+			wantRetry: &wantRetry{jobName: "flaky", attempt: 2, maxAttempts: 4},
+		},
+		{
+			name: "job timeout sets timedOut",
+			msgs: []tea.Msg{
+				jobAddedMsg{name: "slow"},
+				jobTimeoutMsg{name: "slow", timeout: 30 * time.Second},
+			},
+			wantTimedOut: &wantTimeout{jobName: "slow", timeout: 30 * time.Second},
+			wantJobs:     1,
+		},
+		{
+			name: "vertex with step timeout and exit code 124",
+			msgs: []tea.Msg{
+				jobAddedMsg{name: "build", stepTimeouts: map[string]time.Duration{"build/step/cmd": 2 * time.Minute}},
+				jobStatusMsg{name: "build", status: &client.SolveStatus{
+					Vertexes: []*client.Vertex{
+						{Digest: digest.FromString("a"), Name: "build/step/cmd", Error: "process did not complete successfully: exit code: 124"},
+					},
+				}},
+			},
+			wantJobs:   1,
+			wantStatus: map[string]map[string]stepStatus{"build": {"build/step/cmd": statusTimeout}},
+		},
+		{
+			name: "vertex with step timeout but different exit code",
+			msgs: []tea.Msg{
+				jobAddedMsg{name: "build", stepTimeouts: map[string]time.Duration{"build/step/cmd": 2 * time.Minute}},
+				jobStatusMsg{name: "build", status: &client.SolveStatus{
+					Vertexes: []*client.Vertex{
+						{Digest: digest.FromString("a"), Name: "build/step/cmd", Error: "exit code: 1"},
+					},
+				}},
+			},
+			wantJobs:   1,
+			wantStatus: map[string]map[string]stepStatus{"build": {"build/step/cmd": statusError}},
+		},
+		{
+			name: "running step with step timeout marked as timeout on timed-out job done",
+			msgs: []tea.Msg{
+				jobAddedMsg{name: "j", stepTimeouts: map[string]time.Duration{"j/step/cmd": 3 * time.Second}},
+				jobStatusMsg{name: "j", status: &client.SolveStatus{
+					Vertexes: []*client.Vertex{
+						{Digest: digest.FromString("step1"), Name: "j/step/cmd", Started: &now},
+					},
+				}},
+				jobTimeoutMsg{name: "j", timeout: 3 * time.Second},
+				jobDoneMsg{name: "j"},
+			},
+			wantJobs:   1,
+			wantStatus: map[string]map[string]stepStatus{"j": {"j/step/cmd": statusTimeout}},
+		},
+		{
+			name: "running step with step timeout stays running on non-timed-out job done",
+			msgs: []tea.Msg{
+				jobAddedMsg{name: "j", stepTimeouts: map[string]time.Duration{"j/step/cmd": 3 * time.Second}},
+				jobStatusMsg{name: "j", status: &client.SolveStatus{
+					Vertexes: []*client.Vertex{
+						{Digest: digest.FromString("step1"), Name: "j/step/cmd", Started: &now},
+					},
+				}},
+				jobDoneMsg{name: "j"},
+			},
+			wantJobs:   1,
+			wantStatus: map[string]map[string]stepStatus{"j": {"j/step/cmd": statusRunning}},
+		},
+		{
+			name: "running step without timeout annotation marked as timeout on timed-out job done",
+			msgs: []tea.Msg{
+				jobAddedMsg{name: "j"},
+				jobStatusMsg{name: "j", status: &client.SolveStatus{
+					Vertexes: []*client.Vertex{
+						{Digest: digest.FromString("step1"), Name: "j/step/cmd", Started: &now},
+					},
+				}},
+				jobTimeoutMsg{name: "j", timeout: 5 * time.Second},
+				jobDoneMsg{name: "j"},
+			},
+			wantJobs:   1,
+			wantStatus: map[string]map[string]stepStatus{"j": {"j/step/cmd": statusTimeout}},
+		},
+		{
+			name: "running step without timeout stays running on non-timed-out job done",
+			msgs: []tea.Msg{
+				jobAddedMsg{name: "j"},
+				jobStatusMsg{name: "j", status: &client.SolveStatus{
+					Vertexes: []*client.Vertex{
+						{Digest: digest.FromString("step1"), Name: "j/step/cmd", Started: &now},
+					},
+				}},
+				jobDoneMsg{name: "j"},
+			},
+			wantJobs:   1,
+			wantStatus: map[string]map[string]stepStatus{"j": {"j/step/cmd": statusRunning}},
+		},
+		{
 			name: "multiple jobs",
 			msgs: []tea.Msg{
 				jobAddedMsg{name: "lint"},
@@ -190,6 +304,19 @@ func TestMultiModelUpdate(t *testing.T) {
 				js, ok := rm.jobs[jobName]
 				require.True(t, ok, "job %q not found", jobName)
 				assert.Equal(t, wantSteps, js.skippedSteps, "skippedSteps mismatch for %q", jobName)
+			}
+
+			if tt.wantRetry != nil {
+				js, ok := rm.jobs[tt.wantRetry.jobName]
+				require.True(t, ok, "job %q not found", tt.wantRetry.jobName)
+				assert.Equal(t, tt.wantRetry.attempt, js.retryAttempt)
+				assert.Equal(t, tt.wantRetry.maxAttempts, js.maxAttempts)
+			}
+			if tt.wantTimedOut != nil {
+				js, ok := rm.jobs[tt.wantTimedOut.jobName]
+				require.True(t, ok, "job %q not found", tt.wantTimedOut.jobName)
+				assert.True(t, js.timedOut)
+				assert.Equal(t, tt.wantTimedOut.timeout, js.timeout)
 			}
 
 			for jobName, vertices := range tt.wantStatus {
@@ -335,6 +462,86 @@ func TestMultiModelView(t *testing.T) {
 				m.order = append(m.order, "deploy")
 			},
 			contains: []string{"Job: deploy", "compile", "notify (skipped)"},
+		},
+		{
+			name:   "retry annotation emoji",
+			boring: false,
+			setup: func(m *multiModel) {
+				js := newJobState()
+				js.retryAttempt = 2
+				js.maxAttempts = 4
+				m.jobs["flaky"] = js
+				m.order = append(m.order, "flaky")
+			},
+			contains: []string{"Job: flaky", _retryEmoji, "attempt 2/4"},
+		},
+		{
+			name:   "retry annotation boring",
+			boring: true,
+			setup: func(m *multiModel) {
+				js := newJobState()
+				js.retryAttempt = 3
+				js.maxAttempts = 5
+				m.jobs["flaky"] = js
+				m.order = append(m.order, "flaky")
+			},
+			contains: []string{"Job: flaky", _retryBoring, "attempt 3/5"},
+		},
+		{
+			name:   "job timeout annotation emoji",
+			boring: false,
+			setup: func(m *multiModel) {
+				js := newJobState()
+				js.timedOut = true
+				js.timeout = 30 * time.Second
+				m.jobs["slow"] = js
+				m.order = append(m.order, "slow")
+			},
+			contains: []string{"Job: slow", _timeoutEmoji, "timed out (30s)"},
+		},
+		{
+			name:   "job timeout annotation boring",
+			boring: true,
+			setup: func(m *multiModel) {
+				js := newJobState()
+				js.timedOut = true
+				js.timeout = 2 * time.Minute
+				m.jobs["slow"] = js
+				m.order = append(m.order, "slow")
+			},
+			contains: []string{"Job: slow", _timeoutBoring, "timed out (2m0s)"},
+		},
+		{
+			name:   "step timeout renders with timeout icon",
+			boring: true,
+			setup: func(m *multiModel) {
+				js := newJobState()
+				d := digest.FromString("v1")
+				js.vertices[d] = &stepState{name: "build/step/cmd", status: statusTimeout}
+				js.order = append(js.order, d)
+				m.jobs["build"] = js
+				m.order = append(m.order, "build")
+			},
+			contains: []string{"[time!]", "build/step/cmd"},
+		},
+		{
+			name:   "step timeout counts as resolved",
+			boring: true,
+			setup: func(m *multiModel) {
+				js := newJobState()
+				d1 := digest.FromString("v1")
+				js.vertices[d1] = &stepState{name: "compile", status: statusDone, duration: 100 * time.Millisecond}
+				js.order = append(js.order, d1)
+				d2 := digest.FromString("v2")
+				js.vertices[d2] = &stepState{name: "slow-test", status: statusTimeout}
+				js.order = append(js.order, d2)
+				d3 := digest.FromString("v3")
+				js.vertices[d3] = &stepState{name: "deploy", status: statusPending}
+				js.order = append(js.order, d3)
+				m.jobs["build"] = js
+				m.order = append(m.order, "build")
+			},
+			contains: []string{"Job: build (2/3)"},
 		},
 		{
 			name:   "multi-job view",

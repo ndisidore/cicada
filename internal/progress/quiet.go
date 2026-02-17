@@ -3,6 +3,7 @@ package progress
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/moby/buildkit/client"
 )
@@ -17,7 +18,7 @@ type Quiet struct {
 func (*Quiet) Start(_ context.Context) error { return nil }
 
 // Attach spawns a goroutine that drains the status channel.
-func (q *Quiet) Attach(ctx context.Context, _ string, ch <-chan *client.SolveStatus) error {
+func (q *Quiet) Attach(ctx context.Context, _ string, ch <-chan *client.SolveStatus, _ map[string]time.Duration) error {
 	q.wg.Go(func() {
 		for {
 			select {
@@ -41,6 +42,12 @@ func (*Quiet) Skip(_ context.Context, _ string) {}
 
 // SkipStep is a no-op for Quiet.
 func (*Quiet) SkipStep(_ context.Context, _, _ string) {}
+
+// Retry is a no-op for Quiet.
+func (*Quiet) Retry(_ context.Context, _ string, _, _ int, _ error) {}
+
+// Timeout is a no-op for Quiet.
+func (*Quiet) Timeout(_ context.Context, _ string, _ time.Duration) {}
 
 // Seal is a no-op for Quiet; Wait uses WaitGroup which is safe since
 // all Attach calls complete before Wait is called by the caller.

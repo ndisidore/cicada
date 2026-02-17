@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	bkclient "github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb/imagemetaresolver"
@@ -628,6 +629,8 @@ type pipelineJobInfo struct {
 	When      runner.DeferredEvaluator // deferred condition; nil = no deferred condition
 	Env       map[string]string        // pipeline-scoped env for deferred condition evaluation
 	Matrix    map[string]string        // matrix dimension values for deferred condition evaluation
+	Timeout   time.Duration            // job-level timeout
+	Retry     *pipeline.Retry          // job-level retry config
 }
 
 // buildRunnerJobs converts a builder.Result into a slice of runner.Job,
@@ -643,7 +646,11 @@ func buildRunnerJobs(r builder.Result, p pipeline.Pipeline, skippedSteps map[str
 	// Index pipeline jobs by name for dependency + deferred when lookup.
 	pipelineIdx := make(map[string]pipelineJobInfo, len(p.Jobs))
 	for i := range p.Jobs {
-		info := pipelineJobInfo{DependsOn: p.Jobs[i].DependsOn}
+		info := pipelineJobInfo{
+			DependsOn: p.Jobs[i].DependsOn,
+			Timeout:   p.Jobs[i].Timeout,
+			Retry:     p.Jobs[i].Retry,
+		}
 		if p.Jobs[i].When != nil && p.Jobs[i].When.Deferred {
 			info.When = p.Jobs[i].When
 			info.Env = pipeline.BuildEnvScope(p.Env, p.Jobs[i].Env)
@@ -667,6 +674,9 @@ func buildRunnerJobs(r builder.Result, p pipeline.Pipeline, skippedSteps map[str
 			Matrix:       info.Matrix,
 			OutputDef:    r.OutputDefs[r.JobNames[i]],
 			SkippedSteps: skippedSteps[r.JobNames[i]],
+			Timeout:      info.Timeout,
+			Retry:        info.Retry,
+			StepTimeouts: r.StepTimeouts[r.JobNames[i]],
 		}
 	}
 	return jobs, nil

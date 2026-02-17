@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/client/llb/sourceresolver"
@@ -1194,4 +1195,248 @@ func TestBuild_fileExportClearsDirFlag(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, result.Exports, 1)
 	assert.False(t, result.Exports[0].Dir, "file export should have Dir=false")
+}
+
+func TestBuild_customShell(t *testing.T) {
+	t.Parallel()
+
+	p := pipeline.Pipeline{
+		Name: "shell-test",
+		Jobs: []pipeline.Job{
+			{
+				Name:  "custom-shell",
+				Image: "alpine:latest",
+				Shell: []string{"/bin/bash", "-e", "-o", "pipefail", "-c"},
+				Steps: []pipeline.Step{{Name: "run", Run: []string{"echo hello"}}},
+			},
+		},
+	}
+
+	result, err := Build(context.Background(), p, BuildOpts{})
+	require.NoError(t, err)
+	require.Len(t, result.Definitions, 1)
+
+	meta := execMeta(t, result.Definitions[0].Def)
+	assert.Equal(t, []string{"/bin/bash", "-e", "-o", "pipefail", "-c", "echo hello"}, meta.GetArgs())
+}
+
+func TestBuild_stepShellOverridesJob(t *testing.T) {
+	t.Parallel()
+
+	p := pipeline.Pipeline{
+		Name: "shell-override",
+		Jobs: []pipeline.Job{
+			{
+				Name:  "mixed-shell",
+				Image: "alpine:latest",
+				Shell: []string{"/bin/bash", "-c"},
+				Steps: []pipeline.Step{
+					{Name: "job-shell", Run: []string{"echo job"}},
+					{Name: "step-shell", Run: []string{"echo step"}, Shell: []string{"/bin/zsh", "-c"}},
+				},
+			},
+		},
+	}
+
+	result, err := Build(context.Background(), p, BuildOpts{})
+	require.NoError(t, err)
+	require.Len(t, result.Definitions, 1)
+
+	metas := allExecMetas(t, result.Definitions[0].Def)
+	require.Len(t, metas, 2)
+	assert.Equal(t, []string{"/bin/bash", "-c", "echo job"}, metas[0].GetArgs())
+	assert.Equal(t, []string{"/bin/zsh", "-c", "echo step"}, metas[1].GetArgs())
+}
+
+func TestBuild_stepTimeout(t *testing.T) {
+	t.Parallel()
+
+	p := pipeline.Pipeline{
+		Name: "timeout-test",
+		Jobs: []pipeline.Job{
+			{
+				Name:  "timed",
+				Image: "alpine:latest",
+				Steps: []pipeline.Step{{
+					Name:    "slow",
+					Run:     []string{"sleep 300"},
+					Timeout: 120 * time.Second,
+				}},
+			},
+		},
+	}
+
+	result, err := Build(context.Background(), p, BuildOpts{})
+	require.NoError(t, err)
+	require.Len(t, result.Definitions, 1)
+
+	meta := execMeta(t, result.Definitions[0].Def)
+	args := meta.GetArgs()
+	assert.Equal(t, []string{"/bin/sh", "-c", "timeout -s KILL 120 '/bin/sh' '-c' 'sleep 300'; exit $?"}, args)
+}
+
+func TestBuild_stepTimeoutWithCustomShell(t *testing.T) {
+	t.Parallel()
+
+	p := pipeline.Pipeline{
+		Name: "timeout-shell",
+		Jobs: []pipeline.Job{
+			{
+				Name:  "combo",
+				Image: "alpine:latest",
+				Shell: []string{"/bin/bash", "-c"},
+				Steps: []pipeline.Step{{
+					Name:    "timed",
+					Run:     []string{"make test"},
+					Timeout: 5 * time.Minute,
+				}},
+			},
+		},
+	}
+
+	result, err := Build(context.Background(), p, BuildOpts{})
+	require.NoError(t, err)
+	require.Len(t, result.Definitions, 1)
+
+	meta := execMeta(t, result.Definitions[0].Def)
+	assert.Equal(t, []string{"/bin/bash", "-c", "timeout -s KILL 300 '/bin/bash' '-c' 'make test'; exit $?"}, meta.GetArgs())
+}
+
+func TestBuild_stepTimeoutWithMultiFlagShell(t *testing.T) {
+	t.Parallel()
+
+	p := pipeline.Pipeline{
+		Name: "timeout-multiflag",
+		Jobs: []pipeline.Job{
+			{
+				Name:  "strict",
+				Image: "alpine:latest",
+				Shell: []string{"/bin/bash", "-e", "-o", "pipefail", "-c"},
+				Steps: []pipeline.Step{{
+					Name:    "timed",
+					Run:     []string{"make test"},
+					Timeout: 30 * time.Second,
+				}},
+			},
+		},
+	}
+
+	result, err := Build(context.Background(), p, BuildOpts{})
+	require.NoError(t, err)
+	require.Len(t, result.Definitions, 1)
+
+	meta := execMeta(t, result.Definitions[0].Def)
+	assert.Equal(t, []string{"/bin/bash", "-e", "-o", "pipefail", "-c",
+		"timeout -s KILL 30 '/bin/bash' '-e' '-o' 'pipefail' '-c' 'make test'; exit $?"}, meta.GetArgs())
+}
+
+func TestBuild_stepTimeoutEscapesSingleQuotes(t *testing.T) {
+	t.Parallel()
+
+	p := pipeline.Pipeline{
+		Name: "timeout-escape",
+		Jobs: []pipeline.Job{
+			{
+				Name:  "quoted",
+				Image: "alpine:latest",
+				Steps: []pipeline.Step{{
+					Name:    "quoted",
+					Run:     []string{"echo 'hello world'"},
+					Timeout: 10 * time.Second,
+				}},
+			},
+		},
+	}
+
+	result, err := Build(context.Background(), p, BuildOpts{})
+	require.NoError(t, err)
+	require.Len(t, result.Definitions, 1)
+
+	meta := execMeta(t, result.Definitions[0].Def)
+	assert.Equal(t, []string{"/bin/sh", "-c",
+		`timeout -s KILL 10 '/bin/sh' '-c' 'echo '\''hello world'\'''; exit $?`}, meta.GetArgs())
+}
+
+func TestBuild_stepTimeoutResult(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns step timeouts in result", func(t *testing.T) {
+		t.Parallel()
+
+		p := pipeline.Pipeline{
+			Name: "annotated",
+			Jobs: []pipeline.Job{
+				{
+					Name:  "build",
+					Image: "alpine:latest",
+					Steps: []pipeline.Step{{
+						Name:    "slow",
+						Run:     []string{"sleep 300"},
+						Timeout: 2 * time.Minute,
+					}},
+				},
+			},
+		}
+
+		result, err := Build(context.Background(), p, BuildOpts{})
+		require.NoError(t, err)
+		require.Len(t, result.Definitions, 1)
+
+		// StepTimeouts should map the vertex name to the timeout duration.
+		require.Contains(t, result.StepTimeouts, "build")
+		assert.Equal(t, 2*time.Minute, result.StepTimeouts["build"]["build/slow/sleep 300"])
+
+		// Vertex name should NOT have a {timeout:...} suffix.
+		for _, md := range result.Definitions[0].Metadata {
+			if name, ok := md.Description["llb.customname"]; ok {
+				assert.NotContains(t, name, "{timeout:", "no timeout suffix expected")
+			}
+		}
+	})
+
+	t.Run("no step timeouts when timeout is zero", func(t *testing.T) {
+		t.Parallel()
+
+		p := pipeline.Pipeline{
+			Name: "no-annotation",
+			Jobs: []pipeline.Job{
+				{
+					Name:  "build",
+					Image: "alpine:latest",
+					Steps: []pipeline.Step{{
+						Name: "fast",
+						Run:  []string{"echo hello"},
+					}},
+				},
+			},
+		}
+
+		result, err := Build(context.Background(), p, BuildOpts{})
+		require.NoError(t, err)
+		require.Len(t, result.Definitions, 1)
+
+		assert.Empty(t, result.StepTimeouts["build"])
+	})
+}
+
+func TestBuild_defaultShell(t *testing.T) {
+	t.Parallel()
+
+	p := pipeline.Pipeline{
+		Name: "default-shell",
+		Jobs: []pipeline.Job{
+			{
+				Name:  "no-custom",
+				Image: "alpine:latest",
+				Steps: []pipeline.Step{{Name: "run", Run: []string{"echo hi"}}},
+			},
+		},
+	}
+
+	result, err := Build(context.Background(), p, BuildOpts{})
+	require.NoError(t, err)
+	require.Len(t, result.Definitions, 1)
+
+	meta := execMeta(t, result.Definitions[0].Def)
+	assert.Equal(t, []string{"/bin/sh", "-c", "echo hi"}, meta.GetArgs())
 }

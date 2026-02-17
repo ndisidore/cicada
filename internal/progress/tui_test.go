@@ -59,7 +59,7 @@ func TestTUI(t *testing.T) {
 			require.NoError(t, tui.Start(t.Context()))
 
 			ch := make(chan *client.SolveStatus)
-			require.NoError(t, tui.Attach(t.Context(), "job-1", ch))
+			require.NoError(t, tui.Attach(t.Context(), "job-1", ch, nil))
 			close(ch)
 
 			tui.Seal()
@@ -71,7 +71,7 @@ func TestTUI(t *testing.T) {
 
 			tui := newTestTUI()
 			ch := make(chan *client.SolveStatus)
-			err := tui.Attach(t.Context(), "job-1", ch)
+			err := tui.Attach(t.Context(), "job-1", ch, nil)
 			require.ErrorIs(t, err, ErrNotStarted)
 		})
 
@@ -122,7 +122,7 @@ func TestTUI(t *testing.T) {
 			require.NoError(t, tui.Start(t.Context()))
 
 			ch := make(chan *client.SolveStatus)
-			require.NoError(t, tui.Attach(t.Context(), "build", ch))
+			require.NoError(t, tui.Attach(t.Context(), "build", ch, nil))
 			tui.SkipStep(t.Context(), "build", "notify")
 			close(ch)
 
