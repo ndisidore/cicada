@@ -1,5 +1,4 @@
-//revive:disable:var-naming Package name conflict with standard library is intentional.
-package runtime
+package docker
 
 import (
 	"context"
@@ -7,19 +6,22 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/ndisidore/cicada/internal/runtime"
+	"github.com/ndisidore/cicada/internal/runtime/cliutil"
 )
 
-func TestDockerType(t *testing.T) {
+func TestType(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, Docker, NewDocker().Type())
+	assert.Equal(t, runtime.Docker, New().Type())
 }
 
-func TestDockerAvailable(t *testing.T) {
+func TestAvailable(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name string
-		exec execFunc
+		exec cliutil.ExecFunc
 		want bool
 	}{
 		{
@@ -48,7 +50,7 @@ func TestDockerAvailable(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			d := &DockerRuntime{cliRuntime: &cliRuntime{binary: "docker", exec: tt.exec}}
+			d := &Runtime{CLIRuntime: &cliutil.CLIRuntime{Binary: "docker", Exec: tt.exec}}
 			assert.Equal(t, tt.want, d.Available(context.Background()))
 		})
 	}

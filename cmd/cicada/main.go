@@ -23,6 +23,8 @@ import (
 	"github.com/ndisidore/cicada/internal/progress"
 	"github.com/ndisidore/cicada/internal/runner"
 	"github.com/ndisidore/cicada/internal/runtime"
+	"github.com/ndisidore/cicada/internal/runtime/docker"
+	"github.com/ndisidore/cicada/internal/runtime/podman"
 	"github.com/ndisidore/cicada/internal/synccontext"
 	"github.com/ndisidore/cicada/pkg/conditional"
 	"github.com/ndisidore/cicada/pkg/gitinfo"
@@ -58,6 +60,7 @@ type Engine interface {
 // app bundles dependencies so CLI action handlers become testable methods.
 type app struct {
 	engine  Engine
+	rt      runtime.Runtime
 	connect func(ctx context.Context, addr string) (runner.Solver, func() error, error)
 	parse   func(path string) (pipeline.Pipeline, error)
 	getwd   func() (string, error)
@@ -76,7 +79,14 @@ func main() {
 		isTTY:   term.IsTerminal(int(os.Stdout.Fd())) && os.Getenv("CI") == "",
 	}
 
-	resolver := runtime.DefaultResolver()
+	named := map[runtime.Type]func() runtime.Runtime{
+		runtime.Docker: func() runtime.Runtime { return docker.New() },
+		runtime.Podman: func() runtime.Runtime { return podman.New() },
+	}
+	resolver := &runtime.Resolver{
+		Factories: []func() runtime.Runtime{named[runtime.Docker], named[runtime.Podman]},
+		Named:     named,
+	}
 	initEngine := func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
 		rtName := cmd.String("runtime")
 		rt, err := resolver.Get(ctx, rtName)
@@ -88,6 +98,7 @@ func main() {
 			return ctx, fmt.Errorf("create daemon manager for runtime %s: %w", rtName, err)
 		}
 		a.engine = mgr
+		a.rt = rt
 		return ctx, nil
 	}
 
@@ -552,8 +563,9 @@ func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipe
 	}
 
 	runErr := runner.Run(ctx, runner.RunInput{
-		Solver: solver,
-		Jobs:   params.jobs,
+		Solver:  solver,
+		Runtime: a.rt,
+		Jobs:    params.jobs,
 		LocalMounts: map[string]fsutil.FS{
 			"context": contextFS,
 		},

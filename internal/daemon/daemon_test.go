@@ -13,43 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ndisidore/cicada/internal/runtime"
+	"github.com/ndisidore/cicada/internal/runtime/runtimetest"
 )
-
-// mockRuntime is a testify mock for runtime.Runtime.
-type mockRuntime struct {
-	mock.Mock
-}
-
-func (m *mockRuntime) Type() runtime.Type {
-	return m.Called().Get(0).(runtime.Type)
-}
-
-func (m *mockRuntime) Available(ctx context.Context) bool {
-	return m.Called(ctx).Bool(0)
-}
-
-func (m *mockRuntime) Run(ctx context.Context, cfg runtime.RunConfig) (string, error) {
-	args := m.Called(ctx, cfg)
-	return args.String(0), args.Error(1)
-}
-
-func (m *mockRuntime) Start(ctx context.Context, name string) error {
-	return m.Called(ctx, name).Error(0)
-}
-
-func (m *mockRuntime) Stop(ctx context.Context, name string) error {
-	return m.Called(ctx, name).Error(0)
-}
-
-func (m *mockRuntime) Remove(ctx context.Context, name string) error {
-	return m.Called(ctx, name).Error(0)
-}
-
-func (m *mockRuntime) Inspect(ctx context.Context, name string) (runtime.ContainerState, error) {
-	args := m.Called(ctx, name)
-	cs, _ := args.Get(0).(runtime.ContainerState)
-	return cs, args.Error(1)
-}
 
 func noopBkDial(context.Context, string) (bool, error) { return false, nil }
 
@@ -71,7 +36,7 @@ func TestEnsureRunning(t *testing.T) {
 		name     string
 		userAddr string
 		dial     func(ctx context.Context, addr string) (bool, error)
-		setup    func(m *mockRuntime)
+		setup    func(m *runtimetest.MockRuntime)
 		wantAddr string
 		wantErr  error
 	}{
@@ -98,7 +63,7 @@ func TestEnsureRunning(t *testing.T) {
 					return true, nil
 				}
 			}(),
-			setup: func(m *mockRuntime) {
+			setup: func(m *runtimetest.MockRuntime) {
 				m.On("Type").Return(runtime.Docker)
 				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateUnknown, runtime.ErrContainerNotFound)
 				m.On("Run", mock.Anything, mock.AnythingOfType("runtime.RunConfig")).Return("container-id", nil)
@@ -115,7 +80,7 @@ func TestEnsureRunning(t *testing.T) {
 					return false, nil
 				}
 			}(),
-			setup: func(m *mockRuntime) {
+			setup: func(m *runtimetest.MockRuntime) {
 				m.On("Type").Return(runtime.Docker)
 				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateUnknown, runtime.ErrContainerNotFound)
 				m.On("Run", mock.Anything, mock.AnythingOfType("runtime.RunConfig")).Return("", errors.New("cannot start"))
@@ -128,7 +93,7 @@ func TestEnsureRunning(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			rt := new(mockRuntime)
+			rt := new(runtimetest.MockRuntime)
 			if tt.setup != nil {
 				tt.setup(rt)
 			}
@@ -179,7 +144,7 @@ func TestIsReachable(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			mgr := &Manager{rt: new(mockRuntime), bkDial: tt.dial, health: _defaultHealthConfig}
+			mgr := &Manager{rt: new(runtimetest.MockRuntime), bkDial: tt.dial, health: _defaultHealthConfig}
 			got := mgr.IsReachable(context.Background(), _defaultAddr)
 			assert.Equal(t, tt.want, got)
 		})
@@ -191,37 +156,37 @@ func TestStop(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		setup   func(m *mockRuntime)
+		setup   func(m *runtimetest.MockRuntime)
 		wantErr bool
 	}{
 		{
 			name: "running container stops successfully",
-			setup: func(m *mockRuntime) {
+			setup: func(m *runtimetest.MockRuntime) {
 				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateRunning, nil)
 				m.On("Stop", mock.Anything, _containerName).Return(nil)
 			},
 		},
 		{
 			name: "stopped container is no-op",
-			setup: func(m *mockRuntime) {
+			setup: func(m *runtimetest.MockRuntime) {
 				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateExited, nil)
 			},
 		},
 		{
 			name: "created container is no-op",
-			setup: func(m *mockRuntime) {
+			setup: func(m *runtimetest.MockRuntime) {
 				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateCreated, nil)
 			},
 		},
 		{
 			name: "missing container is no-op",
-			setup: func(m *mockRuntime) {
+			setup: func(m *runtimetest.MockRuntime) {
 				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateUnknown, runtime.ErrContainerNotFound)
 			},
 		},
 		{
 			name: "runtime stop propagates error",
-			setup: func(m *mockRuntime) {
+			setup: func(m *runtimetest.MockRuntime) {
 				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateRunning, nil)
 				m.On("Stop", mock.Anything, _containerName).Return(errors.New("timeout"))
 			},
@@ -233,7 +198,7 @@ func TestStop(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			rt := new(mockRuntime)
+			rt := new(runtimetest.MockRuntime)
 			tt.setup(rt)
 			mgr := &Manager{rt: rt, bkDial: noopBkDial, health: _defaultHealthConfig}
 
@@ -254,25 +219,25 @@ func TestRemove(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		setup   func(m *mockRuntime)
+		setup   func(m *runtimetest.MockRuntime)
 		wantErr bool
 	}{
 		{
 			name: "existing container removed",
-			setup: func(m *mockRuntime) {
+			setup: func(m *runtimetest.MockRuntime) {
 				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateExited, nil)
 				m.On("Remove", mock.Anything, _containerName).Return(nil)
 			},
 		},
 		{
 			name: "missing container is no-op",
-			setup: func(m *mockRuntime) {
+			setup: func(m *runtimetest.MockRuntime) {
 				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateUnknown, runtime.ErrContainerNotFound)
 			},
 		},
 		{
 			name: "runtime rm propagates error",
-			setup: func(m *mockRuntime) {
+			setup: func(m *runtimetest.MockRuntime) {
 				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateExited, nil)
 				m.On("Remove", mock.Anything, _containerName).Return(errors.New("permission denied"))
 			},
@@ -284,7 +249,7 @@ func TestRemove(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			rt := new(mockRuntime)
+			rt := new(runtimetest.MockRuntime)
 			tt.setup(rt)
 			mgr := &Manager{rt: rt, bkDial: noopBkDial, health: _defaultHealthConfig}
 
@@ -305,34 +270,34 @@ func TestStatus(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		setup     func(m *mockRuntime)
+		setup     func(m *runtimetest.MockRuntime)
 		wantState string
 		wantErr   bool
 	}{
 		{
 			name: "running container",
-			setup: func(m *mockRuntime) {
+			setup: func(m *runtimetest.MockRuntime) {
 				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateRunning, nil)
 			},
 			wantState: "running",
 		},
 		{
 			name: "exited container",
-			setup: func(m *mockRuntime) {
+			setup: func(m *runtimetest.MockRuntime) {
 				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateExited, nil)
 			},
 			wantState: "exited",
 		},
 		{
 			name: "missing container returns empty",
-			setup: func(m *mockRuntime) {
+			setup: func(m *runtimetest.MockRuntime) {
 				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateUnknown, runtime.ErrContainerNotFound)
 			},
 			wantState: "",
 		},
 		{
 			name: "inspect error propagates",
-			setup: func(m *mockRuntime) {
+			setup: func(m *runtimetest.MockRuntime) {
 				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateUnknown, errors.New("permission denied"))
 			},
 			wantErr: true,
@@ -343,7 +308,7 @@ func TestStatus(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			rt := new(mockRuntime)
+			rt := new(runtimetest.MockRuntime)
 			tt.setup(rt)
 			mgr := &Manager{rt: rt, bkDial: noopBkDial, health: _defaultHealthConfig}
 
@@ -364,13 +329,13 @@ func TestStart(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		setup   func(m *mockRuntime)
+		setup   func(m *runtimetest.MockRuntime)
 		dial    func(ctx context.Context, addr string) (bool, error)
 		wantErr error
 	}{
 		{
 			name: "creates new container when none exists",
-			setup: func(m *mockRuntime) {
+			setup: func(m *runtimetest.MockRuntime) {
 				m.On("Type").Return(runtime.Docker)
 				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateUnknown, runtime.ErrContainerNotFound)
 				m.On("Run", mock.Anything, mock.AnythingOfType("runtime.RunConfig")).Return("container-id", nil)
@@ -379,7 +344,7 @@ func TestStart(t *testing.T) {
 		},
 		{
 			name: "restarts exited container",
-			setup: func(m *mockRuntime) {
+			setup: func(m *runtimetest.MockRuntime) {
 				m.On("Type").Return(runtime.Docker)
 				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateExited, nil)
 				m.On("Start", mock.Anything, _containerName).Return(nil)
@@ -388,7 +353,7 @@ func TestStart(t *testing.T) {
 		},
 		{
 			name: "already running skips create",
-			setup: func(m *mockRuntime) {
+			setup: func(m *runtimetest.MockRuntime) {
 				m.On("Type").Return(runtime.Docker)
 				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateRunning, nil)
 			},
@@ -396,7 +361,7 @@ func TestStart(t *testing.T) {
 		},
 		{
 			name: "run failure returns ErrStartFailed",
-			setup: func(m *mockRuntime) {
+			setup: func(m *runtimetest.MockRuntime) {
 				m.On("Type").Return(runtime.Docker)
 				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateUnknown, runtime.ErrContainerNotFound)
 				m.On("Run", mock.Anything, mock.AnythingOfType("runtime.RunConfig")).Return("", errors.New("image not found"))
@@ -405,7 +370,7 @@ func TestStart(t *testing.T) {
 		},
 		{
 			name: "restart failure returns ErrStartFailed",
-			setup: func(m *mockRuntime) {
+			setup: func(m *runtimetest.MockRuntime) {
 				m.On("Type").Return(runtime.Docker)
 				m.On("Inspect", mock.Anything, _containerName).Return(runtime.StateExited, nil)
 				m.On("Start", mock.Anything, _containerName).Return(errors.New("cannot start"))
@@ -418,7 +383,7 @@ func TestStart(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			rt := new(mockRuntime)
+			rt := new(runtimetest.MockRuntime)
 			tt.setup(rt)
 			dial := tt.dial
 			if dial == nil {
@@ -453,7 +418,7 @@ func TestWaitHealthy(t *testing.T) {
 		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			mgr := &Manager{
-				rt:     new(mockRuntime),
+				rt:     new(runtimetest.MockRuntime),
 				bkDial: func(context.Context, string) (bool, error) { return true, nil },
 				health: health,
 			}
@@ -466,7 +431,7 @@ func TestWaitHealthy(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			var calls atomic.Int32
 			mgr := &Manager{
-				rt: new(mockRuntime),
+				rt: new(runtimetest.MockRuntime),
 				bkDial: func(context.Context, string) (bool, error) {
 					// Succeed on the 3rd attempt.
 					return calls.Add(1) >= 3, nil
@@ -482,7 +447,7 @@ func TestWaitHealthy(t *testing.T) {
 		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			mgr := &Manager{
-				rt:     new(mockRuntime),
+				rt:     new(runtimetest.MockRuntime),
 				bkDial: func(context.Context, string) (bool, error) { return false, nil },
 				health: health,
 			}
@@ -494,7 +459,7 @@ func TestWaitHealthy(t *testing.T) {
 		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			mgr := &Manager{
-				rt:     new(mockRuntime),
+				rt:     new(runtimetest.MockRuntime),
 				bkDial: func(context.Context, string) (bool, error) { return false, errors.New("connection refused") },
 				health: health,
 			}
@@ -510,7 +475,7 @@ func TestWaitHealthy(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			var calls atomic.Int32
 			mgr := &Manager{
-				rt: new(mockRuntime),
+				rt: new(runtimetest.MockRuntime),
 				bkDial: func(context.Context, string) (bool, error) {
 					if calls.Add(1) == 2 {
 						cancel()

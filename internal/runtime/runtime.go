@@ -7,6 +7,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"io"
 )
 
 // ContainerState represents the state of a container.
@@ -45,6 +46,8 @@ var (
 	ErrInvalidVolume = errors.New("invalid volume mount")
 	// ErrUnknownRuntime indicates the requested runtime name is not recognized.
 	ErrUnknownRuntime = errors.New("unknown runtime")
+	// ErrNilFactory indicates a registered factory returned a nil Runtime.
+	ErrNilFactory = errors.New("runtime factory returned nil")
 )
 
 // PortBinding maps a host address:port to a container port.
@@ -88,4 +91,6 @@ type Runtime interface {
 	// Inspect returns the current state of a container by name.
 	// Returns ErrContainerNotFound if the container does not exist.
 	Inspect(ctx context.Context, name string) (ContainerState, error)
+	// LoadImage loads a container image tarball from r into the runtime's local store.
+	LoadImage(ctx context.Context, r io.Reader) error
 }
