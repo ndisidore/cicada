@@ -70,7 +70,7 @@ func TestIsTimeoutExitCode(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			assert.Equal(t, tt.want, isTimeoutExitCode(tt.input, tt.cfgTimeout))
+			assert.Equal(t, tt.want, IsTimeoutExitCode(tt.input, tt.cfgTimeout))
 		})
 	}
 }

@@ -1,4 +1,4 @@
-package progress
+package tui_test
 
 import (
 	"io"
@@ -8,26 +8,26 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/moby/buildkit/client"
 	"github.com/stretchr/testify/require"
+
+	"github.com/ndisidore/cicada/internal/progress"
+	tuipkg "github.com/ndisidore/cicada/internal/progress/tui"
 )
 
-// newTestTUI returns a TUI configured for headless testing.
-func newTestTUI() *TUI {
-	return &TUI{
-		Boring: true,
-		opts: []tea.ProgramOption{
-			tea.WithInput(nil),
-			tea.WithOutput(io.Discard),
-		},
-	}
+// newTestDisplay returns a Display configured for headless testing.
+func newTestDisplay() *tuipkg.Display {
+	return tuipkg.NewTest(true, []tea.ProgramOption{
+		tea.WithInput(nil),
+		tea.WithOutput(io.Discard),
+	})
 }
 
-// requireWaitReturns asserts that tui.Wait() completes within a timeout.
+// requireWaitReturns asserts that Display.Wait() completes within a timeout.
 // synctest is not used here because bubbletea spawns OS signal-handling
 // goroutines that are incompatible with synctest bubbles.
-func requireWaitReturns(t *testing.T, tui *TUI) {
+func requireWaitReturns(t *testing.T, d *tuipkg.Display) {
 	t.Helper()
 	done := make(chan error, 1)
-	go func() { done <- tui.Wait() }()
+	go func() { done <- d.Wait() }()
 
 	select {
 	case err := <-done:
@@ -37,7 +37,7 @@ func requireWaitReturns(t *testing.T, tui *TUI) {
 	}
 }
 
-func TestTUI(t *testing.T) {
+func TestDisplay(t *testing.T) {
 	t.Parallel()
 
 	t.Run("lifecycle", func(t *testing.T) {
@@ -46,48 +46,48 @@ func TestTUI(t *testing.T) {
 		t.Run("seal without attach exits cleanly", func(t *testing.T) {
 			t.Parallel()
 
-			tui := newTestTUI()
-			require.NoError(t, tui.Start(t.Context()))
-			tui.Seal()
-			requireWaitReturns(t, tui)
+			d := newTestDisplay()
+			require.NoError(t, d.Start(t.Context()))
+			d.Seal()
+			requireWaitReturns(t, d)
 		})
 
 		t.Run("seal after attach exits cleanly", func(t *testing.T) {
 			t.Parallel()
 
-			tui := newTestTUI()
-			require.NoError(t, tui.Start(t.Context()))
+			d := newTestDisplay()
+			require.NoError(t, d.Start(t.Context()))
 
 			ch := make(chan *client.SolveStatus)
-			require.NoError(t, tui.Attach(t.Context(), "job-1", ch, nil))
+			require.NoError(t, d.Attach(t.Context(), "job-1", ch, nil))
 			close(ch)
 
-			tui.Seal()
-			requireWaitReturns(t, tui)
+			d.Seal()
+			requireWaitReturns(t, d)
 		})
 
 		t.Run("attach before start returns error", func(t *testing.T) {
 			t.Parallel()
 
-			tui := newTestTUI()
+			d := newTestDisplay()
 			ch := make(chan *client.SolveStatus)
-			err := tui.Attach(t.Context(), "job-1", ch, nil)
-			require.ErrorIs(t, err, ErrNotStarted)
+			err := d.Attach(t.Context(), "job-1", ch, nil)
+			require.ErrorIs(t, err, progress.ErrNotStarted)
 		})
 
 		t.Run("wait before start returns error", func(t *testing.T) {
 			t.Parallel()
 
-			tui := newTestTUI()
-			err := tui.Wait()
-			require.ErrorIs(t, err, ErrNotStarted)
+			d := newTestDisplay()
+			err := d.Wait()
+			require.ErrorIs(t, err, progress.ErrNotStarted)
 		})
 
 		t.Run("seal before start does not panic", func(t *testing.T) {
 			t.Parallel()
 
-			tui := newTestTUI()
-			tui.Seal()
+			d := newTestDisplay()
+			d.Seal()
 		})
 	})
 
@@ -97,18 +97,18 @@ func TestTUI(t *testing.T) {
 		t.Run("skip before any attach exits cleanly", func(t *testing.T) {
 			t.Parallel()
 
-			tui := newTestTUI()
-			require.NoError(t, tui.Start(t.Context()))
-			tui.Skip(t.Context(), "deploy")
-			tui.Seal()
-			requireWaitReturns(t, tui)
+			d := newTestDisplay()
+			require.NoError(t, d.Start(t.Context()))
+			d.Skip(t.Context(), "deploy")
+			d.Seal()
+			requireWaitReturns(t, d)
 		})
 
 		t.Run("skip before start does not panic", func(t *testing.T) {
 			t.Parallel()
 
-			tui := newTestTUI()
-			tui.Skip(t.Context(), "deploy")
+			d := newTestDisplay()
+			d.Skip(t.Context(), "deploy")
 		})
 	})
 
@@ -118,23 +118,23 @@ func TestTUI(t *testing.T) {
 		t.Run("skip step after start exits cleanly", func(t *testing.T) {
 			t.Parallel()
 
-			tui := newTestTUI()
-			require.NoError(t, tui.Start(t.Context()))
+			d := newTestDisplay()
+			require.NoError(t, d.Start(t.Context()))
 
 			ch := make(chan *client.SolveStatus)
-			require.NoError(t, tui.Attach(t.Context(), "build", ch, nil))
-			tui.SkipStep(t.Context(), "build", "notify")
+			require.NoError(t, d.Attach(t.Context(), "build", ch, nil))
+			d.SkipStep(t.Context(), "build", "notify")
 			close(ch)
 
-			tui.Seal()
-			requireWaitReturns(t, tui)
+			d.Seal()
+			requireWaitReturns(t, d)
 		})
 
 		t.Run("skip step before start does not panic", func(t *testing.T) {
 			t.Parallel()
 
-			tui := newTestTUI()
-			tui.SkipStep(t.Context(), "build", "notify")
+			d := newTestDisplay()
+			d.SkipStep(t.Context(), "build", "notify")
 		})
 	})
 
@@ -144,21 +144,21 @@ func TestTUI(t *testing.T) {
 		t.Run("double seal does not panic", func(t *testing.T) {
 			t.Parallel()
 
-			tui := newTestTUI()
-			require.NoError(t, tui.Start(t.Context()))
-			tui.Seal()
-			tui.Seal()
-			requireWaitReturns(t, tui)
+			d := newTestDisplay()
+			require.NoError(t, d.Start(t.Context()))
+			d.Seal()
+			d.Seal()
+			requireWaitReturns(t, d)
 		})
 
 		t.Run("double start does not panic", func(t *testing.T) {
 			t.Parallel()
 
-			tui := newTestTUI()
-			require.NoError(t, tui.Start(t.Context()))
-			require.NoError(t, tui.Start(t.Context()))
-			tui.Seal()
-			requireWaitReturns(t, tui)
+			d := newTestDisplay()
+			require.NoError(t, d.Start(t.Context()))
+			require.NoError(t, d.Start(t.Context()))
+			d.Seal()
+			requireWaitReturns(t, d)
 		})
 	})
 }

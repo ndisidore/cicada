@@ -1,4 +1,4 @@
-package progress
+package tui
 
 import (
 	"fmt"
@@ -10,6 +10,8 @@ import (
 	"github.com/opencontainers/go-digest"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/ndisidore/cicada/internal/progress"
 )
 
 // stepStatus represents the current state of a pipeline vertex.
@@ -119,7 +121,7 @@ func (js *jobState) applyVertex(v *client.Vertex) {
 
 	switch {
 	case v.Error != "":
-		if isTimeoutExitCode(v.Error, st.configuredTimeout) {
+		if progress.IsTimeoutExitCode(v.Error, st.configuredTimeout) {
 			st.status = statusTimeout
 		} else {
 			st.status = statusError

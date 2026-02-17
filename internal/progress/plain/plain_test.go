@@ -1,4 +1,4 @@
-package progress
+package plain_test
 
 import (
 	"bytes"
@@ -12,10 +12,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/ndisidore/cicada/internal/progress/plain"
 	"github.com/ndisidore/cicada/pkg/slogctx"
 )
 
-func TestPlainAttach(t *testing.T) {
+func TestDisplayAttach(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
@@ -122,7 +123,7 @@ func TestPlainAttach(t *testing.T) {
 			}
 			close(ch)
 
-			p := &Plain{}
+			p := plain.New()
 			require.NoError(t, p.Start(ctx))
 			err := p.Attach(ctx, "test-step", ch, nil)
 			require.NoError(t, err)
@@ -149,14 +150,14 @@ func TestPlainAttach(t *testing.T) {
 	}
 }
 
-func TestPlainSkipStep(t *testing.T) {
+func TestDisplaySkipStep(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	ctx := slogctx.ContextWithLogger(t.Context(), logger)
 
-	p := &Plain{}
+	p := plain.New()
 	p.SkipStep(ctx, "deploy", "notify")
 
 	output := buf.String()
@@ -166,14 +167,14 @@ func TestPlainSkipStep(t *testing.T) {
 	assert.Contains(t, output, "step.skipped")
 }
 
-func TestPlainSkip(t *testing.T) {
+func TestDisplaySkip(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	ctx := slogctx.ContextWithLogger(t.Context(), logger)
 
-	p := &Plain{}
+	p := plain.New()
 	p.Skip(ctx, "deploy")
 
 	output := buf.String()

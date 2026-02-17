@@ -1,4 +1,6 @@
-package progress
+// Package plain provides a slog-based text display adapter for BuildKit
+// solve progress.
+package plain
 
 import (
 	"context"
@@ -11,29 +13,29 @@ import (
 	"github.com/moby/buildkit/client"
 	"github.com/opencontainers/go-digest"
 
+	"github.com/ndisidore/cicada/internal/progress"
 	"github.com/ndisidore/cicada/pkg/slogctx"
 )
 
-// vertexState tracks what has already been printed for each vertex.
-type vertexState int
+// Compile-time interface check.
+var _ progress.Display = (*Display)(nil)
 
-const (
-	_stateUnseen vertexState = iota
-	_stateStarted
-	_stateDone
-)
-
-// Plain consumes BuildKit status events and emits them as slog messages.
+// Display consumes BuildKit status events and emits them as slog messages.
 // The slog handler (pretty/json/text) decides how to render.
-type Plain struct {
+type Display struct {
 	wg sync.WaitGroup
 }
 
-// Start is a no-op for Plain.
-func (*Plain) Start(_ context.Context) error { return nil }
+// New returns a new plain Display.
+func New() *Display {
+	return &Display{}
+}
+
+// Start is a no-op for Display.
+func (*Display) Start(_ context.Context) error { return nil }
 
 // Attach spawns a goroutine that consumes status events and emits slog messages.
-func (p *Plain) Attach(ctx context.Context, jobName string, ch <-chan *client.SolveStatus, stepTimeouts map[string]time.Duration) error {
+func (p *Display) Attach(ctx context.Context, jobName string, ch <-chan *client.SolveStatus, stepTimeouts map[string]time.Duration) error {
 	p.wg.Go(func() {
 		p.consume(ctx, jobName, ch, stepTimeouts)
 	})
@@ -41,7 +43,7 @@ func (p *Plain) Attach(ctx context.Context, jobName string, ch <-chan *client.So
 }
 
 // Skip reports that a job was skipped due to a when condition.
-func (*Plain) Skip(ctx context.Context, jobName string) {
+func (*Display) Skip(ctx context.Context, jobName string) {
 	log := slogctx.FromContext(ctx)
 	log.LogAttrs(ctx, slog.LevelInfo, "job skipped",
 		slog.String("job", jobName),
@@ -50,7 +52,7 @@ func (*Plain) Skip(ctx context.Context, jobName string) {
 }
 
 // SkipStep reports that a step within a job was skipped due to a when condition.
-func (*Plain) SkipStep(ctx context.Context, jobName, stepName string) {
+func (*Display) SkipStep(ctx context.Context, jobName, stepName string) {
 	log := slogctx.FromContext(ctx)
 	log.LogAttrs(ctx, slog.LevelInfo, "step skipped",
 		slog.String("job", jobName),
@@ -60,7 +62,7 @@ func (*Plain) SkipStep(ctx context.Context, jobName, stepName string) {
 }
 
 // Retry reports that a job is being retried after a failure.
-func (*Plain) Retry(ctx context.Context, jobName string, attempt, maxAttempts int, err error) {
+func (*Display) Retry(ctx context.Context, jobName string, attempt, maxAttempts int, err error) {
 	log := slogctx.FromContext(ctx)
 	log.LogAttrs(ctx, slog.LevelWarn, "retrying job",
 		slog.String("job", jobName),
@@ -72,7 +74,7 @@ func (*Plain) Retry(ctx context.Context, jobName string, attempt, maxAttempts in
 }
 
 // Timeout reports that a job exceeded its configured timeout.
-func (*Plain) Timeout(ctx context.Context, jobName string, timeout time.Duration) {
+func (*Display) Timeout(ctx context.Context, jobName string, timeout time.Duration) {
 	log := slogctx.FromContext(ctx)
 	log.LogAttrs(ctx, slog.LevelWarn, "job timed out",
 		slog.String("job", jobName),
@@ -81,15 +83,24 @@ func (*Plain) Timeout(ctx context.Context, jobName string, timeout time.Duration
 	)
 }
 
-// Seal is a no-op for Plain; Wait uses WaitGroup which is safe since
+// Seal is a no-op for Display; Wait uses WaitGroup which is safe since
 // all Attach calls complete before Wait is called by the caller.
-func (*Plain) Seal() {}
+func (*Display) Seal() {}
 
 // Wait blocks until all attached jobs complete.
-func (p *Plain) Wait() error {
+func (p *Display) Wait() error {
 	p.wg.Wait()
 	return nil
 }
+
+// vertexState tracks what has already been printed for each vertex.
+type vertexState int
+
+const (
+	_stateUnseen vertexState = iota
+	_stateStarted
+	_stateDone
+)
 
 // timeoutVertex tracks a started vertex that has a timeout annotation
 // so it can be reported as timed-out if the channel closes before
@@ -99,7 +110,7 @@ type timeoutVertex struct {
 	timeout time.Duration
 }
 
-func (*Plain) consume(ctx context.Context, jobName string, ch <-chan *client.SolveStatus, stepTimeouts map[string]time.Duration) {
+func (*Display) consume(ctx context.Context, jobName string, ch <-chan *client.SolveStatus, stepTimeouts map[string]time.Duration) {
 	log := slogctx.FromContext(ctx)
 	seen := make(map[digest.Digest]vertexState)
 	pending := make(map[digest.Digest]timeoutVertex)
@@ -157,7 +168,7 @@ func logVertex(ctx context.Context, log *slog.Logger, jobName string, v *client.
 
 	switch {
 	case v.Error != "":
-		if isTimeoutExitCode(v.Error, cfgTimeout) {
+		if progress.IsTimeoutExitCode(v.Error, cfgTimeout) {
 			attrs := append(base, slog.String("event", "vertex.timeout"), slog.Duration("timeout", cfgTimeout))
 			//nolint:sloglint // dynamic msg encodes user-facing formatted output
 			log.LogAttrs(ctx, slog.LevelWarn, fmt.Sprintf("[%s] TIMEOUT %s", jobName, cleanName), attrs...)

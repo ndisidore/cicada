@@ -22,6 +22,9 @@ import (
 	"github.com/ndisidore/cicada/internal/daemon"
 	"github.com/ndisidore/cicada/internal/imagestore"
 	"github.com/ndisidore/cicada/internal/progress"
+	"github.com/ndisidore/cicada/internal/progress/plain"
+	"github.com/ndisidore/cicada/internal/progress/quiet"
+	"github.com/ndisidore/cicada/internal/progress/tui"
 	"github.com/ndisidore/cicada/internal/runner"
 	"github.com/ndisidore/cicada/internal/runtime"
 	"github.com/ndisidore/cicada/internal/runtime/docker"
@@ -803,15 +806,15 @@ func (a *app) selectDisplay(mode string, boring bool) (progress.Display, error) 
 	switch mode {
 	case "auto":
 		if a.isTTY && a.format == "pretty" {
-			return &progress.TUI{Boring: boring}, nil
+			return tui.New(boring), nil
 		}
-		return &progress.Plain{}, nil
+		return plain.New(), nil
 	case "tui":
-		return &progress.TUI{Boring: boring}, nil
+		return tui.New(boring), nil
 	case "plain":
-		return &progress.Plain{}, nil
+		return plain.New(), nil
 	case "quiet":
-		return &progress.Quiet{}, nil
+		return quiet.New(), nil
 	default:
 		return nil, fmt.Errorf("unknown progress mode %q (valid: auto, tui, plain, quiet)", mode)
 	}
