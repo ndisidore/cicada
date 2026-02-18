@@ -51,7 +51,7 @@ func TestAvailable(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			d := &Runtime{CLIRuntime: &cliutil.CLIRuntime{Binary: "docker", Exec: tt.exec}}
-			assert.Equal(t, tt.want, d.Available(context.Background()))
+			assert.Equal(t, tt.want, d.Available(t.Context()))
 		})
 	}
 }

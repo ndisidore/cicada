@@ -80,14 +80,14 @@ func TestDetectBranch(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := DetectBranch(context.Background(), stubEnv(tt.env))
+			got := DetectBranch(t.Context(), stubEnv(tt.env))
 			assert.Equal(t, tt.want, got)
 		})
 	}
 
 	t.Run("cancelled context returns empty on git fallback", func(t *testing.T) {
 		t.Parallel()
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
 		got := DetectBranch(ctx, stubEnv(nil))
 		assert.Empty(t, got)
@@ -143,14 +143,14 @@ func TestDetectTag(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := DetectTag(context.Background(), stubEnv(tt.env))
+			got := DetectTag(t.Context(), stubEnv(tt.env))
 			assert.Equal(t, tt.want, got)
 		})
 	}
 
 	t.Run("cancelled context returns empty on git fallback", func(t *testing.T) {
 		t.Parallel()
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
 		got := DetectTag(ctx, stubEnv(nil))
 		assert.Empty(t, got)

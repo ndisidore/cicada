@@ -113,7 +113,7 @@ func TestCheckCached(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			solver := &fakeSolver{solveFn: tt.solveFn}
-			missing, err := CheckCached(context.Background(), solver, tt.images)
+			missing, err := CheckCached(t.Context(), solver, tt.images)
 			if tt.wantErr {
 				require.Error(t, err)
 				return
@@ -165,7 +165,7 @@ func TestPullImages(t *testing.T) {
 			t.Parallel()
 			solver := &fakeSolver{solveFn: tt.solveFn}
 			d := &fakeDisplay{}
-			err := PullImages(context.Background(), solver, tt.images, d)
+			err := PullImages(t.Context(), solver, tt.images, d)
 			require.NoError(t, d.Wait())
 			if tt.wantErr {
 				require.Error(t, err)

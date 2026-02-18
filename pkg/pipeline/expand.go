@@ -252,11 +252,7 @@ func expandedName(base string, combo map[string]string) string {
 	// Merge new combo into existing.
 	maps.Copy(existing, combo)
 
-	keys := make([]string, 0, len(existing))
-	for k := range existing {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
+	keys := slices.Sorted(maps.Keys(existing))
 
 	var b strings.Builder
 	_, _ = fmt.Fprintf(&b, "%s[", name)

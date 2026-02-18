@@ -2,7 +2,6 @@ package progress
 
 import (
 	"bytes"
-	"context"
 	"log/slog"
 	"testing"
 	"time"
@@ -92,7 +91,7 @@ func TestPrettyHandler(t *testing.T) {
 		logger := slog.New(h)
 
 		dur := 1500 * time.Millisecond
-		logger.LogAttrs(context.Background(), slog.LevelInfo, "done step1", slog.Duration("duration", dur))
+		logger.LogAttrs(t.Context(), slog.LevelInfo, "done step1", slog.Duration("duration", dur))
 		output := buf.String()
 		assert.Contains(t, output, "done step1")
 		assert.Contains(t, output, "1.5s")
@@ -102,9 +101,9 @@ func TestPrettyHandler(t *testing.T) {
 		t.Parallel()
 
 		h := NewPrettyHandler(&bytes.Buffer{}, slog.LevelWarn)
-		assert.False(t, h.Enabled(context.Background(), slog.LevelInfo))
-		assert.True(t, h.Enabled(context.Background(), slog.LevelWarn))
-		assert.True(t, h.Enabled(context.Background(), slog.LevelError))
+		assert.False(t, h.Enabled(t.Context(), slog.LevelInfo))
+		assert.True(t, h.Enabled(t.Context(), slog.LevelWarn))
+		assert.True(t, h.Enabled(t.Context(), slog.LevelError))
 	})
 
 	t.Run("WithAttrs prefixes message", func(t *testing.T) {
@@ -165,7 +164,7 @@ func TestNewLogger(t *testing.T) {
 			require.NotNil(t, logger)
 
 			// Log at the configured level so the message is not filtered.
-			logger.Log(context.Background(), tt.level, "test message")
+			logger.Log(t.Context(), tt.level, "test message")
 			assert.Contains(t, buf.String(), "test message")
 		})
 	}
