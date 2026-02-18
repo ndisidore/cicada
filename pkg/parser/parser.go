@@ -210,8 +210,9 @@ func parseJob(node *document.Node, filename string) (pipeline.Job, error) {
 	}
 
 	j := pipeline.Job{Name: name}
+	seen := make(map[NodeType]bool)
 	for _, child := range node.Children {
-		if err := applyJobField(&j, child, filename); err != nil {
+		if err := applyJobField(&j, child, filename, seen); err != nil {
 			return pipeline.Job{}, err
 		}
 	}
@@ -219,9 +220,12 @@ func parseJob(node *document.Node, filename string) (pipeline.Job, error) {
 }
 
 // applyJobField dispatches a single child node of a job block.
+// seen tracks fields whose zero value is valid (e.g. timeout "0s") so
+// duplicate declarations are detected even when the parsed value equals
+// the type's zero value.
 //
 //revive:disable-next-line:cognitive-complexity,cyclomatic,function-length applyJobField is a flat switch dispatch; splitting it hurts readability.
-func applyJobField(j *pipeline.Job, node *document.Node, filename string) error {
+func applyJobField(j *pipeline.Job, node *document.Node, filename string, seen map[NodeType]bool) error {
 	nt := NodeType(node.Name.ValueString())
 	scope := fmt.Sprintf("job %q", j.Name)
 	switch nt {
@@ -316,6 +320,9 @@ func applyJobField(j *pipeline.Job, node *document.Node, filename string) error 
 		}
 		return setOnce(&j.When, w, filename, scope, string(nt))
 	case NodeTypeTimeout:
+		if seen[nt] {
+			return fmt.Errorf("%s: %s: %w: %q", filename, scope, ErrDuplicateField, string(nt))
+		}
 		v, err := requireStringArg(node, filename, string(nt))
 		if err != nil {
 			return err
@@ -324,7 +331,12 @@ func applyJobField(j *pipeline.Job, node *document.Node, filename string) error 
 		if err != nil {
 			return fmt.Errorf("%s: %s: timeout: %w", filename, scope, err)
 		}
-		return setOnce(&j.Timeout, d, filename, scope, string(nt))
+		if d < 0 {
+			return fmt.Errorf("%s: %s: timeout: %w", filename, scope, pipeline.ErrNegativeTimeout)
+		}
+		j.Timeout = d
+		seen[nt] = true
+		return nil
 	case NodeTypeRetry:
 		r, err := parseRetryNode(node, filename, scope)
 		if err != nil {
@@ -332,12 +344,12 @@ func applyJobField(j *pipeline.Job, node *document.Node, filename string) error 
 		}
 		return setOnce(&j.Retry, r, filename, scope, string(nt))
 	case NodeTypeShell:
-		s, err := parseShellNode(node, filename)
-		if err != nil {
-			return err
-		}
 		if j.Shell != nil {
 			return fmt.Errorf("%s: %s: %w: %q", filename, scope, ErrDuplicateField, string(nt))
+		}
+		s, err := parseShellNode(node, filename, scope)
+		if err != nil {
+			return err
 		}
 		j.Shell = s
 	case NodeTypeStep:
@@ -366,8 +378,9 @@ func parseJobStep(node *document.Node, filename, jobName string) (pipeline.Step,
 	}
 
 	s := pipeline.Step{Name: name}
+	seen := make(map[NodeType]bool)
 	for _, child := range node.Children {
-		if err := applyJobStepField(&s, child, filename, jobName); err != nil {
+		if err := applyJobStepField(&s, child, filename, jobName, seen); err != nil {
 			return pipeline.Step{}, err
 		}
 	}
@@ -375,9 +388,12 @@ func parseJobStep(node *document.Node, filename, jobName string) (pipeline.Step,
 }
 
 // applyJobStepField dispatches a single child node of a step block within a job.
+// seen tracks fields whose zero value is valid (e.g. timeout "0s") so
+// duplicate declarations are detected even when the parsed value equals
+// the type's zero value.
 //
 //revive:disable-next-line:cognitive-complexity,cyclomatic,function-length applyJobStepField is a flat switch dispatch over node types; splitting it hurts readability.
-func applyJobStepField(s *pipeline.Step, node *document.Node, filename, jobName string) error {
+func applyJobStepField(s *pipeline.Step, node *document.Node, filename, jobName string, seen map[NodeType]bool) error {
 	nt := NodeType(node.Name.ValueString())
 	scope := fmt.Sprintf("job %q step %q", jobName, s.Name)
 	switch nt {
@@ -437,6 +453,9 @@ func applyJobStepField(s *pipeline.Step, node *document.Node, filename, jobName 
 		}
 		return setOnce(&s.When, w, filename, scope, string(nt))
 	case NodeTypeTimeout:
+		if seen[nt] {
+			return fmt.Errorf("%s: %s: %w: %q", filename, scope, ErrDuplicateField, string(nt))
+		}
 		v, err := requireStringArg(node, filename, string(nt))
 		if err != nil {
 			return err
@@ -445,14 +464,19 @@ func applyJobStepField(s *pipeline.Step, node *document.Node, filename, jobName 
 		if err != nil {
 			return fmt.Errorf("%s: %s: timeout: %w", filename, scope, err)
 		}
-		return setOnce(&s.Timeout, d, filename, scope, string(nt))
-	case NodeTypeShell:
-		sh, err := parseShellNode(node, filename)
-		if err != nil {
-			return err
+		if d < 0 {
+			return fmt.Errorf("%s: %s: timeout: %w", filename, scope, pipeline.ErrNegativeTimeout)
 		}
+		s.Timeout = d
+		seen[nt] = true
+		return nil
+	case NodeTypeShell:
 		if s.Shell != nil {
 			return fmt.Errorf("%s: %s: %w: %q", filename, scope, ErrDuplicateField, string(nt))
+		}
+		sh, err := parseShellNode(node, filename, scope)
+		if err != nil {
+			return err
 		}
 		s.Shell = sh
 	case NodeTypeNoCache:
@@ -488,6 +512,7 @@ func parseBareStep(node *document.Node, filename string) (pipeline.Job, error) {
 
 	j := pipeline.Job{Name: name}
 	s := pipeline.Step{Name: name}
+	seen := make(map[NodeType]bool)
 
 	for _, child := range node.Children {
 		nt := NodeType(child.Name.ValueString())
@@ -506,7 +531,7 @@ func parseBareStep(node *document.Node, filename string) (pipeline.Job, error) {
 			)
 		default:
 			// All other fields go to the job.
-			if err := applyJobField(&j, child, filename); err != nil {
+			if err := applyJobField(&j, child, filename, seen); err != nil {
 				return pipeline.Job{}, err
 			}
 		}
@@ -564,12 +589,12 @@ func parseDefaults(node *document.Node, filename string) (pipeline.Defaults, err
 			}
 			d.Env = append(d.Env, ev)
 		case NodeTypeShell:
-			s, err := parseShellNode(child, filename)
-			if err != nil {
-				return pipeline.Defaults{}, err
-			}
 			if d.Shell != nil {
 				return pipeline.Defaults{}, fmt.Errorf("%s: defaults: %w: %q", filename, ErrDuplicateField, string(nt))
+			}
+			s, err := parseShellNode(child, filename, "defaults")
+			if err != nil {
+				return pipeline.Defaults{}, err
 			}
 			d.Shell = s
 		default:
@@ -787,6 +812,9 @@ func parseRetryNode(node *document.Node, filename, scope string) (*pipeline.Retr
 			if err != nil {
 				return nil, fmt.Errorf("%s: %s: retry attempts: %w", filename, scope, err)
 			}
+			if v < 1 {
+				return nil, fmt.Errorf("%s: %s: retry: attempts %d: %w", filename, scope, v, pipeline.ErrInvalidRetryAttempts)
+			}
 			r.Attempts = int(v)
 		case PropDelay:
 			v, err := requireStringArg(child, filename, name)
@@ -797,13 +825,22 @@ func parseRetryNode(node *document.Node, filename, scope string) (*pipeline.Retr
 			if err != nil {
 				return nil, fmt.Errorf("%s: %s: retry delay: %w", filename, scope, err)
 			}
+			if d < 0 {
+				return nil, fmt.Errorf("%s: %s: retry delay: %w", filename, scope, pipeline.ErrNegativeDelay)
+			}
 			r.Delay = d
 		case PropBackoff:
 			v, err := requireStringArg(child, filename, name)
 			if err != nil {
 				return nil, fmt.Errorf("%s: %s: retry backoff: %w", filename, scope, err)
 			}
-			r.Backoff = pipeline.BackoffStrategy(v)
+			bs := pipeline.BackoffStrategy(v)
+			switch bs {
+			case pipeline.BackoffNone, pipeline.BackoffLinear, pipeline.BackoffExponential:
+			default:
+				return nil, fmt.Errorf("%s: %s: retry backoff %q: %w", filename, scope, v, pipeline.ErrInvalidBackoff)
+			}
+			r.Backoff = bs
 		default:
 			return nil, fmt.Errorf("%s: %s: retry: %w: %q", filename, scope, ErrUnknownNode, name)
 		}
@@ -812,15 +849,15 @@ func parseRetryNode(node *document.Node, filename, scope string) (*pipeline.Retr
 }
 
 // parseShellNode parses variadic string arguments from a shell node.
-func parseShellNode(node *document.Node, filename string) ([]string, error) {
+func parseShellNode(node *document.Node, filename, scope string) ([]string, error) {
 	if len(node.Arguments) == 0 {
-		return nil, fmt.Errorf("%s: shell: %w", filename, pipeline.ErrEmptyShell)
+		return nil, fmt.Errorf("%s: %s: shell: %w", filename, scope, pipeline.ErrEmptyShell)
 	}
 	args := make([]string, 0, len(node.Arguments))
 	for i := range node.Arguments {
 		v, err := arg[string](node, i)
 		if err != nil {
-			return nil, fmt.Errorf("%s: shell argument %d: %w", filename, i, err)
+			return nil, fmt.Errorf("%s: %s: shell argument %d: %w", filename, scope, i, err)
 		}
 		args = append(args, v)
 	}

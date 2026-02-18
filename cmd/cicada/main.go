@@ -190,6 +190,11 @@ func main() {
 						Value:   0,
 					},
 					&cli.BoolFlag{
+						Name:  "fail-fast",
+						Usage: "cancel all jobs on first failure (disable with --fail-fast=false to let independent jobs finish)",
+						Value: true,
+					},
+					&cli.BoolFlag{
 						Name:  "expose-deps",
 						Usage: "mount full dependency root filesystems at /deps/{name}",
 					},
@@ -504,6 +509,7 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 		cacheCollector: collector,
 		whenCtx:        &wctx,
 		skippedJobs:    condResult.Skipped,
+		failFast:       cmd.Bool("fail-fast"),
 	})
 }
 
@@ -520,6 +526,7 @@ type pipelineRunParams struct {
 	cacheCollector *cache.Collector
 	whenCtx        *conditional.Context
 	skippedJobs    []string
+	failFast       bool
 }
 
 // executePipeline connects to BuildKit and runs the pipeline jobs.
@@ -575,6 +582,7 @@ func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipe
 		},
 		Display:        display,
 		Parallelism:    parallelism,
+		FailFast:       params.failFast,
 		Exports:        params.exports,
 		ImagePublishes: params.imagePublishes,
 		CacheExports:   params.cacheExports,

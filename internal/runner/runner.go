@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/containerd/platforms"
@@ -157,6 +158,10 @@ type RunInput struct {
 	Display progress.Display
 	// Parallelism limits concurrent job execution. 0 means unlimited.
 	Parallelism int
+	// FailFast cancels all running jobs on first failure when true. When
+	// false, independent jobs continue and only the failed job's dependents
+	// are skipped.
+	FailFast bool
 	// Exports contains artifacts to export to the host after all jobs complete.
 	Exports []Export
 	// ImagePublishes contains image publish targets to solve after all jobs complete.
@@ -201,6 +206,8 @@ type dagNode struct {
 // and parallelism limits. Jobs with no dependencies start immediately (subject
 // to the parallelism semaphore); jobs with dependencies wait for all deps to
 // complete before acquiring a semaphore slot.
+//
+//revive:disable-next-line:cognitive-complexity,function-length Run is a linear validate-dispatch-export-publish pipeline; splitting it hurts readability.
 func Run(ctx context.Context, in RunInput) error {
 	if in.Solver == nil {
 		return ErrNilSolver
@@ -239,22 +246,46 @@ func Run(ctx context.Context, in RunInput) error {
 		whenCtx:      in.WhenContext,
 	}
 
-	g, gctx := errgroup.WithContext(ctx)
-	for i := range in.Jobs {
-		node := nodes[in.Jobs[i].Name]
-		g.Go(func() error {
-			return runNode(gctx, node, cfg)
-		})
-	}
-	if err := g.Wait(); err != nil {
-		return err
+	var jobErr error
+	if in.FailFast {
+		g, gctx := errgroup.WithContext(ctx)
+		for i := range in.Jobs {
+			node := nodes[in.Jobs[i].Name]
+			g.Go(func() error {
+				return runNode(gctx, node, cfg)
+			})
+		}
+		jobErr = g.Wait()
+		if jobErr != nil {
+			return jobErr
+		}
+	} else {
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		var errs []error
+		for i := range in.Jobs {
+			node := nodes[in.Jobs[i].Name]
+			wg.Go(func() {
+				if err := runNode(ctx, node, cfg); err != nil {
+					mu.Lock()
+					errs = append(errs, err)
+					mu.Unlock()
+				}
+			})
+		}
+		wg.Wait()
+		jobErr = errors.Join(errs...)
 	}
 
-	// Export artifacts to the host filesystem concurrently.
-	// Uses the original ctx since the job errgroup's derived context is
-	// canceled when Wait returns.
+	exports := in.Exports
+	imagePublishes := in.ImagePublishes
+	if jobErr != nil {
+		exports = filterSuccessful(in.Exports, nodes, func(e Export) string { return e.JobName })
+		imagePublishes = filterSuccessful(in.ImagePublishes, nodes, func(p ImagePublish) string { return p.JobName })
+	}
+
 	eg, ectx := errgroup.WithContext(ctx)
-	for _, exp := range in.Exports {
+	for _, exp := range exports {
 		eg.Go(func() error {
 			if err := solveExport(ectx, exp, cfg); err != nil {
 				return fmt.Errorf("exporting %q from job %q: %w", exp.Local, exp.JobName, err)
@@ -262,11 +293,24 @@ func Run(ctx context.Context, in RunInput) error {
 			return nil
 		})
 	}
-	if err := eg.Wait(); err != nil {
-		return err
-	}
+	exportErr := eg.Wait()
 
-	return runPublishes(ctx, in, cfg)
+	in.ImagePublishes = imagePublishes
+	publishErr := runPublishes(ctx, in, cfg)
+
+	return errors.Join(jobErr, exportErr, publishErr)
+}
+
+// filterSuccessful returns items whose source job completed without error and was not skipped.
+func filterSuccessful[T any](items []T, nodes map[string]*dagNode, jobName func(T) string) []T {
+	result := make([]T, 0, len(items))
+	for _, item := range items {
+		node := nodes[jobName(item)]
+		if node != nil && node.err == nil && !node.skipped {
+			result = append(result, item)
+		}
+	}
+	return result
 }
 
 // buildDAG creates the DAG node index and validates that all deps exist.
@@ -394,11 +438,13 @@ func runNode(ctx context.Context, node *dagNode, cfg runConfig) error {
 
 	err := retryJob(solveCtx, node, cfg)
 	if err != nil {
-		if len(node.job.StepTimeouts) > 0 {
-			err = cleanTimeoutError(err)
-		}
-		if errors.Is(context.Cause(solveCtx), ErrJobTimeout) {
+		if cause := context.Cause(solveCtx); errors.Is(cause, ErrJobTimeout) {
 			cfg.display.Timeout(ctx, node.job.Name, node.job.Timeout)
+			node.err = cause
+			return node.err
+		}
+		if len(node.job.StepTimeouts) > 0 {
+			err = cleanTimeoutError(err, node.job.Name, node.job.StepTimeouts)
 		}
 		node.err = err
 		return fmt.Errorf("job %q: %w", node.job.Name, err)
@@ -410,7 +456,7 @@ func runNode(ctx context.Context, node *dagNode, cfg runConfig) error {
 
 	// Extract outputs for downstream deferred conditions.
 	if node.job.OutputDef != nil {
-		node.outputs, err = extractOutputs(solveCtx, node.job.OutputDef, cfg)
+		node.outputs, err = extractOutputs(ctx, node.job.OutputDef, cfg)
 		if err != nil {
 			node.err = err
 			return fmt.Errorf("job %q output extraction: %w", node.job.Name, err)
@@ -422,6 +468,8 @@ func runNode(ctx context.Context, node *dagNode, cfg runConfig) error {
 // retryJob executes solveJob with optional retry logic. If no retry config is
 // set, a single attempt is made. Otherwise, up to 1 + retry.Attempts attempts
 // are made with configurable delay and backoff between retries.
+//
+//revive:disable-next-line:cognitive-complexity retryJob is a linear retry loop; splitting it hurts readability.
 func retryJob(ctx context.Context, node *dagNode, cfg runConfig) error {
 	r := node.job.Retry
 	if r == nil {
@@ -443,8 +491,13 @@ func retryJob(ctx context.Context, node *dagNode, cfg runConfig) error {
 
 		// Bail immediately if the context was cancelled (e.g. job timeout).
 		if ctx.Err() != nil {
-			return context.Cause(ctx)
+			if cause := context.Cause(ctx); cause != nil {
+				return cause
+			}
+			return ctx.Err()
 		}
+
+		cfg.display.Retry(ctx, node.job.Name, attempt+2, maxAttempts, lastErr)
 
 		delay := retryDelay(r, attempt)
 		if delay > 0 {
@@ -453,11 +506,12 @@ func retryJob(ctx context.Context, node *dagNode, cfg runConfig) error {
 			case <-timer.C:
 			case <-ctx.Done():
 				timer.Stop()
-				return context.Cause(ctx)
+				if cause := context.Cause(ctx); cause != nil {
+					return cause
+				}
+				return ctx.Err()
 			}
 		}
-
-		cfg.display.Retry(ctx, node.job.Name, attempt+2, maxAttempts, lastErr)
 	}
 	return lastErr
 }
@@ -475,15 +529,19 @@ func retryDelay(r *pipeline.Retry, attempt int) time.Duration {
 		if attempt >= 63 {
 			return _maxDelay
 		}
-		return checkedMul(r.Delay, 1<<uint(attempt)) //nolint:gosec // attempt is bounds-checked above
+		return checkedMul(r.Delay, int64(1)<<uint(attempt)) //nolint:gosec // G115: attempt is non-negative (range loop) and bounds-checked above
 	default:
 		return r.Delay
 	}
 }
 
 // checkedMul multiplies a duration by a scalar, capping at _maxDelay on overflow.
+// Returns d when d <= 0 or n == 1, and 0 when n <= 0.
 func checkedMul(d time.Duration, n int64) time.Duration {
-	if d <= 0 || n <= 1 {
+	if n <= 0 {
+		return 0
+	}
+	if d <= 0 || n == 1 {
 		return d
 	}
 	if int64(d) > math.MaxInt64/n {
@@ -518,19 +576,39 @@ func solveJob(ctx context.Context, name string, def *llb.Definition, cfg runConf
 
 // cleanTimeoutError detects step-level timeouts by extracting the
 // *gatewaypb.ExitError from the error chain (via errors.As) and checking
-// for the timeout exit code 124 (GNU coreutils convention). Exit code 137
-// is intentionally excluded because it is ambiguous (OOM kill also produces
-// 128+9). The original ExitError is chained for diagnostic context.
-func cleanTimeoutError(err error) error {
+// for exit codes 124 (GNU coreutils timeout convention) and 137 (BusyBox
+// timeout -s KILL / 128+9). Note that 137 is ambiguous because OOM kills
+// also produce 128+9, but we treat it as a timeout here since the caller
+// gates this behind step-level timeout configuration.
+// Returns a *StepTimeoutError with the original ExitError chained.
+func cleanTimeoutError(err error, jobName string, stepTimeouts map[string]time.Duration) error {
 	var exitErr *gatewaypb.ExitError
 	if !errors.As(err, &exitErr) {
 		return err
 	}
 	// 124: GNU coreutils timeout; 137: BusyBox timeout -s KILL (128+9).
-	if exitErr.ExitCode == 124 || exitErr.ExitCode == 137 {
-		return fmt.Errorf("step timed out: %w: %w", ErrStepTimeout, exitErr)
+	if exitErr.ExitCode != 124 && exitErr.ExitCode != 137 {
+		return err
 	}
-	return err
+	// Extract step name only when the mapping is unambiguous (single entry).
+	// With multiple step timeouts we cannot determine which step timed out
+	// from the exit code alone, so we leave StepName/Timeout empty.
+	var stepName string
+	var timeout time.Duration
+	if len(stepTimeouts) == 1 {
+		for vertexName, t := range stepTimeouts {
+			parts := strings.SplitN(vertexName, "/", 3)
+			if len(parts) == 3 {
+				stepName = parts[1]
+				timeout = t
+			}
+		}
+	}
+	return fmt.Errorf("%w: %w", &StepTimeoutError{
+		JobName:  jobName,
+		StepName: stepName,
+		Timeout:  timeout,
+	}, exitErr)
 }
 
 // solveExport solves an export LLB definition using the local exporter to

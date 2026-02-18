@@ -1684,7 +1684,7 @@ func TestRunNode_jobTimeout(t *testing.T) {
 				Display: &fakeDisplay{},
 			})
 			require.Error(t, err)
-			assert.ErrorIs(t, err, context.DeadlineExceeded)
+			assert.ErrorIs(t, err, ErrJobTimeout)
 		})
 	})
 
@@ -1832,6 +1832,7 @@ func TestRunNode_retry(t *testing.T) {
 				Display: &fakeDisplay{},
 			})
 			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrJobTimeout)
 		})
 	})
 }
@@ -1947,14 +1948,9 @@ func TestRunNode_jobTimeout_sentinelError(t *testing.T) {
 		def, err := llb.Scratch().Marshal(t.Context())
 		require.NoError(t, err)
 
-		// Capture the context.Cause from inside the solver where solveCtx
-		// is the context with the timeout cause set.
-		var capturedCause atomic.Pointer[error]
 		solver := &fakeSolver{solveFn: func(ctx context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 			defer close(ch)
 			time.Sleep(10 * time.Second)
-			cause := context.Cause(ctx)
-			capturedCause.Store(&cause)
 			return nil, ctx.Err()
 		}}
 
@@ -1978,15 +1974,10 @@ func TestRunNode_jobTimeout_sentinelError(t *testing.T) {
 
 		err = runNode(t.Context(), node, cfg)
 		require.Error(t, err)
-		require.ErrorIs(t, err, context.DeadlineExceeded)
-
-		// The context cause carries the structured JobTimeoutError.
-		cause := capturedCause.Load()
-		require.NotNil(t, cause)
-		require.ErrorIs(t, *cause, ErrJobTimeout)
+		require.ErrorIs(t, err, ErrJobTimeout)
 
 		var jte *JobTimeoutError
-		require.ErrorAs(t, *cause, &jte)
+		require.ErrorAs(t, err, &jte)
 		assert.Equal(t, "slow-job", jte.JobName)
 		assert.Equal(t, 1*time.Second, jte.Timeout)
 	})
@@ -2075,6 +2066,8 @@ func TestRunNode_jobTimeout_displaysTimeout(t *testing.T) {
 		}
 		var timeoutCalls []timeoutCall
 
+		// timeoutFn is called synchronously from runNode (not a separate
+		// goroutine), so no mutex is needed around timeoutCalls.
 		display := &fakeDisplay{
 			timeoutFn: func(_ context.Context, jobName string, timeout time.Duration) {
 				timeoutCalls = append(timeoutCalls, timeoutCall{jobName, timeout})
@@ -2111,43 +2104,46 @@ func TestRunNode_jobTimeout_displaysTimeout(t *testing.T) {
 func TestCleanTimeoutError(t *testing.T) {
 	t.Parallel()
 
+	jobName := "build"
+	stepTimeouts := map[string]time.Duration{
+		"build/compile/go build": 30 * time.Second,
+	}
+
 	tests := []struct {
 		name        string
 		err         error
-		want        string
 		wantErr     error
 		wantExitErr bool // original ExitError should be chained
+		wantStepErr bool // should produce *StepTimeoutError
 	}{
 		{
 			name:        "exit code 124 detected as timeout",
 			err:         &gatewaypb.ExitError{ExitCode: 124, Err: errors.New("process failed")},
-			want:        "step timed out: step timeout: process failed",
 			wantErr:     ErrStepTimeout,
 			wantExitErr: true,
+			wantStepErr: true,
 		},
 		{
 			name:        "wrapped ExitError 124 found through chain",
 			err:         fmt.Errorf("solving job: %w", &gatewaypb.ExitError{ExitCode: 124, Err: errors.New("process failed")}),
-			want:        "step timed out: step timeout: process failed",
 			wantErr:     ErrStepTimeout,
 			wantExitErr: true,
+			wantStepErr: true,
 		},
 		{
 			name:        "exit code 137 detected as timeout (BusyBox timeout -s KILL)",
 			err:         &gatewaypb.ExitError{ExitCode: 137, Err: errors.New("process failed")},
-			want:        "step timed out: step timeout: process failed",
 			wantErr:     ErrStepTimeout,
 			wantExitErr: true,
+			wantStepErr: true,
 		},
 		{
 			name: "non-timeout exit code passes through",
 			err:  &gatewaypb.ExitError{ExitCode: 1, Err: errors.New("process failed")},
-			want: "process failed",
 		},
 		{
 			name: "non-ExitError passes through",
 			err:  errors.New("connection refused"),
-			want: "connection refused",
 		},
 	}
 
@@ -2155,16 +2151,265 @@ func TestCleanTimeoutError(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := cleanTimeoutError(tt.err)
+			got := cleanTimeoutError(tt.err, jobName, stepTimeouts)
 
-			assert.Equal(t, tt.want, got.Error())
 			if tt.wantErr != nil {
 				require.ErrorIs(t, got, tt.wantErr)
 			}
 			if tt.wantExitErr {
 				var exitErr *gatewaypb.ExitError
-				assert.ErrorAs(t, got, &exitErr)
+				require.ErrorAs(t, got, &exitErr)
+			}
+			if tt.wantStepErr {
+				var ste *StepTimeoutError
+				require.ErrorAs(t, got, &ste)
+				assert.Equal(t, jobName, ste.JobName)
+				assert.Equal(t, "compile", ste.StepName)
+				assert.Equal(t, 30*time.Second, ste.Timeout)
 			}
 		})
 	}
+}
+
+func TestCleanTimeoutError_multipleStepTimeouts(t *testing.T) {
+	t.Parallel()
+
+	jobName := "build"
+	stepTimeouts := map[string]time.Duration{
+		"build/compile/go build": 30 * time.Second,
+		"build/test/go test":     60 * time.Second,
+	}
+
+	exitErr := &gatewaypb.ExitError{ExitCode: 124, Err: errors.New("process failed")}
+	got := cleanTimeoutError(exitErr, jobName, stepTimeouts)
+
+	// StepTimeoutError is still produced (signals ErrStepTimeout).
+	require.ErrorIs(t, got, ErrStepTimeout)
+	var ste *StepTimeoutError
+	require.ErrorAs(t, got, &ste)
+	assert.Equal(t, jobName, ste.JobName)
+	// With multiple entries, step attribution is ambiguous — fields are empty.
+	assert.Empty(t, ste.StepName)
+	assert.Zero(t, ste.Timeout)
+}
+
+func TestRun_failFast(t *testing.T) {
+	t.Parallel()
+
+	t.Run("fail-fast cancels independent jobs", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			defA, err := llb.Scratch().Marshal(t.Context())
+			require.NoError(t, err)
+			defB, err := llb.Scratch().Marshal(t.Context())
+			require.NoError(t, err)
+			defC, err := llb.Scratch().Marshal(t.Context())
+			require.NoError(t, err)
+
+			solver := &fakeSolver{solveFn: func(ctx context.Context, d *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+				defer close(ch)
+				switch d {
+				case defA:
+					return nil, errors.New("job a exploded")
+				case defC:
+					<-ctx.Done()
+					return nil, ctx.Err()
+				default:
+					return &client.SolveResponse{}, nil
+				}
+			}}
+
+			err = Run(t.Context(), RunInput{
+				Solver: solver,
+				Jobs: []Job{
+					{Name: "a", Definition: defA},
+					{Name: "b", Definition: defB},
+					{Name: "c", Definition: defC},
+				},
+				Display:  &fakeDisplay{},
+				FailFast: true,
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "job a exploded")
+		})
+	})
+
+	t.Run("no-fail-fast lets independent jobs complete", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			defA, err := llb.Scratch().Marshal(t.Context())
+			require.NoError(t, err)
+			defB, err := llb.Scratch().Marshal(t.Context())
+			require.NoError(t, err)
+			defC, err := llb.Scratch().Marshal(t.Context())
+			require.NoError(t, err)
+
+			var completed sync.Map
+
+			solver := &fakeSolver{solveFn: func(_ context.Context, d *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+				defer close(ch)
+				switch d {
+				case defA:
+					return nil, errors.New("job a exploded")
+				default:
+					time.Sleep(10 * time.Millisecond)
+					completed.Store(d, true)
+					return &client.SolveResponse{}, nil
+				}
+			}}
+
+			err = Run(t.Context(), RunInput{
+				Solver: solver,
+				Jobs: []Job{
+					{Name: "a", Definition: defA},
+					{Name: "b", Definition: defB},
+					{Name: "c", Definition: defC},
+				},
+				Display:  &fakeDisplay{},
+				FailFast: false,
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "job a exploded")
+
+			_, bDone := completed.Load(defB)
+			_, cDone := completed.Load(defC)
+			assert.True(t, bDone, "job b should complete despite a's failure")
+			assert.True(t, cDone, "job c should complete despite a's failure")
+		})
+	})
+
+	t.Run("no-fail-fast propagates dep errors", func(t *testing.T) {
+		t.Parallel()
+
+		defA, err := llb.Scratch().Marshal(context.Background())
+		require.NoError(t, err)
+		defB, err := llb.Scratch().Marshal(context.Background())
+		require.NoError(t, err)
+		defD, err := llb.Scratch().Marshal(context.Background())
+		require.NoError(t, err)
+
+		var dCompleted atomic.Bool
+
+		solver := &fakeSolver{solveFn: func(_ context.Context, d *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			defer close(ch)
+			switch d {
+			case defA:
+				return nil, errors.New("job a exploded")
+			case defD:
+				dCompleted.Store(true)
+				return &client.SolveResponse{}, nil
+			default:
+				return &client.SolveResponse{}, nil
+			}
+		}}
+
+		var bAttached atomic.Bool
+		display := &fakeDisplay{}
+		display.attachFn = func(_ context.Context, name string, ch <-chan *client.SolveStatus, _ map[string]time.Duration) error {
+			if name == "b" {
+				bAttached.Store(true)
+			}
+			display.wg.Go(func() {
+				//revive:disable-next-line:empty-block // drain
+				for range ch {
+				}
+			})
+			return nil
+		}
+
+		err = Run(context.Background(), RunInput{
+			Solver: solver,
+			Jobs: []Job{
+				{Name: "a", Definition: defA},
+				{Name: "b", Definition: defB, DependsOn: []string{"a"}},
+				{Name: "d", Definition: defD},
+			},
+			Display:  display,
+			FailFast: false,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "job a exploded")
+		assert.Contains(t, err.Error(), `dependency "a"`)
+		assert.True(t, dCompleted.Load(), "independent job d should complete")
+		assert.False(t, bAttached.Load(), "job b should not be solved when dep a fails")
+	})
+
+	t.Run("no-fail-fast filters exports", func(t *testing.T) {
+		t.Parallel()
+
+		defA, err := llb.Scratch().Marshal(context.Background())
+		require.NoError(t, err)
+		defB, err := llb.Scratch().Marshal(context.Background())
+		require.NoError(t, err)
+		exportDefA, err := llb.Scratch().Marshal(context.Background())
+		require.NoError(t, err)
+		exportDefB, err := llb.Scratch().Marshal(context.Background())
+		require.NoError(t, err)
+
+		var exportedJobs sync.Map
+
+		solver := &fakeSolver{solveFn: func(_ context.Context, d *llb.Definition, opt client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			defer close(ch)
+			if len(opt.Exports) > 0 {
+				if d == exportDefA {
+					exportedJobs.Store("a", true)
+				}
+				if d == exportDefB {
+					exportedJobs.Store("b", true)
+				}
+				return &client.SolveResponse{}, nil
+			}
+			if d == defA {
+				return nil, errors.New("job a exploded")
+			}
+			return &client.SolveResponse{}, nil
+		}}
+
+		err = Run(context.Background(), RunInput{
+			Solver: solver,
+			Jobs: []Job{
+				{Name: "a", Definition: defA},
+				{Name: "b", Definition: defB},
+			},
+			Display:  &fakeDisplay{},
+			FailFast: false,
+			Exports: []Export{
+				{Definition: exportDefA, JobName: "a", Local: "/tmp/a/out"},
+				{Definition: exportDefB, JobName: "b", Local: "/tmp/b/out"},
+			},
+		})
+		require.Error(t, err)
+
+		_, aExported := exportedJobs.Load("a")
+		_, bExported := exportedJobs.Load("b")
+		assert.False(t, aExported, "failed job a's export should be filtered out")
+		assert.True(t, bExported, "successful job b's export should run")
+	})
+
+	t.Run("no-fail-fast joins multiple errors", func(t *testing.T) {
+		t.Parallel()
+
+		defA, err := llb.Scratch().Marshal(context.Background())
+		require.NoError(t, err)
+		defB, err := llb.Scratch().Marshal(context.Background())
+		require.NoError(t, err)
+
+		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			defer close(ch)
+			return nil, errors.New("boom")
+		}}
+
+		err = Run(context.Background(), RunInput{
+			Solver: solver,
+			Jobs: []Job{
+				{Name: "a", Definition: defA},
+				{Name: "b", Definition: defB},
+			},
+			Display:  &fakeDisplay{},
+			FailFast: false,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `job "a"`)
+		assert.Contains(t, err.Error(), `job "b"`)
+	})
 }

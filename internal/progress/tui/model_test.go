@@ -473,7 +473,7 @@ func TestMultiModelView(t *testing.T) {
 				m.jobs["flaky"] = js
 				m.order = append(m.order, "flaky")
 			},
-			contains: []string{"Job: flaky", _retryEmoji, "attempt 2/4"},
+			contains: []string{"Job: flaky", _emojiIcons[statusRetry], "attempt 2/4"},
 		},
 		{
 			name:   "retry annotation boring",
@@ -485,7 +485,7 @@ func TestMultiModelView(t *testing.T) {
 				m.jobs["flaky"] = js
 				m.order = append(m.order, "flaky")
 			},
-			contains: []string{"Job: flaky", _retryBoring, "attempt 3/5"},
+			contains: []string{"Job: flaky", _boringIcons[statusRetry], "attempt 3/5"},
 		},
 		{
 			name:   "job timeout annotation emoji",
@@ -497,7 +497,7 @@ func TestMultiModelView(t *testing.T) {
 				m.jobs["slow"] = js
 				m.order = append(m.order, "slow")
 			},
-			contains: []string{"Job: slow", _timeoutEmoji, "timed out (30s)"},
+			contains: []string{"Job: slow", _emojiIcons[statusTimeout], "timed out (30s)"},
 		},
 		{
 			name:   "job timeout annotation boring",
@@ -509,7 +509,25 @@ func TestMultiModelView(t *testing.T) {
 				m.jobs["slow"] = js
 				m.order = append(m.order, "slow")
 			},
-			contains: []string{"Job: slow", _timeoutBoring, "timed out (2m0s)"},
+			contains: []string{"Job: slow", _boringIcons[statusTimeout], "timed out (2m0s)"},
+		},
+		{
+			name:   "job timeout duration uses configured timeout",
+			boring: true,
+			setup: func(m *multiModel) {
+				started := time.Now()
+				js := newJobState()
+				js.done = true
+				js.timedOut = true
+				js.timeout = 5 * time.Second
+				js.started = &started
+				d := digest.FromString("v1")
+				js.vertices[d] = &stepState{name: "slow-step", status: statusTimeout}
+				js.order = append(js.order, d)
+				m.jobs["build"] = js
+				m.order = append(m.order, "build")
+			},
+			contains: []string{"Job: build", "5s", "timed out (5s)"},
 		},
 		{
 			name:   "step timeout renders with timeout icon",

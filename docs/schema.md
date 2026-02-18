@@ -251,10 +251,10 @@ job "flaky-integration" {
 | `delay` | duration | `0` | Wait time before the first retry |
 | `backoff` | string | `"none"` | Delay scaling: `"none"`, `"linear"`, or `"exponential"` |
 
-Backoff strategies scale the delay for subsequent retries:
+Backoff strategies scale the delay for subsequent retries (n is 0-indexed: first retry n=0, second retry n=1, etc.):
 - **none**: constant delay on every retry
-- **linear**: delay * (attempt number), e.g. 5s, 10s, 15s
-- **exponential**: delay * 2^(attempt number), e.g. 5s, 10s, 20s
+- **linear**: delay × (n+1), e.g. 5s, 10s, 15s for n=0,1,2
+- **exponential**: delay × 2^n, e.g. 5s, 10s, 20s for n=0,1,2
 
 Retry interacts with job-level timeout: the timeout covers all attempts combined, so a job with `timeout "1m"` and `retry { attempts 3 }` gets at most 1 minute total across all attempts.
 
@@ -262,7 +262,7 @@ Retry interacts with job-level timeout: the timeout covers all attempts combined
 
 ### Shell
 
-Overrides the default shell (`/bin/sh -c`) used to execute `run` commands. Can be set in `defaults` (pipeline-wide), on a `job`, or on a `step`. Step-level overrides job-level, which overrides defaults.
+Overrides the default shell (`/bin/sh -c`) used to execute `run` commands. It can be set in `defaults` (pipeline-wide), on a `job`, or on a `step`. Step-level overrides job-level, which overrides defaults.
 
 ```kdl
 defaults {

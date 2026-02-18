@@ -525,7 +525,7 @@ func validateRetry(scope string, r *Retry) error {
 		return fmt.Errorf("%s: %w", scope, ErrNegativeDelay)
 	}
 	switch r.Backoff {
-	case BackoffNone, BackoffLinear, BackoffExponential:
+	case "", BackoffNone, BackoffLinear, BackoffExponential:
 	default:
 		return fmt.Errorf("%s: backoff %q: %w", scope, r.Backoff, ErrInvalidBackoff)
 	}
@@ -638,7 +638,7 @@ func ApplyDefaults(jobs []Job, defaults *Defaults) []Job {
 		if len(defaults.Env) > 0 {
 			c.Env = mergeEnv(defaults.Env, c.Env)
 		}
-		if len(c.Shell) == 0 && len(defaults.Shell) > 0 {
+		if c.Shell == nil && len(defaults.Shell) > 0 {
 			c.Shell = slices.Clone(defaults.Shell)
 		}
 		return c

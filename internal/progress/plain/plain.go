@@ -63,12 +63,16 @@ func (*Display) SkipStep(ctx context.Context, jobName, stepName string) {
 
 // Retry reports that a job is being retried after a failure.
 func (*Display) Retry(ctx context.Context, jobName string, attempt, maxAttempts int, err error) {
+	errStr := "<nil>"
+	if err != nil {
+		errStr = err.Error()
+	}
 	log := slogctx.FromContext(ctx)
 	log.LogAttrs(ctx, slog.LevelWarn, "retrying job",
 		slog.String("job", jobName),
 		slog.Int("attempt", attempt),
 		slog.Int("max_attempts", maxAttempts),
-		slog.String("error", err.Error()),
+		slog.String("error", errStr),
 		slog.String("event", "job.retry"),
 	)
 }
@@ -128,12 +132,23 @@ func (*Display) consume(ctx context.Context, jobName string, ch <-chan *client.S
 			return
 		case status, ok := <-ch:
 			if !ok {
-				logPendingTimeouts(ctx, log, jobName, seen, pending)
+				logPendingTimeouts(ctx, log, jobName, pending)
 				return
 			}
 			for _, v := range status.Vertexes {
 				cfgTimeout := stepTimeouts[v.Name]
-				logVertex(ctx, log, jobName, v, seen, v.Name, cfgTimeout)
+				// logVertex must run before trackTimeout: logVertex updates
+				// seen[v.Digest] which trackTimeout reads to decide whether
+				// to add or remove the vertex from pending.
+				logVertex(logVertexInput{
+					ctx:        ctx,
+					log:        log,
+					jobName:    jobName,
+					v:          v,
+					seen:       seen,
+					cleanName:  v.Name,
+					cfgTimeout: cfgTimeout,
+				})
 				trackTimeout(v, seen, pending, v.Name, cfgTimeout)
 			}
 			logLogs(ctx, log, jobName, status.Logs)
@@ -158,66 +173,77 @@ func logLogs(ctx context.Context, log *slog.Logger, jobName string, logs []*clie
 	}
 }
 
-func logVertex(ctx context.Context, log *slog.Logger, jobName string, v *client.Vertex, seen map[digest.Digest]vertexState, cleanName string, cfgTimeout time.Duration) {
-	prev := seen[v.Digest]
+// logVertexInput groups parameters for logVertex (CS-05).
+type logVertexInput struct {
+	ctx        context.Context
+	log        *slog.Logger
+	jobName    string
+	v          *client.Vertex
+	seen       map[digest.Digest]vertexState
+	cleanName  string
+	cfgTimeout time.Duration
+}
+
+func logVertex(in logVertexInput) {
+	prev := in.seen[in.v.Digest]
 
 	base := []slog.Attr{
-		slog.String("job", jobName),
-		slog.String("vertex", cleanName),
+		slog.String("job", in.jobName),
+		slog.String("vertex", in.cleanName),
 	}
 
 	switch {
-	case v.Error != "":
-		if progress.IsTimeoutExitCode(v.Error, cfgTimeout) {
-			attrs := append(base, slog.String("event", "vertex.timeout"), slog.Duration("timeout", cfgTimeout))
+	case in.v.Error != "":
+		if progress.IsTimeoutExitCode(in.v.Error, in.cfgTimeout) {
+			attrs := append(base, slog.String("event", "vertex.timeout"), slog.Duration("timeout", in.cfgTimeout))
 			//nolint:sloglint // dynamic msg encodes user-facing formatted output
-			log.LogAttrs(ctx, slog.LevelWarn, fmt.Sprintf("[%s] TIMEOUT %s", jobName, cleanName), attrs...)
+			in.log.LogAttrs(in.ctx, slog.LevelWarn, fmt.Sprintf("[%s] TIMEOUT %s", in.jobName, in.cleanName), attrs...)
 		} else {
-			attrs := append(base, slog.String("event", "vertex.error"), slog.String("error", v.Error))
+			attrs := append(base, slog.String("event", "vertex.error"), slog.String("error", in.v.Error))
 			//nolint:sloglint // dynamic msg encodes user-facing formatted output
-			log.LogAttrs(ctx, slog.LevelError, fmt.Sprintf("[%s] FAIL %s: %s", jobName, cleanName, v.Error), attrs...)
+			in.log.LogAttrs(in.ctx, slog.LevelError, fmt.Sprintf("[%s] FAIL %s: %s", in.jobName, in.cleanName, in.v.Error), attrs...)
 		}
-		seen[v.Digest] = _stateDone
-	case v.Cached && prev < _stateDone:
+		in.seen[in.v.Digest] = _stateDone
+	case in.v.Cached && prev < _stateDone:
 		attrs := append(base, slog.String("event", "vertex.cached"))
 		//nolint:sloglint // dynamic msg encodes user-facing formatted output
-		log.LogAttrs(ctx, slog.LevelInfo, fmt.Sprintf("[%s] cached %s", jobName, cleanName), attrs...)
-		seen[v.Digest] = _stateDone
-	case v.Completed != nil && prev < _stateDone:
+		in.log.LogAttrs(in.ctx, slog.LevelInfo, fmt.Sprintf("[%s] cached %s", in.jobName, in.cleanName), attrs...)
+		in.seen[in.v.Digest] = _stateDone
+	case in.v.Completed != nil && prev < _stateDone:
 		var dur time.Duration
-		if v.Started != nil {
-			dur = v.Completed.Sub(*v.Started).Round(time.Millisecond)
+		if in.v.Started != nil {
+			dur = in.v.Completed.Sub(*in.v.Started).Round(time.Millisecond)
 		}
 		attrs := append(base, slog.String("event", "vertex.done"), slog.Duration("duration", dur))
 		//nolint:sloglint // dynamic msg encodes user-facing formatted output
-		log.LogAttrs(ctx, slog.LevelInfo, fmt.Sprintf("[%s] done %s", jobName, cleanName), attrs...)
-		seen[v.Digest] = _stateDone
-	case v.Started != nil && prev < _stateStarted:
+		in.log.LogAttrs(in.ctx, slog.LevelInfo, fmt.Sprintf("[%s] done %s", in.jobName, in.cleanName), attrs...)
+		in.seen[in.v.Digest] = _stateDone
+	case in.v.Started != nil && prev < _stateStarted:
 		attrs := append(base, slog.String("event", "vertex.started"))
-		if cfgTimeout > 0 {
-			attrs = append(attrs, slog.Duration("timeout", cfgTimeout))
+		if in.cfgTimeout > 0 {
+			attrs = append(attrs, slog.Duration("timeout", in.cfgTimeout))
 		}
 		//nolint:sloglint // dynamic msg encodes user-facing formatted output
-		log.LogAttrs(ctx, slog.LevelInfo, fmt.Sprintf("[%s] started %s", jobName, cleanName), attrs...)
-		seen[v.Digest] = _stateStarted
+		in.log.LogAttrs(in.ctx, slog.LevelInfo, fmt.Sprintf("[%s] started %s", in.jobName, in.cleanName), attrs...)
+		in.seen[in.v.Digest] = _stateStarted
 	default:
 	}
 }
 
-// logPendingTimeouts emits timeout warnings for vertices that started
-// but never reached a terminal state before the channel closed.
-func logPendingTimeouts(ctx context.Context, log *slog.Logger, jobName string, seen map[digest.Digest]vertexState, pending map[digest.Digest]timeoutVertex) {
-	for d, tv := range pending {
-		if seen[d] == _stateStarted {
-			//nolint:sloglint // dynamic msg encodes user-facing formatted output
-			log.LogAttrs(ctx, slog.LevelWarn,
-				fmt.Sprintf("[%s] TIMEOUT %s", jobName, tv.name),
-				slog.String("job", jobName),
-				slog.String("vertex", tv.name),
-				slog.String("event", "vertex.timeout"),
-				slog.Duration("timeout", tv.timeout),
-			)
-		}
+// logPendingTimeouts emits timeout warnings for vertices that never
+// reached a terminal state before the channel closed. trackTimeout
+// guarantees that pending only contains _stateStarted vertices (entries
+// are removed on _stateDone), so no additional state check is needed.
+func logPendingTimeouts(ctx context.Context, log *slog.Logger, jobName string, pending map[digest.Digest]timeoutVertex) {
+	for _, tv := range pending {
+		//nolint:sloglint // dynamic msg encodes user-facing formatted output
+		log.LogAttrs(ctx, slog.LevelWarn,
+			fmt.Sprintf("[%s] TIMEOUT %s", jobName, tv.name),
+			slog.String("job", jobName),
+			slog.String("vertex", tv.name),
+			slog.String("event", "vertex.timeout"),
+			slog.Duration("timeout", tv.timeout),
+		)
 	}
 }
 

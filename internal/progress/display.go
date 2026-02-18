@@ -27,6 +27,9 @@ type Display interface {
 	// SkipStep reports that a step within a job was skipped due to a when condition.
 	SkipStep(ctx context.Context, jobName, stepName string)
 	// Retry reports that a job is being retried after a failure.
+	// attempt is the 1-based total attempt number (2 = first retry).
+	// maxAttempts is the total number of attempts including the initial run
+	// (i.e. 1 + pipeline.Retry.Attempts).
 	Retry(ctx context.Context, jobName string, attempt, maxAttempts int, err error)
 	// Timeout reports that a job exceeded its configured timeout.
 	Timeout(ctx context.Context, jobName string, timeout time.Duration)

@@ -123,49 +123,54 @@ func Build(ctx context.Context, p pipeline.Pipeline, opts BuildOpts) (Result, er
 
 	states := make(map[string]llb.State, len(order))
 	for _, idx := range order {
-		job := &p.Jobs[idx]
-		jr, err := buildJob(ctx, job, states, jo)
-		if err != nil {
-			return Result{}, fmt.Errorf("building job %q: %w", job.Name, err)
-		}
-		result.Definitions = append(result.Definitions, jr.def)
-		result.JobNames = append(result.JobNames, job.Name)
-		states[job.Name] = jr.state
-		result.StepTimeouts[job.Name] = jr.stepTimeouts
-
-		// Build output extraction definition for deferred when conditions.
-		outputDef, err := buildExportDef(ctx, jr.state, "/cicada/output")
-		if err != nil {
-			return Result{}, fmt.Errorf("building output def for job %q: %w", job.Name, err)
-		}
-		result.OutputDefs[job.Name] = outputDef
-
-		// Collect exports from job-level and step-level, all from final state.
-		allExports := collectExports(job)
-		for _, exp := range allExports {
-			exportDef, err := buildExportDef(ctx, jr.state, exp.Path)
-			if err != nil {
-				return Result{}, fmt.Errorf("building export for job %q: %w", job.Name, err)
-			}
-			result.Exports = append(result.Exports, LocalExport{
-				Definition: exportDef,
-				JobName:    job.Name,
-				Local:      exp.Local,
-				Dir:        strings.HasSuffix(exp.Path, "/"),
-			})
-		}
-
-		if job.Publish != nil {
-			result.ImageExports = append(result.ImageExports, ImageExport{
-				Definition: jr.def,
-				JobName:    job.Name,
-				Publish:    *job.Publish,
-				Platform:   job.Platform,
-			})
+		if err := appendJob(ctx, &p.Jobs[idx], states, jo, &result); err != nil {
+			return Result{}, err
 		}
 	}
 
 	return result, nil
+}
+
+// appendJob builds a single job's LLB and appends its definitions, exports,
+// and image publishes to the result.
+func appendJob(ctx context.Context, job *pipeline.Job, states map[string]llb.State, jo jobOpts, result *Result) error {
+	jr, err := buildJob(ctx, job, states, jo)
+	if err != nil {
+		return fmt.Errorf("building job %q: %w", job.Name, err)
+	}
+	result.Definitions = append(result.Definitions, jr.def)
+	result.JobNames = append(result.JobNames, job.Name)
+	states[job.Name] = jr.state
+	result.StepTimeouts[job.Name] = jr.stepTimeouts
+
+	outputDef, err := buildExportDef(ctx, jr.state, "/cicada/output")
+	if err != nil {
+		return fmt.Errorf("building output def for job %q: %w", job.Name, err)
+	}
+	result.OutputDefs[job.Name] = outputDef
+
+	for _, exp := range collectExports(job) {
+		exportDef, err := buildExportDef(ctx, jr.state, exp.Path)
+		if err != nil {
+			return fmt.Errorf("building export for job %q: %w", job.Name, err)
+		}
+		result.Exports = append(result.Exports, LocalExport{
+			Definition: exportDef,
+			JobName:    job.Name,
+			Local:      exp.Local,
+			Dir:        strings.HasSuffix(exp.Path, "/"),
+		})
+	}
+
+	if job.Publish != nil {
+		result.ImageExports = append(result.ImageExports, ImageExport{
+			Definition: jr.def,
+			JobName:    job.Name,
+			Publish:    *job.Publish,
+			Platform:   job.Platform,
+		})
+	}
+	return nil
 }
 
 // collectExports gathers all export declarations from a job (job-level + step-level).
@@ -275,7 +280,7 @@ func buildJob(
 	// Build dep mount options (shared across all steps).
 	depMounts, err := depMountOpts(job, depStates, opts.exposeDeps)
 	if err != nil {
-		return jobResult{}, err
+		return jobResult{}, fmt.Errorf("building dep mounts: %w", err)
 	}
 
 	// Build local context for bind mounts.
@@ -364,6 +369,8 @@ func buildJob(
 
 			var args []string
 			if step.Timeout > 0 {
+				// Step timeouts require a `timeout` binary (coreutils or
+				// BusyBox) in the container image.
 				// Nest timeout inside the shell so the shell is PID 1.
 				// PID 1 has special kernel signal protection that drops
 				// default-action signals (including SIGALRM), which breaks

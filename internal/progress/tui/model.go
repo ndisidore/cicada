@@ -24,8 +24,13 @@ const (
 	statusCached
 	statusError
 	statusTimeout
+	statusRetry
 )
 
+// TUI status icons and spinners use unicode/emoji intentionally — they are
+// rendered in the interactive terminal display, not in logs or code.
+
+//nolint:revive // CS-07 exception: emoji icons are TUI-only visual indicators.
 var _emojiIcons = map[stepStatus]string{
 	statusDone:    "\u2705",
 	statusRunning: "\U0001f528",
@@ -33,6 +38,7 @@ var _emojiIcons = map[stepStatus]string{
 	statusPending: "\u23f3",
 	statusError:   "\u274c",
 	statusTimeout: "\u23f0",
+	statusRetry:   "\U0001f504",
 }
 
 var _boringIcons = map[stepStatus]string{
@@ -42,17 +48,12 @@ var _boringIcons = map[stepStatus]string{
 	statusPending: "[      ]",
 	statusError:   "[FAIL]  ",
 	statusTimeout: "[time!] ",
+	statusRetry:   "[retry] ",
 }
 
 var (
-	_retryEmoji    = "\U0001f504"
-	_retryBoring   = "[retry] "
-	_timeoutEmoji  = "\u23f0"
-	_timeoutBoring = "[time!] "
-)
-
-var (
-	_spinnerFrames       = [...]string{"\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"} // braille dots
+	// braille dots — TUI-only visual indicator
+	_spinnerFrames       = [...]string{"\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"}
 	_boringSpinnerFrames = [...]string{"|", "/", "-", "\\"}
 	_spinnerInterval     = 80 * time.Millisecond
 )
@@ -83,6 +84,20 @@ type jobState struct {
 	timedOut     bool                     // whether the job timed out
 	timeout      time.Duration            // the configured timeout
 	stepTimeouts map[string]time.Duration // vertex name -> configured step timeout
+}
+
+// jobDuration returns the wall-clock duration for a completed job. For
+// timed-out jobs this is the configured timeout (the running step never
+// receives a Completed timestamp from BuildKit). For normal jobs it is
+// the span from the earliest start to the latest completion.
+func (js *jobState) jobDuration() time.Duration {
+	if js.timedOut {
+		return js.timeout
+	}
+	if js.ended != nil && js.started != nil {
+		return js.ended.Sub(*js.started).Round(time.Millisecond)
+	}
+	return 0
 }
 
 func newJobState() *jobState {
@@ -339,7 +354,6 @@ func (m *multiModel) View() string {
 		icons:         icons,
 		frame:         m.frame,
 		spinnerFrames: spinnerFrames,
-		boring:        m.boring,
 	}
 	for i, name := range m.order {
 		m.jobs[name].renderTo(&b, name, rc)
@@ -356,7 +370,6 @@ type renderCtx struct {
 	icons         map[stepStatus]string
 	frame         int
 	spinnerFrames []string
-	boring        bool
 }
 
 //revive:disable-next-line:cyclomatic renderTo is a linear rendering pipeline.
@@ -376,23 +389,17 @@ func (js *jobState) renderTo(b *strings.Builder, name string, rc renderCtx) {
 		}
 	}
 	header := fmt.Sprintf("Job: %s (%d/%d)", name, resolvedCount, len(js.order))
-	if js.done && js.started != nil && js.ended != nil {
-		dur := js.ended.Sub(*js.started).Round(time.Millisecond)
-		header += "  " + _durationStyle.Render(dur.String())
+	if js.done && js.started != nil {
+		dur := js.jobDuration()
+		if dur > 0 {
+			header += "  " + _durationStyle.Render(dur.String())
+		}
 	}
 	if js.retryAttempt > 0 {
-		retryIcon := _retryEmoji
-		if rc.boring {
-			retryIcon = _retryBoring
-		}
-		header += fmt.Sprintf("  %s attempt %d/%d", retryIcon, js.retryAttempt, js.maxAttempts)
+		header += fmt.Sprintf("  %s attempt %d/%d", rc.icons[statusRetry], js.retryAttempt, js.maxAttempts)
 	}
 	if js.timedOut {
-		timeoutIcon := _timeoutEmoji
-		if rc.boring {
-			timeoutIcon = _timeoutBoring
-		}
-		header += fmt.Sprintf("  %s timed out (%s)", timeoutIcon, js.timeout)
+		header += fmt.Sprintf("  %s timed out (%s)", rc.icons[statusTimeout], js.timeout)
 	}
 	_, _ = b.WriteString(_headerStyle.Render(header))
 	_ = b.WriteByte('\n')
