@@ -14,6 +14,7 @@ func (j Job) Clone() Job {
 	j.Env = slices.Clone(j.Env)
 	j.Exports = slices.Clone(j.Exports)
 	j.Artifacts = slices.Clone(j.Artifacts)
+	j.Secrets = slices.Clone(j.Secrets)
 	if j.Steps != nil {
 		steps := make([]Step, len(j.Steps))
 		for i := range j.Steps {
@@ -48,6 +49,7 @@ func (s Step) Clone() Step {
 	s.Env = slices.Clone(s.Env)
 	s.Mounts = slices.Clone(s.Mounts)
 	s.Caches = slices.Clone(s.Caches)
+	s.Secrets = slices.Clone(s.Secrets)
 	s.Exports = slices.Clone(s.Exports)
 	s.Artifacts = slices.Clone(s.Artifacts)
 	if s.When != nil {
@@ -69,6 +71,7 @@ func (p Pipeline) Clone() Pipeline {
 		p.Jobs = jobs
 	}
 	p.Env = slices.Clone(p.Env)
+	p.Secrets = slices.Clone(p.Secrets)
 	p.TopoOrder = slices.Clone(p.TopoOrder)
 	if p.Matrix != nil {
 		m := p.Matrix.Clone()

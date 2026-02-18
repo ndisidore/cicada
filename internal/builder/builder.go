@@ -60,6 +60,8 @@ type Result struct {
 	OutputDefs map[string]*llb.Definition
 	// StepTimeouts maps job names to per-vertex timeout durations.
 	StepTimeouts map[string]map[string]time.Duration
+	// SecretDecls carries pipeline-level secret declarations for CLI resolution.
+	SecretDecls []pipeline.SecretDecl
 }
 
 // BuildOpts configures the LLB build process.
@@ -119,6 +121,7 @@ func Build(ctx context.Context, p pipeline.Pipeline, opts BuildOpts) (Result, er
 		JobNames:     make([]string, 0, len(order)),
 		OutputDefs:   make(map[string]*llb.Definition, len(order)),
 		StepTimeouts: make(map[string]map[string]time.Duration, len(order)),
+		SecretDecls:  p.Secrets,
 	}
 
 	states := make(map[string]llb.State, len(order))
@@ -327,8 +330,9 @@ func buildJob(
 			return jobResult{}, fmt.Errorf("job %q step %q: %w", job.Name, step.Name, pipeline.ErrMissingRun)
 		}
 
-		// Pre-compute step-level mount/cache run options (shared across all commands).
+		// Pre-compute step-level mount/cache and secret run options (shared across all commands).
 		stepMountOpts := buildMountRunOpts(step.Mounts, step.Caches, localOpts)
+		secretRunOpts := buildSecretRunOpts(job.Secrets, step.Secrets)
 
 		shell := resolveShell(job.Shell, step.Shell)
 
@@ -393,6 +397,7 @@ func buildJob(
 			runOpts = append(runOpts, depMounts...)
 			runOpts = append(runOpts, jobMountOpts...)
 			runOpts = append(runOpts, stepMountOpts...)
+			runOpts = append(runOpts, secretRunOpts...)
 
 			if step.NoCache && !jobNoCached {
 				runOpts = append(runOpts, llb.IgnoreCache)
@@ -457,6 +462,34 @@ func buildMountRunOpts(mounts []pipeline.Mount, caches []pipeline.Cache, localOp
 		))
 	}
 	return opts
+}
+
+// buildSecretRunOpts converts job and step secret references into LLB run options.
+// Env secrets use llb.AddSecretWithDest with SecretAsEnvName (nil dest); mount
+// secrets use llb.AddSecret with the filesystem path.
+func buildSecretRunOpts(jobSecrets, stepSecrets []pipeline.SecretRef) []llb.RunOption {
+	total := len(jobSecrets) + len(stepSecrets)
+	if total == 0 {
+		return nil
+	}
+	opts := make([]llb.RunOption, 0, total)
+	for _, ref := range jobSecrets {
+		opts = append(opts, secretRefToRunOpt(ref))
+	}
+	for _, ref := range stepSecrets {
+		opts = append(opts, secretRefToRunOpt(ref))
+	}
+	return opts
+}
+
+// secretRefToRunOpt converts a SecretRef into an llb.RunOption: env refs
+// inject via SecretAsEnvName (nil dest to avoid a file mount), mount refs
+// bind to the filesystem path.
+func secretRefToRunOpt(ref pipeline.SecretRef) llb.RunOption {
+	if ref.Env != "" {
+		return llb.AddSecretWithDest(ref.Name, nil, llb.SecretAsEnvName(ref.Env))
+	}
+	return llb.AddSecret(ref.Mount, llb.SecretID(ref.Name))
 }
 
 // depMountOpts builds run options for dependency mounts: /cicada/deps/{name}
