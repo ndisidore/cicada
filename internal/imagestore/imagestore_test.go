@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb"
@@ -29,7 +30,7 @@ type fakeDisplay struct {
 
 func (*fakeDisplay) Start(_ context.Context) error { return nil }
 
-func (f *fakeDisplay) Attach(_ context.Context, _ string, ch <-chan *client.SolveStatus) error {
+func (f *fakeDisplay) Attach(_ context.Context, _ string, ch <-chan *client.SolveStatus, _ map[string]time.Duration) error {
 	f.wg.Go(func() {
 		//revive:disable-next-line:empty-block // drain
 		for range ch {
@@ -41,6 +42,10 @@ func (f *fakeDisplay) Attach(_ context.Context, _ string, ch <-chan *client.Solv
 func (*fakeDisplay) Skip(_ context.Context, _ string) {}
 
 func (*fakeDisplay) SkipStep(_ context.Context, _, _ string) {}
+
+func (*fakeDisplay) Retry(_ context.Context, _ string, _, _ int, _ error) {}
+
+func (*fakeDisplay) Timeout(_ context.Context, _ string, _ time.Duration) {}
 
 func (*fakeDisplay) Seal() {}
 

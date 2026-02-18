@@ -1,4 +1,4 @@
-package progress
+package tui
 
 import (
 	"fmt"
@@ -10,6 +10,8 @@ import (
 	"github.com/opencontainers/go-digest"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/ndisidore/cicada/internal/progress"
 )
 
 // stepStatus represents the current state of a pipeline vertex.
@@ -21,14 +23,22 @@ const (
 	statusDone
 	statusCached
 	statusError
+	statusTimeout
+	statusRetry
 )
 
+// TUI status icons and spinners use unicode/emoji intentionally — they are
+// rendered in the interactive terminal display, not in logs or code.
+
+//nolint:revive // CS-07 exception: emoji icons are TUI-only visual indicators.
 var _emojiIcons = map[stepStatus]string{
 	statusDone:    "\u2705",
 	statusRunning: "\U0001f528",
 	statusCached:  "\u26a1",
 	statusPending: "\u23f3",
 	statusError:   "\u274c",
+	statusTimeout: "\u23f0",
+	statusRetry:   "\U0001f504",
 }
 
 var _boringIcons = map[stepStatus]string{
@@ -37,19 +47,23 @@ var _boringIcons = map[stepStatus]string{
 	statusCached:  "[cached]",
 	statusPending: "[      ]",
 	statusError:   "[FAIL]  ",
+	statusTimeout: "[time!] ",
+	statusRetry:   "[retry] ",
 }
 
 var (
-	_spinnerFrames       = [...]string{"\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"} // braille dots
+	// braille dots — TUI-only visual indicator
+	_spinnerFrames       = [...]string{"\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"}
 	_boringSpinnerFrames = [...]string{"|", "/", "-", "\\"}
 	_spinnerInterval     = 80 * time.Millisecond
 )
 
 // stepState tracks a single step's render state.
 type stepState struct {
-	name     string
-	status   stepStatus
-	duration time.Duration
+	name              string
+	status            stepStatus
+	duration          time.Duration
+	configuredTimeout time.Duration // parsed from vertex name annotation; zero means no timeout
 }
 
 // _maxLogs caps the number of retained log lines per job.
@@ -61,10 +75,29 @@ type jobState struct {
 	order        []digest.Digest
 	logs         []string
 	done         bool
-	skipped      bool       // true if job was skipped by a when condition
-	skippedSteps []string   // step names skipped by static when conditions
-	started      *time.Time // earliest vertex start
-	ended        *time.Time // latest vertex completion
+	skipped      bool                     // true if job was skipped by a when condition
+	skippedSteps []string                 // step names skipped by static when conditions
+	started      *time.Time               // earliest vertex start
+	ended        *time.Time               // latest vertex completion
+	retryAttempt int                      // current retry attempt (0 = no retry)
+	maxAttempts  int                      // total max attempts
+	timedOut     bool                     // whether the job timed out
+	timeout      time.Duration            // the configured timeout
+	stepTimeouts map[string]time.Duration // vertex name -> configured step timeout
+}
+
+// jobDuration returns the wall-clock duration for a completed job. For
+// timed-out jobs this is the configured timeout (the running step never
+// receives a Completed timestamp from BuildKit). For normal jobs it is
+// the span from the earliest start to the latest completion.
+func (js *jobState) jobDuration() time.Duration {
+	if js.timedOut {
+		return js.timeout
+	}
+	if js.ended != nil && js.started != nil {
+		return js.ended.Sub(*js.started).Round(time.Millisecond)
+	}
+	return 0
 }
 
 func newJobState() *jobState {
@@ -80,15 +113,17 @@ func (js *jobState) applyStatus(s *client.SolveStatus) {
 	js.appendLogs(s.Logs)
 }
 
+//revive:disable-next-line:cyclomatic applyVertex is a linear status state machine; splitting it hurts readability.
 func (js *jobState) applyVertex(v *client.Vertex) {
 	st, ok := js.vertices[v.Digest]
 	if !ok {
-		st = &stepState{name: v.Name, status: statusPending}
+		cfgTimeout := js.stepTimeouts[v.Name]
+		st = &stepState{name: v.Name, status: statusPending, configuredTimeout: cfgTimeout}
 		js.vertices[v.Digest] = st
 		js.order = append(js.order, v.Digest)
 	}
 
-	if st.status == statusDone || st.status == statusCached || st.status == statusError {
+	if st.status == statusDone || st.status == statusCached || st.status == statusError || st.status == statusTimeout {
 		return
 	}
 
@@ -101,7 +136,11 @@ func (js *jobState) applyVertex(v *client.Vertex) {
 
 	switch {
 	case v.Error != "":
-		st.status = statusError
+		if progress.IsTimeoutExitCode(v.Error, st.configuredTimeout) {
+			st.status = statusTimeout
+		} else {
+			st.status = statusError
+		}
 	case v.Cached:
 		st.status = statusCached
 	case v.Completed != nil:
@@ -145,7 +184,10 @@ type multiModel struct {
 type tickMsg struct{}
 
 // jobAddedMsg signals a new job was attached to the display.
-type jobAddedMsg struct{ name string }
+type jobAddedMsg struct {
+	name         string
+	stepTimeouts map[string]time.Duration
+}
 
 // jobStatusMsg carries a SolveStatus for a specific job.
 type jobStatusMsg struct {
@@ -168,6 +210,19 @@ type stepSkippedMsg struct {
 // allDoneMsg signals all jobs have completed and the TUI should quit.
 type allDoneMsg struct{}
 
+// jobRetryMsg signals a job is being retried.
+type jobRetryMsg struct {
+	name        string
+	attempt     int
+	maxAttempts int
+}
+
+// jobTimeoutMsg signals a job exceeded its configured timeout.
+type jobTimeoutMsg struct {
+	name    string
+	timeout time.Duration
+}
+
 func newMultiModel(boring bool) *multiModel {
 	return &multiModel{
 		jobs:   make(map[string]*jobState),
@@ -181,12 +236,17 @@ func (*multiModel) Init() tea.Cmd {
 }
 
 // Update implements tea.Model.
+//
+//revive:disable-next-line:cyclomatic,cognitive-complexity Update is a flat message dispatch; splitting it hurts readability.
 func (m *multiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 	case jobAddedMsg:
-		_ = m.getOrCreateJob(msg.name)
+		js := m.getOrCreateJob(msg.name)
+		if msg.stepTimeouts != nil {
+			js.stepTimeouts = msg.stepTimeouts
+		}
 	case jobSkippedMsg:
 		js := m.getOrCreateJob(msg.name)
 		if !js.done {
@@ -205,9 +265,25 @@ func (m *multiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if js, ok := m.jobs[msg.name]; ok {
 			js.applyStatus(msg.status)
 		}
+	case jobRetryMsg:
+		js := m.getOrCreateJob(msg.name)
+		js.retryAttempt = msg.attempt
+		js.maxAttempts = msg.maxAttempts
+	case jobTimeoutMsg:
+		js := m.getOrCreateJob(msg.name)
+		js.timedOut = true
+		js.timeout = msg.timeout
 	case jobDoneMsg:
 		if js, ok := m.jobs[msg.name]; ok {
 			js.done = true
+			if js.timedOut {
+				for _, d := range js.order {
+					st := js.vertices[d]
+					if st.status == statusRunning {
+						st.status = statusTimeout
+					}
+				}
+			}
 		}
 	case allDoneMsg:
 		m.done = true
@@ -242,6 +318,7 @@ var (
 	_stepErrorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))             // red
 	_stepRunningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))             // yellow
 	_stepCachedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))             // magenta
+	_stepTimeoutStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("208"))           // orange
 	_skipStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("178"))           // gold
 )
 
@@ -251,6 +328,8 @@ func statusStyle(s stepStatus) lipgloss.Style {
 		return _stepDoneStyle
 	case statusError:
 		return _stepErrorStyle
+	case statusTimeout:
+		return _stepTimeoutStyle
 	case statusRunning:
 		return _stepRunningStyle
 	case statusCached:
@@ -271,8 +350,13 @@ func (m *multiModel) View() string {
 		spinnerFrames = _boringSpinnerFrames[:]
 	}
 
+	rc := renderCtx{
+		icons:         icons,
+		frame:         m.frame,
+		spinnerFrames: spinnerFrames,
+	}
 	for i, name := range m.order {
-		m.jobs[name].renderTo(&b, name, icons, m.frame, spinnerFrames)
+		m.jobs[name].renderTo(&b, name, rc)
 		if i < len(m.order)-1 {
 			_ = b.WriteByte('\n')
 		}
@@ -281,7 +365,15 @@ func (m *multiModel) View() string {
 	return b.String()
 }
 
-func (js *jobState) renderTo(b *strings.Builder, name string, icons map[stepStatus]string, frame int, spinnerFrames []string) {
+// renderCtx groups per-render parameters to keep renderTo under CS-05.
+type renderCtx struct {
+	icons         map[stepStatus]string
+	frame         int
+	spinnerFrames []string
+}
+
+//revive:disable-next-line:cyclomatic renderTo is a linear rendering pipeline.
+func (js *jobState) renderTo(b *strings.Builder, name string, rc renderCtx) {
 	if js.skipped {
 		_, _ = b.WriteString(_skipStyle.Render(fmt.Sprintf("Job: %s (skipped)", name)))
 		_ = b.WriteByte('\n')
@@ -291,15 +383,23 @@ func (js *jobState) renderTo(b *strings.Builder, name string, icons map[stepStat
 	resolvedCount := 0
 	for _, d := range js.order {
 		switch js.vertices[d].status {
-		case statusDone, statusCached, statusError:
+		case statusDone, statusCached, statusError, statusTimeout:
 			resolvedCount++
 		default:
 		}
 	}
 	header := fmt.Sprintf("Job: %s (%d/%d)", name, resolvedCount, len(js.order))
-	if js.done && js.started != nil && js.ended != nil {
-		dur := js.ended.Sub(*js.started).Round(time.Millisecond)
-		header += "  " + _durationStyle.Render(dur.String())
+	if js.done && js.started != nil {
+		dur := js.jobDuration()
+		if dur > 0 {
+			header += "  " + _durationStyle.Render(dur.String())
+		}
+	}
+	if js.retryAttempt > 0 {
+		header += fmt.Sprintf("  %s attempt %d/%d", rc.icons[statusRetry], js.retryAttempt, js.maxAttempts)
+	}
+	if js.timedOut {
+		header += fmt.Sprintf("  %s timed out (%s)", rc.icons[statusTimeout], js.timeout)
 	}
 	_, _ = b.WriteString(_headerStyle.Render(header))
 	_ = b.WriteByte('\n')
@@ -311,13 +411,13 @@ func (js *jobState) renderTo(b *strings.Builder, name string, icons map[stepStat
 		case st.duration > 0:
 			durStr = "  " + _durationStyle.Render(st.duration.String())
 		case st.status == statusRunning:
-			durStr = "  " + _stepRunningStyle.Render(spinnerFrames[frame%len(spinnerFrames)])
+			durStr = "  " + _stepRunningStyle.Render(rc.spinnerFrames[rc.frame%len(rc.spinnerFrames)])
 		case st.status == statusPending:
 			durStr = "  --"
 		default:
 		}
 		styledName := statusStyle(st.status).Render(st.name)
-		_, _ = fmt.Fprintf(b, "  %s %s%s\n", icons[st.status], styledName, durStr)
+		_, _ = fmt.Fprintf(b, "  %s %s%s\n", rc.icons[st.status], styledName, durStr)
 	}
 
 	for _, stepName := range js.skippedSteps {

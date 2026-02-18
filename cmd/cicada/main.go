@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	bkclient "github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb/imagemetaresolver"
@@ -21,6 +22,9 @@ import (
 	"github.com/ndisidore/cicada/internal/daemon"
 	"github.com/ndisidore/cicada/internal/imagestore"
 	"github.com/ndisidore/cicada/internal/progress"
+	"github.com/ndisidore/cicada/internal/progress/plain"
+	"github.com/ndisidore/cicada/internal/progress/quiet"
+	"github.com/ndisidore/cicada/internal/progress/tui"
 	"github.com/ndisidore/cicada/internal/runner"
 	"github.com/ndisidore/cicada/internal/runtime"
 	"github.com/ndisidore/cicada/internal/runtime/docker"
@@ -184,6 +188,11 @@ func main() {
 						Aliases: []string{"j"},
 						Usage:   "max concurrent jobs (0 = unlimited)",
 						Value:   0,
+					},
+					&cli.BoolFlag{
+						Name:  "fail-fast",
+						Usage: "cancel all jobs on first failure (disable with --fail-fast=false to let independent jobs finish)",
+						Value: true,
 					},
 					&cli.BoolFlag{
 						Name:  "expose-deps",
@@ -500,6 +509,7 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 		cacheCollector: collector,
 		whenCtx:        &wctx,
 		skippedJobs:    condResult.Skipped,
+		failFast:       cmd.Bool("fail-fast"),
 	})
 }
 
@@ -516,6 +526,7 @@ type pipelineRunParams struct {
 	cacheCollector *cache.Collector
 	whenCtx        *conditional.Context
 	skippedJobs    []string
+	failFast       bool
 }
 
 // executePipeline connects to BuildKit and runs the pipeline jobs.
@@ -571,6 +582,7 @@ func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipe
 		},
 		Display:        display,
 		Parallelism:    parallelism,
+		FailFast:       params.failFast,
 		Exports:        params.exports,
 		ImagePublishes: params.imagePublishes,
 		CacheExports:   params.cacheExports,
@@ -628,6 +640,8 @@ type pipelineJobInfo struct {
 	When      runner.DeferredEvaluator // deferred condition; nil = no deferred condition
 	Env       map[string]string        // pipeline-scoped env for deferred condition evaluation
 	Matrix    map[string]string        // matrix dimension values for deferred condition evaluation
+	Timeout   time.Duration            // job-level timeout
+	Retry     *pipeline.Retry          // job-level retry config
 }
 
 // buildRunnerJobs converts a builder.Result into a slice of runner.Job,
@@ -643,7 +657,11 @@ func buildRunnerJobs(r builder.Result, p pipeline.Pipeline, skippedSteps map[str
 	// Index pipeline jobs by name for dependency + deferred when lookup.
 	pipelineIdx := make(map[string]pipelineJobInfo, len(p.Jobs))
 	for i := range p.Jobs {
-		info := pipelineJobInfo{DependsOn: p.Jobs[i].DependsOn}
+		info := pipelineJobInfo{
+			DependsOn: p.Jobs[i].DependsOn,
+			Timeout:   p.Jobs[i].Timeout,
+			Retry:     p.Jobs[i].Retry,
+		}
 		if p.Jobs[i].When != nil && p.Jobs[i].When.Deferred {
 			info.When = p.Jobs[i].When
 			info.Env = pipeline.BuildEnvScope(p.Env, p.Jobs[i].Env)
@@ -667,6 +685,9 @@ func buildRunnerJobs(r builder.Result, p pipeline.Pipeline, skippedSteps map[str
 			Matrix:       info.Matrix,
 			OutputDef:    r.OutputDefs[r.JobNames[i]],
 			SkippedSteps: skippedSteps[r.JobNames[i]],
+			Timeout:      info.Timeout,
+			Retry:        info.Retry,
+			StepTimeouts: r.StepTimeouts[r.JobNames[i]],
 		}
 	}
 	return jobs, nil
@@ -793,15 +814,15 @@ func (a *app) selectDisplay(mode string, boring bool) (progress.Display, error) 
 	switch mode {
 	case "auto":
 		if a.isTTY && a.format == "pretty" {
-			return &progress.TUI{Boring: boring}, nil
+			return tui.New(boring), nil
 		}
-		return &progress.Plain{}, nil
+		return plain.New(), nil
 	case "tui":
-		return &progress.TUI{Boring: boring}, nil
+		return tui.New(boring), nil
 	case "plain":
-		return &progress.Plain{}, nil
+		return plain.New(), nil
 	case "quiet":
-		return &progress.Quiet{}, nil
+		return quiet.New(), nil
 	default:
 		return nil, fmt.Errorf("unknown progress mode %q (valid: auto, tui, plain, quiet)", mode)
 	}

@@ -220,3 +220,134 @@ job "build" {
 ```
 
 `--with-docker-export` is not supported for multi-platform publishes -- the Docker exporter cannot produce manifest lists. Cicada will return an error before solving if a multi-platform image is matched by `--with-docker-export`.
+
+---
+
+# Failure Modes
+
+By default, Cicada cancels all running jobs as soon as any job fails (`--fail-fast`, enabled by default). This is the fastest way to surface errors but means independent jobs that were still running are killed immediately.
+
+## Continuing on failure
+
+Pass `--fail-fast=false` to let independent jobs run to completion when a sibling fails. Only jobs that directly or transitively depend on the failed job are skipped:
+
+```bash
+cicada run pipeline.kdl --fail-fast=false
+```
+
+With `--fail-fast=false`:
+
+- **Independent jobs** continue running and may succeed or fail on their own.
+- **Dependent jobs** are still skipped -- a job whose dependency failed will not attempt to run.
+- **Exports and publishes** are filtered to only include artifacts from successful jobs. Failed or skipped jobs' exports and publishes are silently dropped.
+- **All errors are collected** and returned as a combined error at the end, so you see every failure in a single run rather than one at a time.
+
+### Example
+
+Given a pipeline with three independent jobs (`lint`, `test`, `build`), if `test` fails:
+
+| Mode | `lint` | `test` | `build` |
+|------|--------|--------|---------|
+| `--fail-fast` (default) | cancelled | failed | cancelled |
+| `--fail-fast=false` | completes | failed | completes |
+
+### Dependency chains
+
+Dependency propagation is unaffected by `--fail-fast`. A failed job always prevents its dependents from running:
+
+```kdl
+pipeline "deploy" {
+    job "build" { /* ... */ }
+    job "test" { depends-on "build"; /* ... */ }
+    job "deploy" { depends-on "test"; /* ... */ }
+    job "notify" { /* independent */ }
+}
+```
+
+If `build` fails with `--fail-fast=false`, `test` and `deploy` are skipped (dependency chain), but `notify` runs to completion.
+
+---
+
+# Retry, Timeouts, and Shell
+
+Cicada supports per-job retry, timeouts at both job and step level, and custom shell overrides. This section shows common usage patterns; see the [schema reference](schema.md#retry) for the full property list and inheritance rules.
+
+## Retry
+
+Add a `retry` node to a job to automatically re-run it on failure. Configure `attempts` (number of retries after the initial run), `delay` (wait before the first retry), and `backoff` (how delay scales across retries):
+
+```kdl
+job "integration" {
+    image "node:22"
+    retry {
+        attempts 3
+        delay "5s"
+        backoff "exponential"
+    }
+    step "test" { run "npm test" }
+}
+```
+
+Backoff strategies (with a base delay of `5s`):
+- `"none"` -- constant delay: 5s, 5s, 5s
+- `"linear"` -- delay grows linearly: 5s, 10s, 15s
+- `"exponential"` -- delay doubles each retry: 5s, 10s, 20s
+
+## Timeouts
+
+**Job-level timeout** caps the total wall-clock time for a job, including all retries:
+
+```kdl
+job "slow-build" {
+    image "golang:1.25"
+    timeout "10m"
+    step "compile" { run "make build" }
+}
+```
+
+**Step-level timeout** caps each `run` command within a step:
+
+```kdl
+job "test" {
+    image "golang:1.25"
+    step "unit" {
+        timeout "5m"
+        run "go test -race ./..."
+    }
+}
+```
+
+When both are set, the step timeout applies per-command and the job timeout applies to the overall job (including retries). Combining retry with timeout lets you bound flaky jobs:
+
+```kdl
+job "flaky" {
+    image "alpine:latest"
+    timeout "2m"
+    retry { attempts 3; delay "5s" }
+    step "run" { run "./flaky-script.sh" }
+}
+```
+
+The duration format follows Go's `time.ParseDuration` syntax (e.g. `"30s"`, `"5m"`, `"1h30m"`). See the [schema reference](schema.md#timeouts) for container requirements and step-level timeout limitations.
+
+## Shell
+
+Override the default shell (`/bin/sh -c`) in the `defaults` block, on a `job`, or on a `step`. Step-level `shell` overrides job-level, which overrides the `defaults` block:
+
+```kdl
+defaults {
+    shell "/bin/bash" "-e" "-o" "pipefail" "-c"
+}
+
+job "strict" {
+    image "ubuntu:24.04"
+    shell "/bin/bash" "-e" "-c"
+    step "build" { run "make build" }
+    step "compat" {
+        shell "/bin/sh" "-c"
+        run "echo 'plain sh here'"
+    }
+}
+```
+
+The last argument should be `-c` so the shell accepts a command string. See the [schema reference](schema.md#shell) for the full inheritance chain and argument validation rules.

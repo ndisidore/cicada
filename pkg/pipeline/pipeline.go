@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/ndisidore/cicada/pkg/conditional"
 )
@@ -50,6 +51,15 @@ var (
 	ErrPipelineNoParams = errors.New("pipeline does not accept parameters")
 )
 
+// Sentinel errors for retry, timeout, and shell configuration.
+var (
+	ErrInvalidRetryAttempts = errors.New("retry attempts must be positive")
+	ErrInvalidBackoff       = errors.New("invalid backoff strategy")
+	ErrNegativeDelay        = errors.New("retry delay must be non-negative")
+	ErrNegativeTimeout      = errors.New("timeout must be non-negative")
+	ErrEmptyShell           = errors.New("shell must have at least one argument")
+)
+
 // Sentinel errors for env vars, exports, artifacts, and publish.
 var (
 	ErrEmptyEnvKey            = errors.New("env key is empty")
@@ -69,6 +79,23 @@ var (
 	ErrEmptyExportLocal       = errors.New("export local path is empty")
 	ErrEmptyPublishImage      = errors.New("publish image reference is empty")
 )
+
+// BackoffStrategy for retry delay scaling.
+type BackoffStrategy string
+
+// BackoffStrategy values.
+const (
+	BackoffNone        BackoffStrategy = "none"
+	BackoffLinear      BackoffStrategy = "linear"
+	BackoffExponential BackoffStrategy = "exponential"
+)
+
+// Retry configures job-level retry behavior.
+type Retry struct {
+	Attempts int             // max number of retries (not counting first attempt)
+	Delay    time.Duration   // base delay between retries
+	Backoff  BackoffStrategy // "none" | "linear" | "exponential"
+}
 
 // ConflictStrategy determines behavior when job names collide during merge.
 type ConflictStrategy int
@@ -196,6 +223,7 @@ type Defaults struct {
 	Workdir string   // default workdir for jobs that don't specify one
 	Mounts  []Mount  // bind mounts prepended to every job's mount list
 	Env     []EnvVar // env vars merged into every job (job wins on conflict)
+	Shell   []string // default shell args for all jobs/steps
 }
 
 // Pipeline represents a CI/CD pipeline parsed from KDL.
@@ -227,6 +255,9 @@ type Job struct {
 	MatrixValues map[string]string // concrete dimension values for this expanded variant; nil for non-matrix jobs
 	NoCache      bool              // disable cache for this job
 	Publish      *Publish          // OCI image export; nil if not set
+	Timeout      time.Duration     // job-level timeout; 0 = no timeout
+	Retry        *Retry            // job-level retry config; nil = no retry
+	Shell        []string          // custom shell args; nil = use default
 }
 
 // Step represents a single execution unit within a job.
@@ -242,6 +273,8 @@ type Step struct {
 	Artifacts []Artifact        // files imported from dependency jobs at this point
 	When      *conditional.When // conditional execution; nil = always run
 	NoCache   bool              // disable caching for this step
+	Timeout   time.Duration     // step-level timeout; 0 = no timeout
+	Shell     []string          // custom shell args; nil = inherit from job
 }
 
 // Validate checks that the pipeline is well-formed and returns job indices
@@ -281,7 +314,7 @@ func (p *Pipeline) Validate() ([]int, error) {
 
 // validateJob checks a single job for name, image, steps, and dependency validity.
 //
-//revive:disable-next-line:cognitive-complexity validateJob is a linear sequence of field checks; splitting it hurts readability.
+//revive:disable-next-line:cognitive-complexity,cyclomatic validateJob is a linear sequence of field checks; splitting it hurts readability.
 func validateJob(idx int, j *Job, g *jobGraph) error {
 	if j.Name == "" {
 		return fmt.Errorf("job at index %d: %w", idx, ErrEmptyJobName)
@@ -310,6 +343,15 @@ func validateJob(idx int, j *Job, g *jobGraph) error {
 		return err
 	}
 	if err := validatePublish(jobScope, j.Publish); err != nil {
+		return err
+	}
+	if err := validateTimeout(jobScope, j.Timeout); err != nil {
+		return err
+	}
+	if err := validateRetry(jobScope, j.Retry); err != nil {
+		return err
+	}
+	if err := validateShell(jobScope, j.Shell); err != nil {
 		return err
 	}
 	// Jobs allow both static and deferred (output()-referencing) conditions,
@@ -365,10 +407,17 @@ func validateStep(jobName string, idx int, s *Step, seen map[string]struct{}) er
 			return fmt.Errorf("job %q step %q: %w", jobName, s.Name, ErrDeferredStepWhen)
 		}
 	}
-	if err := validateEnvVars(fmt.Sprintf("job %q step %q", jobName, s.Name), s.Env); err != nil {
+	stepScope := fmt.Sprintf("job %q step %q", jobName, s.Name)
+	if err := validateTimeout(stepScope, s.Timeout); err != nil {
 		return err
 	}
-	return validateExports(fmt.Sprintf("job %q step %q", jobName, s.Name), s.Exports)
+	if err := validateShell(stepScope, s.Shell); err != nil {
+		return err
+	}
+	if err := validateEnvVars(stepScope, s.Env); err != nil {
+		return err
+	}
+	return validateExports(stepScope, s.Exports)
 }
 
 // validateEnvVars checks env vars for empty keys and duplicates within a scope.
@@ -464,6 +513,42 @@ func validatePublish(scope string, pub *Publish) error {
 	return nil
 }
 
+// validateRetry checks that a retry config is valid.
+func validateRetry(scope string, r *Retry) error {
+	if r == nil {
+		return nil
+	}
+	if r.Attempts <= 0 {
+		return fmt.Errorf("%s: %w", scope, ErrInvalidRetryAttempts)
+	}
+	if r.Delay < 0 {
+		return fmt.Errorf("%s: %w", scope, ErrNegativeDelay)
+	}
+	switch r.Backoff {
+	case "", BackoffNone, BackoffLinear, BackoffExponential:
+	default:
+		return fmt.Errorf("%s: backoff %q: %w", scope, r.Backoff, ErrInvalidBackoff)
+	}
+	return nil
+}
+
+// validateTimeout checks that a timeout duration is non-negative.
+func validateTimeout(scope string, d time.Duration) error {
+	if d < 0 {
+		return fmt.Errorf("%s: %w", scope, ErrNegativeTimeout)
+	}
+	return nil
+}
+
+// validateShell checks that an explicitly-set shell has at least one argument.
+// A nil shell (inherit) is valid; a non-nil empty shell is not.
+func validateShell(scope string, s []string) error {
+	if s != nil && len(s) == 0 {
+		return fmt.Errorf("%s: %w", scope, ErrEmptyShell)
+	}
+	return nil
+}
+
 // checkSelfDeps detects jobs that list themselves as a dependency.
 func checkSelfDeps(jobs []Job) error {
 	for i := range jobs {
@@ -552,6 +637,9 @@ func ApplyDefaults(jobs []Job, defaults *Defaults) []Job {
 		}
 		if len(defaults.Env) > 0 {
 			c.Env = mergeEnv(defaults.Env, c.Env)
+		}
+		if c.Shell == nil && len(defaults.Shell) > 0 {
+			c.Shell = slices.Clone(defaults.Shell)
 		}
 		return c
 	})

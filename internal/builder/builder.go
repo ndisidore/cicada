@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/containerd/platforms"
 	"github.com/moby/buildkit/client/llb"
@@ -16,6 +18,9 @@ import (
 
 // errMissingDepState indicates a dependency's LLB state was not found during build.
 var errMissingDepState = errors.New("missing dependency state")
+
+// _defaultShell is the default shell used when no job or step shell is set.
+var _defaultShell = []string{"/bin/sh", "-c"}
 
 // LocalExport pairs an LLB definition containing exported files with the
 // target host path for the local exporter.
@@ -34,6 +39,13 @@ type ImageExport struct {
 	Platform   string
 }
 
+// jobResult bundles the outputs of buildJob.
+type jobResult struct {
+	def          *llb.Definition
+	state        llb.State
+	stepTimeouts map[string]time.Duration
+}
+
 // Result holds the LLB definitions for a pipeline, one per job in topological order.
 type Result struct {
 	// Definitions contains one LLB definition per job, ordered by dependency.
@@ -46,6 +58,8 @@ type Result struct {
 	ImageExports []ImageExport
 	// OutputDefs maps job names to LLB definitions that extract /cicada/output.
 	OutputDefs map[string]*llb.Definition
+	// StepTimeouts maps job names to per-vertex timeout durations.
+	StepTimeouts map[string]map[string]time.Duration
 }
 
 // BuildOpts configures the LLB build process.
@@ -101,55 +115,62 @@ func Build(ctx context.Context, p pipeline.Pipeline, opts BuildOpts) (Result, er
 	}
 
 	result := Result{
-		Definitions: make([]*llb.Definition, 0, len(order)),
-		JobNames:    make([]string, 0, len(order)),
-		OutputDefs:  make(map[string]*llb.Definition, len(order)),
+		Definitions:  make([]*llb.Definition, 0, len(order)),
+		JobNames:     make([]string, 0, len(order)),
+		OutputDefs:   make(map[string]*llb.Definition, len(order)),
+		StepTimeouts: make(map[string]map[string]time.Duration, len(order)),
 	}
 
 	states := make(map[string]llb.State, len(order))
 	for _, idx := range order {
-		job := &p.Jobs[idx]
-		def, st, err := buildJob(ctx, job, states, jo)
-		if err != nil {
-			return Result{}, fmt.Errorf("building job %q: %w", job.Name, err)
-		}
-		result.Definitions = append(result.Definitions, def)
-		result.JobNames = append(result.JobNames, job.Name)
-		states[job.Name] = st
-
-		// Build output extraction definition for deferred when conditions.
-		outputDef, err := buildExportDef(ctx, st, "/cicada/output")
-		if err != nil {
-			return Result{}, fmt.Errorf("building output def for job %q: %w", job.Name, err)
-		}
-		result.OutputDefs[job.Name] = outputDef
-
-		// Collect exports from job-level and step-level, all from final state.
-		allExports := collectExports(job)
-		for _, exp := range allExports {
-			exportDef, err := buildExportDef(ctx, st, exp.Path)
-			if err != nil {
-				return Result{}, fmt.Errorf("building export for job %q: %w", job.Name, err)
-			}
-			result.Exports = append(result.Exports, LocalExport{
-				Definition: exportDef,
-				JobName:    job.Name,
-				Local:      exp.Local,
-				Dir:        strings.HasSuffix(exp.Path, "/"),
-			})
-		}
-
-		if job.Publish != nil {
-			result.ImageExports = append(result.ImageExports, ImageExport{
-				Definition: def,
-				JobName:    job.Name,
-				Publish:    *job.Publish,
-				Platform:   job.Platform,
-			})
+		if err := appendJob(ctx, &p.Jobs[idx], states, jo, &result); err != nil {
+			return Result{}, err
 		}
 	}
 
 	return result, nil
+}
+
+// appendJob builds a single job's LLB and appends its definitions, exports,
+// and image publishes to the result.
+func appendJob(ctx context.Context, job *pipeline.Job, states map[string]llb.State, jo jobOpts, result *Result) error {
+	jr, err := buildJob(ctx, job, states, jo)
+	if err != nil {
+		return fmt.Errorf("building job %q: %w", job.Name, err)
+	}
+	result.Definitions = append(result.Definitions, jr.def)
+	result.JobNames = append(result.JobNames, job.Name)
+	states[job.Name] = jr.state
+	result.StepTimeouts[job.Name] = jr.stepTimeouts
+
+	outputDef, err := buildExportDef(ctx, jr.state, "/cicada/output")
+	if err != nil {
+		return fmt.Errorf("building output def for job %q: %w", job.Name, err)
+	}
+	result.OutputDefs[job.Name] = outputDef
+
+	for _, exp := range collectExports(job) {
+		exportDef, err := buildExportDef(ctx, jr.state, exp.Path)
+		if err != nil {
+			return fmt.Errorf("building export for job %q: %w", job.Name, err)
+		}
+		result.Exports = append(result.Exports, LocalExport{
+			Definition: exportDef,
+			JobName:    job.Name,
+			Local:      exp.Local,
+			Dir:        strings.HasSuffix(exp.Path, "/"),
+		})
+	}
+
+	if job.Publish != nil {
+		result.ImageExports = append(result.ImageExports, ImageExport{
+			Definition: jr.def,
+			JobName:    job.Name,
+			Publish:    *job.Publish,
+			Platform:   job.Platform,
+		})
+	}
+	return nil
 }
 
 // collectExports gathers all export declarations from a job (job-level + step-level).
@@ -211,13 +232,13 @@ func buildJob(
 	job *pipeline.Job,
 	depStates map[string]llb.State,
 	opts jobOpts,
-) (*llb.Definition, llb.State, error) {
+) (jobResult, error) {
 	imgOpts, baseRunOpts := jobCacheOpts(job, opts)
 
 	if job.Platform != "" {
 		plat, err := platforms.Parse(job.Platform)
 		if err != nil {
-			return nil, llb.State{}, fmt.Errorf("job %q: parsing platform %q: %w", job.Name, job.Platform, err)
+			return jobResult{}, fmt.Errorf("job %q: parsing platform %q: %w", job.Name, job.Platform, err)
 		}
 		imgOpts = append(imgOpts, llb.Platform(plat))
 	}
@@ -243,7 +264,7 @@ func buildJob(
 	for _, art := range job.Artifacts {
 		depSt, ok := depStates[art.From]
 		if !ok {
-			return nil, llb.State{}, fmt.Errorf(
+			return jobResult{}, fmt.Errorf(
 				"artifact from %q: %w", art.From, errMissingDepState,
 			)
 		}
@@ -259,7 +280,7 @@ func buildJob(
 	// Build dep mount options (shared across all steps).
 	depMounts, err := depMountOpts(job, depStates, opts.exposeDeps)
 	if err != nil {
-		return nil, llb.State{}, err
+		return jobResult{}, fmt.Errorf("building dep mounts: %w", err)
 	}
 
 	// Build local context for bind mounts.
@@ -276,6 +297,7 @@ func buildJob(
 	jobNoCached := opts.globalNoCache || job.NoCache || jobFiltered
 
 	// Execute steps sequentially, chaining state.
+	var stepTimeouts map[string]time.Duration
 	for i := range job.Steps {
 		step := &job.Steps[i]
 
@@ -283,7 +305,7 @@ func buildJob(
 		for _, art := range step.Artifacts {
 			depSt, ok := depStates[art.From]
 			if !ok {
-				return nil, llb.State{}, fmt.Errorf(
+				return jobResult{}, fmt.Errorf(
 					"step %q: artifact from %q: %w",
 					step.Name, art.From, errMissingDepState,
 				)
@@ -302,15 +324,28 @@ func buildJob(
 		}
 
 		if len(step.Run) == 0 {
-			return nil, llb.State{}, fmt.Errorf("job %q step %q: %w", job.Name, step.Name, pipeline.ErrMissingRun)
+			return jobResult{}, fmt.Errorf("job %q step %q: %w", job.Name, step.Name, pipeline.ErrMissingRun)
 		}
 
 		// Pre-compute step-level mount/cache run options (shared across all commands).
 		stepMountOpts := buildMountRunOpts(step.Mounts, step.Caches, localOpts)
 
+		shell := resolveShell(job.Shell, step.Shell)
+
+		// Pre-compute quoted inner shell and timeout seconds for timeout wrapping.
+		var innerShell, timeoutSecs string
+		if step.Timeout > 0 {
+			quotedShell := make([]string, len(shell))
+			for k, s := range shell {
+				quotedShell[k] = singleQuote(s)
+			}
+			innerShell = strings.Join(quotedShell, " ")
+			timeoutSecs = strconv.FormatFloat(step.Timeout.Seconds(), 'f', -1, 64)
+		}
+
 		for j, cmd := range step.Run {
 			if strings.TrimSpace(cmd) == "" {
-				return nil, llb.State{}, fmt.Errorf("job %q step %q run[%d]: %w", job.Name, step.Name, j, pipeline.ErrEmptyRunCommand)
+				return jobResult{}, fmt.Errorf("job %q step %q run[%d]: %w", job.Name, step.Name, j, pipeline.ErrEmptyRunCommand)
 			}
 
 			// Preamble sources dependency output env vars into the shell.
@@ -323,10 +358,37 @@ func buildJob(
 				shellCmd = preamble + cmd
 			}
 
+			vertexName := job.Name + "/" + step.Name + "/" + cmd
+
+			if step.Timeout > 0 {
+				if stepTimeouts == nil {
+					stepTimeouts = make(map[string]time.Duration)
+				}
+				stepTimeouts[vertexName] = step.Timeout
+			}
+
+			var args []string
+			if step.Timeout > 0 {
+				// Step timeouts require a `timeout` binary (coreutils or
+				// BusyBox) in the container image.
+				// Nest timeout inside the shell so the shell is PID 1.
+				// PID 1 has special kernel signal protection that drops
+				// default-action signals (including SIGALRM), which breaks
+				// BusyBox timeout when it runs as PID 1.
+				// -s KILL ensures the child can't defer SIGTERM.
+				// "; exit $?" prevents the shell's exec optimization
+				// (which would make timeout PID 1 again) while
+				// preserving the exit code.
+				wrapped := "timeout -s KILL " + timeoutSecs + " " + innerShell + " " + singleQuote(shellCmd) + "; exit $?"
+				args = append(shell, wrapped)
+			} else {
+				args = append(shell, shellCmd)
+			}
+
 			runOpts := append([]llb.RunOption(nil), baseRunOpts...)
 			runOpts = append(runOpts,
-				llb.Args([]string{"/bin/sh", "-c", shellCmd}),
-				llb.WithCustomName(job.Name+"/"+step.Name+"/"+cmd),
+				llb.Args(args),
+				llb.WithCustomName(vertexName),
 			)
 			runOpts = append(runOpts, depMounts...)
 			runOpts = append(runOpts, jobMountOpts...)
@@ -342,9 +404,32 @@ func buildJob(
 
 	def, err := st.Marshal(ctx)
 	if err != nil {
-		return nil, llb.State{}, fmt.Errorf("marshaling: %w", err)
+		return jobResult{}, fmt.Errorf("marshaling: %w", err)
 	}
-	return def, st, nil
+	return jobResult{def: def, state: st, stepTimeouts: stepTimeouts}, nil
+}
+
+// resolveShell returns a fresh copy of the effective shell for a run command.
+// Step shell overrides job shell; if neither is set, uses _defaultShell.
+// A copy is returned so callers can safely append without mutating the source.
+func resolveShell(jobShell, stepShell []string) []string {
+	var src []string
+	switch {
+	case len(stepShell) > 0:
+		src = stepShell
+	case len(jobShell) > 0:
+		src = jobShell
+	default:
+		src = _defaultShell
+	}
+	return append([]string(nil), src...)
+}
+
+// singleQuote wraps s in single quotes, escaping any embedded single quotes
+// using the standard POSIX end-reopen technique (close quote, backslash-escaped
+// literal quote, reopen quote).
+func singleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 // buildMountRunOpts converts mount and cache slices into LLB run options.

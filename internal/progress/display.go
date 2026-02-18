@@ -4,6 +4,7 @@ package progress
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/moby/buildkit/client"
 )
@@ -19,12 +20,19 @@ type Display interface {
 	// May be called concurrently from multiple goroutines. The caller must
 	// ensure ch is closed promptly (including on context cancellation) so the
 	// consumer goroutine can exit.
-	Attach(ctx context.Context, jobName string, ch <-chan *client.SolveStatus) error
+	Attach(ctx context.Context, jobName string, ch <-chan *client.SolveStatus, stepTimeouts map[string]time.Duration) error
 	// Skip reports that a job was skipped due to a when condition.
 	// Called for both static (pre-build) and deferred (runtime) skips.
 	Skip(ctx context.Context, jobName string)
 	// SkipStep reports that a step within a job was skipped due to a when condition.
 	SkipStep(ctx context.Context, jobName, stepName string)
+	// Retry reports that a job is being retried after a failure.
+	// attempt is the 1-based total attempt number (2 = first retry).
+	// maxAttempts is the total number of attempts including the initial run
+	// (i.e. 1 + pipeline.Retry.Attempts).
+	Retry(ctx context.Context, jobName string, attempt, maxAttempts int, err error)
+	// Timeout reports that a job exceeded its configured timeout.
+	Timeout(ctx context.Context, jobName string, timeout time.Duration)
 	// Seal signals that no more Attach calls will be made. Must be called
 	// before Wait to prevent premature completion detection.
 	Seal()

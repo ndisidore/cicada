@@ -34,6 +34,11 @@ func (j Job) Clone() Job {
 		p := *j.Publish
 		j.Publish = &p
 	}
+	if j.Retry != nil {
+		r := *j.Retry
+		j.Retry = &r
+	}
+	j.Shell = slices.Clone(j.Shell)
 	return j
 }
 
@@ -49,6 +54,7 @@ func (s Step) Clone() Step {
 		w := *s.When
 		s.When = &w
 	}
+	s.Shell = slices.Clone(s.Shell)
 	return s
 }
 
@@ -72,6 +78,7 @@ func (p Pipeline) Clone() Pipeline {
 		d := *p.Defaults
 		d.Mounts = slices.Clone(d.Mounts)
 		d.Env = slices.Clone(d.Env)
+		d.Shell = slices.Clone(d.Shell)
 		p.Defaults = &d
 	}
 	return p
