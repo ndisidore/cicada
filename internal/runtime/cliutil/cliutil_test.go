@@ -54,7 +54,7 @@ func TestCLIRuntimeRun(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			c := &CLIRuntime{Binary: "test", Exec: tt.exec}
-			got, err := c.Run(context.Background(), tt.cfg)
+			got, err := c.Run(t.Context(), tt.cfg)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
 				return
@@ -96,7 +96,7 @@ func TestCLIRuntimeStart(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			c := &CLIRuntime{Binary: "test", Exec: tt.exec}
-			err := c.Start(context.Background(), "my-container")
+			err := c.Start(t.Context(), "my-container")
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), "test start my-container")
@@ -134,7 +134,7 @@ func TestCLIRuntimeStop(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			c := &CLIRuntime{Binary: "test", Exec: tt.exec}
-			err := c.Stop(context.Background(), "my-container")
+			err := c.Stop(t.Context(), "my-container")
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), "test stop my-container")
@@ -172,7 +172,7 @@ func TestCLIRuntimeRemove(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			c := &CLIRuntime{Binary: "test", Exec: tt.exec}
-			err := c.Remove(context.Background(), "my-container")
+			err := c.Remove(t.Context(), "my-container")
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), "test rm my-container")
@@ -250,7 +250,7 @@ func TestCLIRuntimeInspect(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			c := &CLIRuntime{Binary: "test", Exec: tt.exec}
-			state, err := c.Inspect(context.Background(), "my-container")
+			state, err := c.Inspect(t.Context(), "my-container")
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
 				assert.Equal(t, tt.wantState, state)

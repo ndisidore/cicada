@@ -103,7 +103,7 @@ func TestEnsureRunning(t *testing.T) {
 			}
 			mgr := &Manager{rt: rt, bkDial: dial, health: _defaultHealthConfig}
 
-			addr, err := mgr.EnsureRunning(context.Background(), tt.userAddr)
+			addr, err := mgr.EnsureRunning(t.Context(), tt.userAddr)
 			if tt.wantErr != nil {
 				require.Error(t, err)
 				assert.ErrorIs(t, err, tt.wantErr)
@@ -145,7 +145,7 @@ func TestIsReachable(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			mgr := &Manager{rt: new(runtimetest.MockRuntime), bkDial: tt.dial, health: _defaultHealthConfig}
-			got := mgr.IsReachable(context.Background(), _defaultAddr)
+			got := mgr.IsReachable(t.Context(), _defaultAddr)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -202,7 +202,7 @@ func TestStop(t *testing.T) {
 			tt.setup(rt)
 			mgr := &Manager{rt: rt, bkDial: noopBkDial, health: _defaultHealthConfig}
 
-			err := mgr.Stop(context.Background())
+			err := mgr.Stop(t.Context())
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), "stopping container")
@@ -253,7 +253,7 @@ func TestRemove(t *testing.T) {
 			tt.setup(rt)
 			mgr := &Manager{rt: rt, bkDial: noopBkDial, health: _defaultHealthConfig}
 
-			err := mgr.Remove(context.Background())
+			err := mgr.Remove(t.Context())
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), "removing container")
@@ -312,7 +312,7 @@ func TestStatus(t *testing.T) {
 			tt.setup(rt)
 			mgr := &Manager{rt: rt, bkDial: noopBkDial, health: _defaultHealthConfig}
 
-			state, err := mgr.Status(context.Background())
+			state, err := mgr.Status(t.Context())
 			if tt.wantErr {
 				require.Error(t, err)
 				return
@@ -391,7 +391,7 @@ func TestStart(t *testing.T) {
 			}
 			mgr := &Manager{rt: rt, bkDial: dial, health: _defaultHealthConfig}
 
-			addr, err := mgr.Start(context.Background())
+			addr, err := mgr.Start(t.Context())
 			if tt.wantErr != nil {
 				require.Error(t, err)
 				assert.ErrorIs(t, err, tt.wantErr)
@@ -422,7 +422,7 @@ func TestWaitHealthy(t *testing.T) {
 				bkDial: func(context.Context, string) (bool, error) { return true, nil },
 				health: health,
 			}
-			require.NoError(t, mgr.waitHealthy(context.Background()))
+			require.NoError(t, mgr.waitHealthy(t.Context()))
 		})
 	})
 
@@ -438,7 +438,7 @@ func TestWaitHealthy(t *testing.T) {
 				},
 				health: health,
 			}
-			require.NoError(t, mgr.waitHealthy(context.Background()))
+			require.NoError(t, mgr.waitHealthy(t.Context()))
 			assert.Equal(t, int32(3), calls.Load())
 		})
 	})
@@ -451,7 +451,7 @@ func TestWaitHealthy(t *testing.T) {
 				bkDial: func(context.Context, string) (bool, error) { return false, nil },
 				health: health,
 			}
-			require.ErrorIs(t, mgr.waitHealthy(context.Background()), ErrEngineUnhealthy)
+			require.ErrorIs(t, mgr.waitHealthy(t.Context()), ErrEngineUnhealthy)
 		})
 	})
 
@@ -463,7 +463,7 @@ func TestWaitHealthy(t *testing.T) {
 				bkDial: func(context.Context, string) (bool, error) { return false, errors.New("connection refused") },
 				health: health,
 			}
-			err := mgr.waitHealthy(context.Background())
+			err := mgr.waitHealthy(t.Context())
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "probing buildkitd")
 		})
@@ -472,7 +472,7 @@ func TestWaitHealthy(t *testing.T) {
 	t.Run("respects context cancellation", func(t *testing.T) {
 		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			var calls atomic.Int32
 			mgr := &Manager{
 				rt: new(runtimetest.MockRuntime),

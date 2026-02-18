@@ -1,7 +1,6 @@
 package pipeline
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -13,7 +12,7 @@ import (
 func TestEvaluateConditions(t *testing.T) {
 	t.Parallel()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	wctx := conditional.Context{
 		Getenv: func(key string) string {
 			if key == "DEPLOY" {

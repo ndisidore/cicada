@@ -44,8 +44,7 @@ func (r *Resolver) Get(ctx context.Context, name string) (Runtime, error) {
 		}
 		factory, ok := r.Named[Type(key)]
 		if !ok {
-			valid := make([]string, 0, len(r.Named)+1)
-			valid = append(valid, "auto")
+			valid := []string{"auto"}
 			for k := range r.Named {
 				valid = append(valid, string(k))
 			}

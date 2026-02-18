@@ -122,15 +122,15 @@ func TestRun(t *testing.T) {
 	t.Parallel()
 
 	// Pre-marshal a minimal definition to reuse across test cases.
-	def, err := llb.Scratch().Marshal(context.Background())
+	def, err := llb.Scratch().Marshal(t.Context())
 	require.NoError(t, err)
 
-	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancelledCtx, cancel := context.WithCancel(t.Context())
 	cancel()
 
 	tests := []struct {
 		name         string
-		ctx          context.Context // if nil, context.Background() is used
+		ctx          context.Context // if nil, t.Context() is used
 		input        RunInput
 		wantErr      string
 		wantSentinel error
@@ -285,7 +285,7 @@ func TestRun(t *testing.T) {
 			t.Parallel()
 			ctx := tt.ctx
 			if ctx == nil {
-				ctx = context.Background()
+				ctx = t.Context()
 			}
 			err := Run(ctx, tt.input)
 			if tt.wantSentinel != nil {
@@ -305,7 +305,7 @@ func TestRun(t *testing.T) {
 func TestRun_ordering(t *testing.T) {
 	t.Parallel()
 
-	def, err := llb.Scratch().Marshal(context.Background())
+	def, err := llb.Scratch().Marshal(t.Context())
 	require.NoError(t, err)
 
 	t.Run("linear chain", func(t *testing.T) {
@@ -332,7 +332,7 @@ func TestRun_ordering(t *testing.T) {
 		}
 
 		// Chain a -> b -> c so they must run in order.
-		err := Run(context.Background(), RunInput{
+		err := Run(t.Context(), RunInput{
 			Solver: solver,
 			Jobs: []Job{
 				{Name: "a", Definition: def},
@@ -383,7 +383,7 @@ func TestRun_ordering(t *testing.T) {
 		}
 
 		// Diamond: a -> {b, c} -> d
-		err := Run(context.Background(), RunInput{
+		err := Run(t.Context(), RunInput{
 			Solver: solver,
 			Jobs: []Job{
 				{Name: "a", Definition: def},
@@ -479,7 +479,7 @@ func TestRun_parallelism(t *testing.T) {
 func TestRun_errorPropagation(t *testing.T) {
 	t.Parallel()
 
-	def, err := llb.Scratch().Marshal(context.Background())
+	def, err := llb.Scratch().Marshal(t.Context())
 	require.NoError(t, err)
 
 	t.Run("error cancels downstream", func(t *testing.T) {
@@ -518,7 +518,7 @@ func TestRun_errorPropagation(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 
-		err = Run(context.Background(), RunInput{
+		err = Run(t.Context(), RunInput{
 			Solver: solver,
 			Jobs: []Job{
 				{Name: "a", Definition: defA},
@@ -555,7 +555,7 @@ func TestRun_errorPropagation(t *testing.T) {
 		}
 
 		// Chain a -> b -> c. Job "a" fails; "c" should never be solved.
-		err := Run(context.Background(), RunInput{
+		err := Run(t.Context(), RunInput{
 			Solver: solver,
 			Jobs: []Job{
 				{Name: "a", Definition: def},
@@ -579,7 +579,7 @@ func TestRun_errorPropagation(t *testing.T) {
 
 		display := &fakeDisplay{}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		defer cancel()
 
 		err := Run(ctx, RunInput{
@@ -617,7 +617,7 @@ func TestRun_errorPropagation(t *testing.T) {
 			return nil
 		}
 
-		err := Run(context.Background(), RunInput{
+		err := Run(t.Context(), RunInput{
 			Solver: solver,
 			Jobs: []Job{
 				{Name: "a", Definition: def},
@@ -634,7 +634,7 @@ func TestRun_errorPropagation(t *testing.T) {
 func TestRun_display(t *testing.T) {
 	t.Parallel()
 
-	def, err := llb.Scratch().Marshal(context.Background())
+	def, err := llb.Scratch().Marshal(t.Context())
 	require.NoError(t, err)
 
 	t.Run("solver writes status events", func(t *testing.T) {
@@ -657,7 +657,7 @@ func TestRun_display(t *testing.T) {
 			return nil
 		}
 
-		err := Run(context.Background(), RunInput{
+		err := Run(t.Context(), RunInput{
 			Solver:  solver,
 			Jobs:    []Job{{Name: "status-test", Definition: def}},
 			Display: display,
@@ -671,7 +671,7 @@ func TestRun_display(t *testing.T) {
 func TestRun_semAcquireFailurePropagates(t *testing.T) {
 	t.Parallel()
 
-	def, err := llb.Scratch().Marshal(context.Background())
+	def, err := llb.Scratch().Marshal(t.Context())
 	require.NoError(t, err)
 
 	var solved atomic.Bool
@@ -682,7 +682,7 @@ func TestRun_semAcquireFailurePropagates(t *testing.T) {
 	}}
 
 	// Pre-cancel so sem.Acquire fails immediately for all jobs.
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
 	err = Run(ctx, RunInput{
@@ -701,7 +701,7 @@ func TestRun_semAcquireFailurePropagates(t *testing.T) {
 func TestRun_exports(t *testing.T) {
 	t.Parallel()
 
-	def, err := llb.Scratch().Marshal(context.Background())
+	def, err := llb.Scratch().Marshal(t.Context())
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -790,7 +790,7 @@ func TestRun_exports(t *testing.T) {
 				return &client.SolveResponse{}, nil
 			}}
 
-			err := Run(context.Background(), RunInput{
+			err := Run(t.Context(), RunInput{
 				Solver:  jobSolver,
 				Jobs:    []Job{{Name: "job", Definition: def}},
 				Display: tt.display,
@@ -898,7 +898,7 @@ func TestRun_exports(t *testing.T) {
 func TestRun_cacheEntriesFlowToSolveOpt(t *testing.T) {
 	t.Parallel()
 
-	def, err := llb.Scratch().Marshal(context.Background())
+	def, err := llb.Scratch().Marshal(t.Context())
 	require.NoError(t, err)
 
 	exports := []client.CacheOptionsEntry{{Type: "registry", Attrs: map[string]string{"ref": "ghcr.io/org/cache"}}}
@@ -911,7 +911,7 @@ func TestRun_cacheEntriesFlowToSolveOpt(t *testing.T) {
 		return &client.SolveResponse{}, nil
 	}}
 
-	err = Run(context.Background(), RunInput{
+	err = Run(t.Context(), RunInput{
 		Solver:       solver,
 		Jobs:         []Job{{Name: "build", Definition: def}},
 		Display:      &fakeDisplay{},
@@ -929,7 +929,7 @@ func TestRun_cacheEntriesFlowToSolveOpt(t *testing.T) {
 func TestRun_imagePublish(t *testing.T) {
 	t.Parallel()
 
-	def, err := llb.Scratch().Marshal(context.Background())
+	def, err := llb.Scratch().Marshal(t.Context())
 	require.NoError(t, err)
 
 	t.Run("single publish uses image exporter", func(t *testing.T) {
@@ -944,7 +944,7 @@ func TestRun_imagePublish(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 
-		err := Run(context.Background(), RunInput{
+		err := Run(t.Context(), RunInput{
 			Solver:  solver,
 			Jobs:    []Job{{Name: "build", Definition: def}},
 			Display: &fakeDisplay{},
@@ -974,7 +974,7 @@ func TestRun_imagePublish(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 
-		err := Run(context.Background(), RunInput{
+		err := Run(t.Context(), RunInput{
 			Solver:  solver,
 			Jobs:    []Job{{Name: "build", Definition: def}},
 			Display: &fakeDisplay{},
@@ -1001,7 +1001,7 @@ func TestRun_imagePublish(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 
-		err := Run(context.Background(), RunInput{
+		err := Run(t.Context(), RunInput{
 			Solver:  solver,
 			Jobs:    []Job{{Name: "build", Definition: def}},
 			Display: &fakeDisplay{},
@@ -1028,7 +1028,7 @@ func TestRun_imagePublish(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 
-		err := Run(context.Background(), RunInput{
+		err := Run(t.Context(), RunInput{
 			Solver:  solver,
 			Jobs:    []Job{{Name: "build", Definition: def}},
 			Display: &fakeDisplay{},
@@ -1049,7 +1049,7 @@ func TestRun_imagePublish(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 
-		err := Run(context.Background(), RunInput{
+		err := Run(t.Context(), RunInput{
 			Solver:  solver,
 			Jobs:    []Job{{Name: "build", Definition: def}},
 			Display: &fakeDisplay{},
@@ -1064,7 +1064,7 @@ func TestRun_imagePublish(t *testing.T) {
 func TestGroupPublishes(t *testing.T) {
 	t.Parallel()
 
-	def, err := llb.Scratch().Marshal(context.Background())
+	def, err := llb.Scratch().Marshal(t.Context())
 	require.NoError(t, err)
 
 	t.Run("single variant produces one group", func(t *testing.T) {
@@ -1135,7 +1135,7 @@ func TestGroupPublishes(t *testing.T) {
 func TestGroupPublishes_exportDocker(t *testing.T) {
 	t.Parallel()
 
-	def, err := llb.Scratch().Marshal(context.Background())
+	def, err := llb.Scratch().Marshal(t.Context())
 	require.NoError(t, err)
 
 	pubs := []ImagePublish{
@@ -1150,7 +1150,7 @@ func TestGroupPublishes_exportDocker(t *testing.T) {
 func TestRun_exportDockerMultiPlatformError(t *testing.T) {
 	t.Parallel()
 
-	def, err := llb.Scratch().Marshal(context.Background())
+	def, err := llb.Scratch().Marshal(t.Context())
 	require.NoError(t, err)
 
 	solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
@@ -1159,7 +1159,7 @@ func TestRun_exportDockerMultiPlatformError(t *testing.T) {
 	}}
 
 	rt := new(runtimetest.MockRuntime)
-	err = Run(context.Background(), RunInput{
+	err = Run(t.Context(), RunInput{
 		Solver:  solver,
 		Runtime: rt,
 		Jobs:    []Job{{Name: "build", Definition: def}},
@@ -1176,7 +1176,7 @@ func TestRun_exportDockerMultiPlatformError(t *testing.T) {
 func TestRun_duplicatePlatformError(t *testing.T) {
 	t.Parallel()
 
-	def, err := llb.Scratch().Marshal(context.Background())
+	def, err := llb.Scratch().Marshal(t.Context())
 	require.NoError(t, err)
 
 	solver := &fakeSolver{
@@ -1192,7 +1192,7 @@ func TestRun_duplicatePlatformError(t *testing.T) {
 		},
 	}
 
-	err = Run(context.Background(), RunInput{
+	err = Run(t.Context(), RunInput{
 		Solver:  solver,
 		Jobs:    []Job{{Name: "build", Definition: def}},
 		Display: &fakeDisplay{},
@@ -1208,7 +1208,7 @@ func TestRun_duplicatePlatformError(t *testing.T) {
 func TestRun_exportDocker(t *testing.T) {
 	t.Parallel()
 
-	def, err := llb.Scratch().Marshal(context.Background())
+	def, err := llb.Scratch().Marshal(t.Context())
 	require.NoError(t, err)
 
 	t.Run("solves with docker exporter and Output set", func(t *testing.T) {
@@ -1226,7 +1226,7 @@ func TestRun_exportDocker(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 
-		err := Run(context.Background(), RunInput{
+		err := Run(t.Context(), RunInput{
 			Solver:  solver,
 			Runtime: rt,
 			Jobs:    []Job{{Name: "build", Definition: def}},
@@ -1267,7 +1267,7 @@ func TestRun_exportDocker(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 
-		err := Run(context.Background(), RunInput{
+		err := Run(t.Context(), RunInput{
 			Solver:  solver,
 			Runtime: rt,
 			Jobs:    []Job{{Name: "build", Definition: def}},
@@ -1291,7 +1291,7 @@ func TestRun_exportDocker(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 
-		err := Run(context.Background(), RunInput{
+		err := Run(t.Context(), RunInput{
 			Solver:  solver,
 			Runtime: rt,
 			Jobs:    []Job{{Name: "build", Definition: def}},
@@ -1312,7 +1312,7 @@ func TestTeeStatus(t *testing.T) {
 		t.Parallel()
 
 		ch := make(chan *client.SolveStatus, 1)
-		result := teeStatus(context.Background(), ch, nil, "step")
+		result := teeStatus(t.Context(), ch, nil, "step")
 		// With nil collector, teeStatus returns the source channel directly.
 		assert.Equal(t, (<-chan *client.SolveStatus)(ch), result)
 	})
@@ -1338,7 +1338,7 @@ func TestTeeStatus(t *testing.T) {
 		}
 		close(src)
 
-		out := teeStatus(context.Background(), src, collector, "build")
+		out := teeStatus(t.Context(), src, collector, "build")
 
 		var received int
 		for range out {
@@ -1495,7 +1495,7 @@ func TestRunNodeDeferredWhenSkip(t *testing.T) {
 		whenCtx: wctx,
 	}
 
-	err := runNode(context.Background(), node, cfg)
+	err := runNode(t.Context(), node, cfg)
 	require.NoError(t, err)
 	assert.True(t, node.skipped)
 	assert.Equal(t, "deploy", skippedJob)
@@ -1556,7 +1556,7 @@ func TestRunNodeSkippedDepPropagatesSkip(t *testing.T) {
 		},
 	}
 
-	err := runNode(context.Background(), node, cfg)
+	err := runNode(t.Context(), node, cfg)
 	require.NoError(t, err)
 	assert.True(t, node.skipped)
 	assert.Equal(t, []string{"deploy"}, skippedJobs)
@@ -1567,7 +1567,7 @@ func TestRunNodeSkippedDepPropagatesSkip(t *testing.T) {
 func TestRunNodeSkippedStepsReported(t *testing.T) {
 	t.Parallel()
 
-	def, err := llb.Scratch().Marshal(context.Background())
+	def, err := llb.Scratch().Marshal(t.Context())
 	require.NoError(t, err)
 
 	solver := &fakeSolver{
@@ -1605,7 +1605,7 @@ func TestRunNodeSkippedStepsReported(t *testing.T) {
 		sem:     semaphore.NewWeighted(1),
 	}
 
-	err = runNode(context.Background(), node, cfg)
+	err = runNode(t.Context(), node, cfg)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"build/slow-test", "build/lint"}, reported)
 }
@@ -1613,10 +1613,10 @@ func TestRunNodeSkippedStepsReported(t *testing.T) {
 func TestRunNodeOutputExtractionFailure(t *testing.T) {
 	t.Parallel()
 
-	def, err := llb.Scratch().Marshal(context.Background())
+	def, err := llb.Scratch().Marshal(t.Context())
 	require.NoError(t, err)
 
-	outputDef, err := llb.Scratch().Marshal(context.Background())
+	outputDef, err := llb.Scratch().Marshal(t.Context())
 	require.NoError(t, err)
 
 	extractionErr := errors.New("daemon unavailable")
@@ -1652,7 +1652,7 @@ func TestRunNodeOutputExtractionFailure(t *testing.T) {
 		sem:     semaphore.NewWeighted(1),
 	}
 
-	err = runNode(context.Background(), node, cfg)
+	err = runNode(t.Context(), node, cfg)
 	require.Error(t, err)
 	require.ErrorIs(t, err, extractionErr)
 	require.Contains(t, err.Error(), "output extraction")
@@ -1719,7 +1719,7 @@ func TestRunNode_retry(t *testing.T) {
 	t.Run("succeeds on third attempt", func(t *testing.T) {
 		t.Parallel()
 
-		def, err := llb.Scratch().Marshal(context.Background())
+		def, err := llb.Scratch().Marshal(t.Context())
 		require.NoError(t, err)
 
 		var attempts atomic.Int64
@@ -1732,7 +1732,7 @@ func TestRunNode_retry(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 
-		err = Run(context.Background(), RunInput{
+		err = Run(t.Context(), RunInput{
 			Solver: solver,
 			Jobs: []Job{{
 				Name:       "flaky",
@@ -1748,7 +1748,7 @@ func TestRunNode_retry(t *testing.T) {
 	t.Run("exhausted retries return last error", func(t *testing.T) {
 		t.Parallel()
 
-		def, err := llb.Scratch().Marshal(context.Background())
+		def, err := llb.Scratch().Marshal(t.Context())
 		require.NoError(t, err)
 
 		solveErr := errors.New("permanent failure")
@@ -1759,7 +1759,7 @@ func TestRunNode_retry(t *testing.T) {
 			return nil, solveErr
 		}}
 
-		err = Run(context.Background(), RunInput{
+		err = Run(t.Context(), RunInput{
 			Solver: solver,
 			Jobs: []Job{{
 				Name:       "always-fails",
@@ -1986,7 +1986,7 @@ func TestRunNode_jobTimeout_sentinelError(t *testing.T) {
 func TestRunNode_retry_displaysRetry(t *testing.T) {
 	t.Parallel()
 
-	def, err := llb.Scratch().Marshal(context.Background())
+	def, err := llb.Scratch().Marshal(t.Context())
 	require.NoError(t, err)
 
 	var solveAttempts atomic.Int64
@@ -2033,7 +2033,7 @@ func TestRunNode_retry_displaysRetry(t *testing.T) {
 		sem:     semaphore.NewWeighted(1),
 	}
 
-	err = runNode(context.Background(), node, cfg)
+	err = runNode(t.Context(), node, cfg)
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), solveAttempts.Load())
 
@@ -2281,11 +2281,11 @@ func TestRun_failFast(t *testing.T) {
 	t.Run("no-fail-fast propagates dep errors", func(t *testing.T) {
 		t.Parallel()
 
-		defA, err := llb.Scratch().Marshal(context.Background())
+		defA, err := llb.Scratch().Marshal(t.Context())
 		require.NoError(t, err)
-		defB, err := llb.Scratch().Marshal(context.Background())
+		defB, err := llb.Scratch().Marshal(t.Context())
 		require.NoError(t, err)
-		defD, err := llb.Scratch().Marshal(context.Background())
+		defD, err := llb.Scratch().Marshal(t.Context())
 		require.NoError(t, err)
 
 		var dCompleted atomic.Bool
@@ -2317,7 +2317,7 @@ func TestRun_failFast(t *testing.T) {
 			return nil
 		}
 
-		err = Run(context.Background(), RunInput{
+		err = Run(t.Context(), RunInput{
 			Solver: solver,
 			Jobs: []Job{
 				{Name: "a", Definition: defA},
@@ -2337,13 +2337,13 @@ func TestRun_failFast(t *testing.T) {
 	t.Run("no-fail-fast filters exports", func(t *testing.T) {
 		t.Parallel()
 
-		defA, err := llb.Scratch().Marshal(context.Background())
+		defA, err := llb.Scratch().Marshal(t.Context())
 		require.NoError(t, err)
-		defB, err := llb.Scratch().Marshal(context.Background())
+		defB, err := llb.Scratch().Marshal(t.Context())
 		require.NoError(t, err)
-		exportDefA, err := llb.Scratch().Marshal(context.Background())
+		exportDefA, err := llb.Scratch().Marshal(t.Context())
 		require.NoError(t, err)
-		exportDefB, err := llb.Scratch().Marshal(context.Background())
+		exportDefB, err := llb.Scratch().Marshal(t.Context())
 		require.NoError(t, err)
 
 		var exportedJobs sync.Map
@@ -2365,7 +2365,7 @@ func TestRun_failFast(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 
-		err = Run(context.Background(), RunInput{
+		err = Run(t.Context(), RunInput{
 			Solver: solver,
 			Jobs: []Job{
 				{Name: "a", Definition: defA},
@@ -2389,9 +2389,9 @@ func TestRun_failFast(t *testing.T) {
 	t.Run("no-fail-fast joins multiple errors", func(t *testing.T) {
 		t.Parallel()
 
-		defA, err := llb.Scratch().Marshal(context.Background())
+		defA, err := llb.Scratch().Marshal(t.Context())
 		require.NoError(t, err)
-		defB, err := llb.Scratch().Marshal(context.Background())
+		defB, err := llb.Scratch().Marshal(t.Context())
 		require.NoError(t, err)
 
 		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
@@ -2399,7 +2399,7 @@ func TestRun_failFast(t *testing.T) {
 			return nil, errors.New("boom")
 		}}
 
-		err = Run(context.Background(), RunInput{
+		err = Run(t.Context(), RunInput{
 			Solver: solver,
 			Jobs: []Job{
 				{Name: "a", Definition: defA},

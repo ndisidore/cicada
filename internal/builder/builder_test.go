@@ -732,7 +732,7 @@ func TestBuild(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			result, err := Build(context.Background(), tt.p, tt.opts)
+			result, err := Build(t.Context(), tt.p, tt.opts)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
 				return
@@ -776,7 +776,7 @@ func TestBuildWithPresetTopoOrder(t *testing.T) {
 		TopoOrder: []int{0, 1, 2},
 	}
 
-	result, err := Build(context.Background(), p, BuildOpts{})
+	result, err := Build(t.Context(), p, BuildOpts{})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"a", "b", "c"}, result.JobNames)
 	assert.Len(t, result.Definitions, 3)
@@ -826,7 +826,7 @@ func TestBuildWithInvalidTopoOrder(t *testing.T) {
 				TopoOrder: tt.order,
 			}
 
-			result, err := Build(context.Background(), p, BuildOpts{})
+			result, err := Build(t.Context(), p, BuildOpts{})
 			require.NoError(t, err, "Build should fall back to Validate when TopoOrder is invalid")
 			assert.Equal(t, []string{"a", "b", "c"}, result.JobNames)
 			assert.Len(t, result.Definitions, 3)
@@ -860,7 +860,7 @@ func TestBuildTopoSortOrder(t *testing.T) {
 		},
 	}
 
-	result, err := Build(context.Background(), p, BuildOpts{})
+	result, err := Build(t.Context(), p, BuildOpts{})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"a", "b", "c"}, result.JobNames)
 }
@@ -904,7 +904,7 @@ func TestBuildWithPlatform(t *testing.T) {
 				},
 			}
 
-			result, err := Build(context.Background(), p, BuildOpts{})
+			result, err := Build(t.Context(), p, BuildOpts{})
 			require.NoError(t, err)
 			require.Len(t, result.Definitions, 1)
 
@@ -939,7 +939,7 @@ func TestBuildWithInvalidPlatform(t *testing.T) {
 		},
 	}
 
-	_, err := Build(context.Background(), p, BuildOpts{})
+	_, err := Build(t.Context(), p, BuildOpts{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "parsing platform")
 }
@@ -1018,7 +1018,7 @@ func TestBuildWithMetaResolver(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			result, err := Build(context.Background(), tt.p, tt.opts)
+			result, err := Build(t.Context(), tt.p, tt.opts)
 			require.NoError(t, err)
 			require.Len(t, result.Definitions, 1)
 
@@ -1049,7 +1049,7 @@ func TestBuildExportDef_invalidPaths(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := buildExportDef(context.Background(), st, tt.path)
+			_, err := buildExportDef(t.Context(), st, tt.path)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
@@ -1060,7 +1060,7 @@ func TestBuildExportDef_fileExport(t *testing.T) {
 	t.Parallel()
 
 	st := llb.Image("alpine:latest").Run(llb.Args([]string{"touch", "/out/myapp"})).Root()
-	def, err := buildExportDef(context.Background(), st, "/out/myapp")
+	def, err := buildExportDef(t.Context(), st, "/out/myapp")
 	require.NoError(t, err)
 	require.NotNil(t, def)
 
@@ -1073,7 +1073,7 @@ func TestBuildExportDef_directoryExport(t *testing.T) {
 	t.Parallel()
 
 	st := llb.Image("alpine:latest").Run(llb.Args([]string{"mkdir", "-p", "/out/dist"})).Root()
-	def, err := buildExportDef(context.Background(), st, "/out/dist/")
+	def, err := buildExportDef(t.Context(), st, "/out/dist/")
 	require.NoError(t, err)
 	require.NotNil(t, def)
 
@@ -1100,7 +1100,7 @@ func TestBuild_directoryExportSetsDir(t *testing.T) {
 		},
 	}
 
-	result, err := Build(context.Background(), p, BuildOpts{})
+	result, err := Build(t.Context(), p, BuildOpts{})
 	require.NoError(t, err)
 	require.Len(t, result.Exports, 1)
 	assert.True(t, result.Exports[0].Dir, "directory export should have Dir=true")
@@ -1122,7 +1122,7 @@ func TestBuild_imageExportCollected(t *testing.T) {
 		},
 	}
 
-	result, err := Build(context.Background(), p, BuildOpts{})
+	result, err := Build(t.Context(), p, BuildOpts{})
 	require.NoError(t, err)
 	require.Len(t, result.ImageExports, 1)
 	assert.Equal(t, "build", result.ImageExports[0].JobName)
@@ -1148,7 +1148,7 @@ func TestBuild_imageExportWithPlatform(t *testing.T) {
 		},
 	}
 
-	result, err := Build(context.Background(), p, BuildOpts{})
+	result, err := Build(t.Context(), p, BuildOpts{})
 	require.NoError(t, err)
 	require.Len(t, result.ImageExports, 1)
 	assert.Equal(t, "linux/arm64", result.ImageExports[0].Platform)
@@ -1168,7 +1168,7 @@ func TestBuild_noImageExportWithoutPublish(t *testing.T) {
 		},
 	}
 
-	result, err := Build(context.Background(), p, BuildOpts{})
+	result, err := Build(t.Context(), p, BuildOpts{})
 	require.NoError(t, err)
 	assert.Empty(t, result.ImageExports)
 }
@@ -1191,7 +1191,7 @@ func TestBuild_fileExportClearsDirFlag(t *testing.T) {
 		},
 	}
 
-	result, err := Build(context.Background(), p, BuildOpts{})
+	result, err := Build(t.Context(), p, BuildOpts{})
 	require.NoError(t, err)
 	require.Len(t, result.Exports, 1)
 	assert.False(t, result.Exports[0].Dir, "file export should have Dir=false")
@@ -1212,7 +1212,7 @@ func TestBuild_customShell(t *testing.T) {
 		},
 	}
 
-	result, err := Build(context.Background(), p, BuildOpts{})
+	result, err := Build(t.Context(), p, BuildOpts{})
 	require.NoError(t, err)
 	require.Len(t, result.Definitions, 1)
 
@@ -1238,7 +1238,7 @@ func TestBuild_stepShellOverridesJob(t *testing.T) {
 		},
 	}
 
-	result, err := Build(context.Background(), p, BuildOpts{})
+	result, err := Build(t.Context(), p, BuildOpts{})
 	require.NoError(t, err)
 	require.Len(t, result.Definitions, 1)
 
@@ -1266,7 +1266,7 @@ func TestBuild_stepTimeout(t *testing.T) {
 		},
 	}
 
-	result, err := Build(context.Background(), p, BuildOpts{})
+	result, err := Build(t.Context(), p, BuildOpts{})
 	require.NoError(t, err)
 	require.Len(t, result.Definitions, 1)
 
@@ -1294,7 +1294,7 @@ func TestBuild_stepTimeoutWithCustomShell(t *testing.T) {
 		},
 	}
 
-	result, err := Build(context.Background(), p, BuildOpts{})
+	result, err := Build(t.Context(), p, BuildOpts{})
 	require.NoError(t, err)
 	require.Len(t, result.Definitions, 1)
 
@@ -1321,7 +1321,7 @@ func TestBuild_stepTimeoutWithMultiFlagShell(t *testing.T) {
 		},
 	}
 
-	result, err := Build(context.Background(), p, BuildOpts{})
+	result, err := Build(t.Context(), p, BuildOpts{})
 	require.NoError(t, err)
 	require.Len(t, result.Definitions, 1)
 
@@ -1348,7 +1348,7 @@ func TestBuild_stepTimeoutEscapesSingleQuotes(t *testing.T) {
 		},
 	}
 
-	result, err := Build(context.Background(), p, BuildOpts{})
+	result, err := Build(t.Context(), p, BuildOpts{})
 	require.NoError(t, err)
 	require.Len(t, result.Definitions, 1)
 
@@ -1378,7 +1378,7 @@ func TestBuild_stepTimeoutResult(t *testing.T) {
 			},
 		}
 
-		result, err := Build(context.Background(), p, BuildOpts{})
+		result, err := Build(t.Context(), p, BuildOpts{})
 		require.NoError(t, err)
 		require.Len(t, result.Definitions, 1)
 
@@ -1411,7 +1411,7 @@ func TestBuild_stepTimeoutResult(t *testing.T) {
 			},
 		}
 
-		result, err := Build(context.Background(), p, BuildOpts{})
+		result, err := Build(t.Context(), p, BuildOpts{})
 		require.NoError(t, err)
 		require.Len(t, result.Definitions, 1)
 
@@ -1433,7 +1433,7 @@ func TestBuild_defaultShell(t *testing.T) {
 		},
 	}
 
-	result, err := Build(context.Background(), p, BuildOpts{})
+	result, err := Build(t.Context(), p, BuildOpts{})
 	require.NoError(t, err)
 	require.Len(t, result.Definitions, 1)
 

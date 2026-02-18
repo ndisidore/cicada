@@ -2,7 +2,6 @@
 package runtime_test
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -86,7 +85,7 @@ func TestResolverDetect(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			r := tt.setup(t)
-			rt, err := r.Detect(context.Background())
+			rt, err := r.Detect(t.Context())
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
 				return
@@ -165,7 +164,7 @@ func TestResolverGet(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			r := tt.setup(t)
-			rt, err := r.Get(context.Background(), tt.rtName)
+			rt, err := r.Get(t.Context(), tt.rtName)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
 				if tt.wantContain != "" {
@@ -242,7 +241,7 @@ func TestResolverGetAuto(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			r := tt.setup(t)
-			rt, err := r.Get(context.Background(), tt.input)
+			rt, err := r.Get(t.Context(), tt.input)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
 				return

@@ -88,7 +88,7 @@ func TestEngineStartAction(t *testing.T) {
 				engine: &fakeEngine{startFn: tt.startFn},
 				stdout: &buf,
 			}
-			err := a.engineStartAction(context.Background(), &cli.Command{})
+			err := a.engineStartAction(t.Context(), &cli.Command{})
 			if tt.wantErr {
 				require.Error(t, err)
 				return
@@ -149,7 +149,7 @@ func TestEngineStopAction(t *testing.T) {
 				engine: &fakeEngine{stopFn: tt.stopFn, removeFn: tt.removeFn},
 				stdout: &buf,
 			}
-			err := a.engineStopAction(context.Background(), &cli.Command{})
+			err := a.engineStopAction(t.Context(), &cli.Command{})
 			if tt.wantErr {
 				require.Error(t, err)
 				return
@@ -200,7 +200,7 @@ func TestEngineStatusAction(t *testing.T) {
 				engine: &fakeEngine{statusFn: tt.statusFn},
 				stdout: &buf,
 			}
-			err := a.engineStatusAction(context.Background(), &cli.Command{})
+			err := a.engineStatusAction(t.Context(), &cli.Command{})
 			if tt.wantErr {
 				require.Error(t, err)
 				return
@@ -269,9 +269,9 @@ func TestResolveAddr(t *testing.T) {
 			}
 			cmd := newTestCommand(flags)
 			// Parse with empty args to initialize flag values.
-			require.NoError(t, cmd.Run(context.Background(), []string{"test"}))
+			require.NoError(t, cmd.Run(t.Context(), []string{"test"}))
 
-			addr, err := a.resolveAddr(context.Background(), cmd)
+			addr, err := a.resolveAddr(t.Context(), cmd)
 			if tt.wantErr {
 				require.Error(t, err)
 				return
@@ -285,7 +285,7 @@ func TestResolveAddr(t *testing.T) {
 func TestBuildRunnerJobs(t *testing.T) {
 	t.Parallel()
 
-	def, err := llb.Scratch().Marshal(context.Background())
+	def, err := llb.Scratch().Marshal(t.Context())
 	require.NoError(t, err)
 
 	tests := []struct {
