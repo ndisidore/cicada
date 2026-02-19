@@ -5,9 +5,6 @@ package quiet
 import (
 	"context"
 	"sync"
-	"time"
-
-	"github.com/moby/buildkit/client"
 
 	"github.com/ndisidore/cicada/internal/progress"
 )
@@ -15,58 +12,39 @@ import (
 // Compile-time interface check.
 var _ progress.Display = (*Display)(nil)
 
-// Display drains status channels silently; all progress is suppressed.
-// Vertex errors are surfaced through the solver's return path, not the display.
+// Display drains messages silently; all progress is suppressed.
 type Display struct {
-	wg sync.WaitGroup
+	ch           chan progress.Msg
+	wg           sync.WaitGroup
+	once         sync.Once
+	shutdownOnce sync.Once
 }
 
 // New returns a new quiet Display.
 func New() *Display {
-	return &Display{}
+	return &Display{ch: make(chan progress.Msg, 64)}
 }
 
-// Start is a no-op for Display.
-func (*Display) Start(_ context.Context) error { return nil }
-
-// Attach spawns a goroutine that drains the status channel.
-func (q *Display) Attach(ctx context.Context, _ string, ch <-chan *client.SolveStatus, _ map[string]time.Duration) error {
-	q.wg.Go(func() {
-		for {
-			select {
-			case <-ctx.Done():
-				//revive:disable-next-line:empty-block // intentionally draining
-				for range ch {
-				}
-				return
-			case _, ok := <-ch:
-				if !ok {
-					return
-				}
+// Start spawns a goroutine to drain the message channel. Idempotent.
+func (q *Display) Start(_ context.Context) error {
+	q.once.Do(func() {
+		q.wg.Go(func() {
+			//revive:disable-next-line:empty-block // intentionally draining
+			for range q.ch {
 			}
-		}
+		})
 	})
 	return nil
 }
 
-// Skip is a no-op for Display.
-func (*Display) Skip(_ context.Context, _ string) {}
+// Send delivers a progress message to the display. Safe for concurrent use.
+func (q *Display) Send(msg progress.Msg) {
+	q.ch <- msg
+}
 
-// SkipStep is a no-op for Display.
-func (*Display) SkipStep(_ context.Context, _, _ string) {}
-
-// Retry is a no-op for Display.
-func (*Display) Retry(_ context.Context, _ string, _, _ int, _ error) {}
-
-// Timeout is a no-op for Display.
-func (*Display) Timeout(_ context.Context, _ string, _ time.Duration) {}
-
-// Seal is a no-op for Display; Wait uses WaitGroup which is safe since
-// all Attach calls complete before Wait is called by the caller.
-func (*Display) Seal() {}
-
-// Wait blocks until all attached jobs complete.
-func (q *Display) Wait() error {
+// Shutdown closes the message channel and waits for the drain goroutine to finish.
+func (q *Display) Shutdown() error {
+	q.shutdownOnce.Do(func() { close(q.ch) })
 	q.wg.Wait()
 	return nil
 }

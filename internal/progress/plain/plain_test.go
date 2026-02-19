@@ -12,11 +12,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/ndisidore/cicada/internal/progress"
 	"github.com/ndisidore/cicada/internal/progress/plain"
 	"github.com/ndisidore/cicada/pkg/slogctx"
 )
 
-func TestDisplayAttach(t *testing.T) {
+func TestDisplayStatus(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
@@ -117,34 +118,28 @@ func TestDisplayAttach(t *testing.T) {
 			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 			ctx := slogctx.ContextWithLogger(t.Context(), logger)
 
-			ch := make(chan *client.SolveStatus, len(tt.statuses))
-			for _, s := range tt.statuses {
-				ch <- s
-			}
-			close(ch)
-
 			p := plain.New()
 			require.NoError(t, p.Start(ctx))
-			err := p.Attach(ctx, "test-step", ch, nil)
-			require.NoError(t, err)
 
-			p.Seal()
-			err = p.Wait()
-			require.NoError(t, err)
+			p.Send(progress.JobAddedMsg{Job: "test-step"})
+			for _, s := range tt.statuses {
+				p.Send(progress.JobStatusMsg{Job: "test-step", Status: s})
+			}
+			p.Send(progress.JobDoneMsg{Job: "test-step"})
+			require.NoError(t, p.Shutdown())
 
 			output := buf.String()
 
 			if tt.wantEmpty {
 				assert.Empty(t, output)
-			}
-
-			for _, want := range tt.wantLogs {
-				assert.Contains(t, output, want)
-			}
-
-			for substr, count := range tt.wantLogCount {
-				actual := strings.Count(output, substr)
-				assert.Equal(t, count, actual, "expected %q to appear %d time(s), got %d", substr, count, actual)
+			} else {
+				for _, want := range tt.wantLogs {
+					assert.Contains(t, output, want)
+				}
+				for substr, count := range tt.wantLogCount {
+					actual := strings.Count(output, substr)
+					assert.Equal(t, count, actual, "expected %q to appear %d time(s), got %d", substr, count, actual)
+				}
 			}
 		})
 	}
@@ -158,7 +153,9 @@ func TestDisplaySkipStep(t *testing.T) {
 	ctx := slogctx.ContextWithLogger(t.Context(), logger)
 
 	p := plain.New()
-	p.SkipStep(ctx, "deploy", "notify")
+	require.NoError(t, p.Start(ctx))
+	p.Send(progress.StepSkippedMsg{Job: "deploy", Step: "notify"})
+	require.NoError(t, p.Shutdown())
 
 	output := buf.String()
 	assert.Contains(t, output, "step skipped")
@@ -175,7 +172,9 @@ func TestDisplaySkip(t *testing.T) {
 	ctx := slogctx.ContextWithLogger(t.Context(), logger)
 
 	p := plain.New()
-	p.Skip(ctx, "deploy")
+	require.NoError(t, p.Start(ctx))
+	p.Send(progress.JobSkippedMsg{Job: "deploy"})
+	require.NoError(t, p.Shutdown())
 
 	output := buf.String()
 	assert.Contains(t, output, "job skipped")

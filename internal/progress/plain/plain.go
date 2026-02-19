@@ -20,79 +20,38 @@ import (
 // Compile-time interface check.
 var _ progress.Display = (*Display)(nil)
 
-// Display consumes BuildKit status events and emits them as slog messages.
+// Display consumes progress messages and emits them as slog messages.
 // The slog handler (pretty/json/text) decides how to render.
 type Display struct {
-	wg sync.WaitGroup
+	ctx          context.Context
+	ch           chan progress.Msg
+	wg           sync.WaitGroup
+	once         sync.Once
+	shutdownOnce sync.Once
 }
 
 // New returns a new plain Display.
 func New() *Display {
-	return &Display{}
+	return &Display{ch: make(chan progress.Msg, 64)}
 }
 
-// Start is a no-op for Display.
-func (*Display) Start(_ context.Context) error { return nil }
-
-// Attach spawns a goroutine that consumes status events and emits slog messages.
-func (p *Display) Attach(ctx context.Context, jobName string, ch <-chan *client.SolveStatus, stepTimeouts map[string]time.Duration) error {
-	p.wg.Go(func() {
-		p.consume(ctx, jobName, ch, stepTimeouts)
+// Start spawns the consume goroutine. Idempotent.
+func (p *Display) Start(ctx context.Context) error {
+	p.once.Do(func() {
+		p.ctx = ctx
+		p.wg.Go(p.consume)
 	})
 	return nil
 }
 
-// Skip reports that a job was skipped due to a when condition.
-func (*Display) Skip(ctx context.Context, jobName string) {
-	log := slogctx.FromContext(ctx)
-	log.LogAttrs(ctx, slog.LevelInfo, "job skipped",
-		slog.String("job", jobName),
-		slog.String("event", "job.skipped"),
-	)
+// Send delivers a progress message to the display. Safe for concurrent use.
+func (p *Display) Send(msg progress.Msg) {
+	p.ch <- msg
 }
 
-// SkipStep reports that a step within a job was skipped due to a when condition.
-func (*Display) SkipStep(ctx context.Context, jobName, stepName string) {
-	log := slogctx.FromContext(ctx)
-	log.LogAttrs(ctx, slog.LevelInfo, "step skipped",
-		slog.String("job", jobName),
-		slog.String("step", stepName),
-		slog.String("event", "step.skipped"),
-	)
-}
-
-// Retry reports that a job is being retried after a failure.
-func (*Display) Retry(ctx context.Context, jobName string, attempt, maxAttempts int, err error) {
-	errStr := "<nil>"
-	if err != nil {
-		errStr = err.Error()
-	}
-	log := slogctx.FromContext(ctx)
-	log.LogAttrs(ctx, slog.LevelWarn, "retrying job",
-		slog.String("job", jobName),
-		slog.Int("attempt", attempt),
-		slog.Int("max_attempts", maxAttempts),
-		slog.String("error", errStr),
-		slog.String("event", "job.retry"),
-	)
-}
-
-// Timeout reports that a job exceeded its configured timeout.
-func (*Display) Timeout(ctx context.Context, jobName string, timeout time.Duration) {
-	log := slogctx.FromContext(ctx)
-	log.LogAttrs(ctx, slog.LevelWarn, "job timed out",
-		slog.String("job", jobName),
-		slog.Duration("timeout", timeout),
-		slog.String("event", "job.timeout"),
-	)
-}
-
-// Seal is a no-op for Display; Wait uses WaitGroup which is safe since
-// all Attach calls complete before Wait is called by the caller.
-func (*Display) Seal() {}
-
-// Wait blocks until all attached jobs complete.
-func (p *Display) Wait() error {
+// Shutdown closes the message channel and waits for the consume goroutine.
+func (p *Display) Shutdown() error {
+	p.shutdownOnce.Do(func() { close(p.ch) })
 	p.wg.Wait()
 	return nil
 }
@@ -114,44 +73,109 @@ type timeoutVertex struct {
 	timeout time.Duration
 }
 
-func (*Display) consume(ctx context.Context, jobName string, ch <-chan *client.SolveStatus, stepTimeouts map[string]time.Duration) {
-	log := slogctx.FromContext(ctx)
-	seen := make(map[digest.Digest]vertexState)
-	pending := make(map[digest.Digest]timeoutVertex)
+// jobTracker holds per-job vertex tracking state.
+type jobTracker struct {
+	seen         map[digest.Digest]vertexState
+	pending      map[digest.Digest]timeoutVertex
+	stepTimeouts map[string]time.Duration
+}
 
-	for {
-		select {
-		case <-ctx.Done():
-			// Drain so the sender can finish and close ch. Without this,
-			// a sender blocked on ch<- can never return to close the channel,
-			// leaking its goroutine. Safe because the Solver contract
-			// guarantees ch is closed once Solve completes.
-			//revive:disable-next-line:empty-block // intentionally draining
-			for range ch {
+//revive:disable-next-line:cognitive-complexity,cyclomatic,function-length consume is a linear message dispatch loop; splitting it hurts readability.
+func (p *Display) consume() {
+	log := slogctx.FromContext(p.ctx)
+	jobs := make(map[string]*jobTracker)
+
+	getJob := func(name string) *jobTracker {
+		jt, ok := jobs[name]
+		if !ok {
+			jt = &jobTracker{
+				seen:    make(map[digest.Digest]vertexState),
+				pending: make(map[digest.Digest]timeoutVertex),
 			}
-			return
-		case status, ok := <-ch:
-			if !ok {
-				logPendingTimeouts(ctx, log, jobName, pending)
-				return
-			}
-			for _, v := range status.Vertexes {
-				cfgTimeout := stepTimeouts[v.Name]
-				// logVertex must run before trackTimeout: logVertex updates
-				// seen[v.Digest] which trackTimeout reads to decide whether
-				// to add or remove the vertex from pending.
+			jobs[name] = jt
+		}
+		return jt
+	}
+
+	for msg := range p.ch {
+		switch msg := msg.(type) {
+		case progress.JobAddedMsg:
+			jt := getJob(msg.Job)
+			jt.stepTimeouts = msg.StepTimeouts
+
+		case progress.JobStatusMsg:
+			jt := getJob(msg.Job)
+			for _, v := range msg.Status.Vertexes {
+				cfgTimeout := jt.stepTimeouts[v.Name]
 				logVertex(logVertexInput{
-					ctx:        ctx,
+					ctx:        p.ctx,
 					log:        log,
-					jobName:    jobName,
+					jobName:    msg.Job,
 					v:          v,
-					seen:       seen,
+					seen:       jt.seen,
 					cleanName:  v.Name,
 					cfgTimeout: cfgTimeout,
 				})
-				trackTimeout(v, seen, pending, v.Name, cfgTimeout)
+				trackTimeout(v, jt.seen, jt.pending, v.Name, cfgTimeout)
 			}
-			logLogs(ctx, log, jobName, status.Logs)
+			logLogs(p.ctx, log, msg.Job, msg.Status.Logs)
+
+		case progress.JobDoneMsg:
+			if jt, ok := jobs[msg.Job]; ok {
+				logPendingTimeouts(p.ctx, log, msg.Job, jt.pending)
+			}
+
+		case progress.JobSkippedMsg:
+			log.LogAttrs(p.ctx, slog.LevelInfo, "job skipped",
+				slog.String("job", msg.Job),
+				slog.String("event", "job.skipped"),
+			)
+
+		case progress.StepSkippedMsg:
+			log.LogAttrs(p.ctx, slog.LevelInfo, "step skipped",
+				slog.String("job", msg.Job),
+				slog.String("step", msg.Step),
+				slog.String("event", "step.skipped"),
+			)
+
+		case progress.JobRetryMsg:
+			attrs := []slog.Attr{
+				slog.String("job", msg.Job),
+				slog.Int("attempt", msg.Attempt),
+				slog.Int("max_attempts", msg.MaxAttempts),
+			}
+			if msg.Err != nil {
+				attrs = append(attrs, slog.String("error", msg.Err.Error()))
+			}
+			attrs = append(attrs, slog.String("event", "job.retry"))
+			log.LogAttrs(p.ctx, slog.LevelWarn, "retrying job", attrs...)
+
+		case progress.JobTimeoutMsg:
+			log.LogAttrs(p.ctx, slog.LevelWarn, "job timed out",
+				slog.String("job", msg.Job),
+				slog.Duration("timeout", msg.Timeout),
+				slog.String("event", "job.timeout"),
+			)
+
+		case progress.LogMsg:
+			attrs := []slog.Attr{slog.String("event", "log")}
+			if msg.Job != "" {
+				attrs = append(attrs, slog.String("job", msg.Job))
+			}
+			//nolint:sloglint // dynamic msg from LogMsg payload
+			log.LogAttrs(p.ctx, msg.Level, msg.Message, attrs...)
+
+		case progress.ErrorMsg:
+			humanMsg := "unknown error"
+			if msg.Err != nil {
+				humanMsg = msg.Err.Human
+			}
+			//nolint:sloglint // dynamic msg from DisplayError payload
+			log.LogAttrs(p.ctx, slog.LevelError, humanMsg,
+				slog.String("event", "error"),
+			)
+
+		default:
 		}
 	}
 }
@@ -231,9 +255,7 @@ func logVertex(in logVertexInput) {
 }
 
 // logPendingTimeouts emits timeout warnings for vertices that never
-// reached a terminal state before the channel closed. trackTimeout
-// guarantees that pending only contains _stateStarted vertices (entries
-// are removed on _stateDone), so no additional state check is needed.
+// reached a terminal state before the channel closed.
 func logPendingTimeouts(ctx context.Context, log *slog.Logger, jobName string, pending map[digest.Digest]timeoutVertex) {
 	for _, tv := range pending {
 		//nolint:sloglint // dynamic msg encodes user-facing formatted output
@@ -248,8 +270,7 @@ func logPendingTimeouts(ctx context.Context, log *slog.Logger, jobName string, p
 }
 
 // trackTimeout records or removes timeout-annotated vertices in pending
-// based on their current state in seen. cleanName and cfgTimeout are
-// pre-parsed by the caller to avoid redundant parseTimeoutAnnotation calls.
+// based on their current state in seen.
 func trackTimeout(v *client.Vertex, seen map[digest.Digest]vertexState, pending map[digest.Digest]timeoutVertex, cleanName string, cfgTimeout time.Duration) {
 	if cfgTimeout == 0 {
 		return

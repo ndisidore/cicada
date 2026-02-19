@@ -180,48 +180,11 @@ type multiModel struct {
 	frame  int // spinner frame counter
 }
 
-// tickMsg drives the spinner animation.
+// tickMsg drives the spinner animation (TUI-internal lifecycle).
 type tickMsg struct{}
 
-// jobAddedMsg signals a new job was attached to the display.
-type jobAddedMsg struct {
-	name         string
-	stepTimeouts map[string]time.Duration
-}
-
-// jobStatusMsg carries a SolveStatus for a specific job.
-type jobStatusMsg struct {
-	name   string
-	status *client.SolveStatus
-}
-
-// jobDoneMsg signals a job's status channel has been closed.
-type jobDoneMsg struct{ name string }
-
-// jobSkippedMsg signals a job was skipped due to a when condition.
-type jobSkippedMsg struct{ name string }
-
-// stepSkippedMsg signals a step within a job was skipped due to a when condition.
-type stepSkippedMsg struct {
-	jobName  string
-	stepName string
-}
-
-// allDoneMsg signals all jobs have completed and the TUI should quit.
+// allDoneMsg signals all jobs have completed and the TUI should quit (TUI-internal lifecycle).
 type allDoneMsg struct{}
-
-// jobRetryMsg signals a job is being retried.
-type jobRetryMsg struct {
-	name        string
-	attempt     int
-	maxAttempts int
-}
-
-// jobTimeoutMsg signals a job exceeded its configured timeout.
-type jobTimeoutMsg struct {
-	name    string
-	timeout time.Duration
-}
 
 func newMultiModel(boring bool) *multiModel {
 	return &multiModel{
@@ -242,48 +205,46 @@ func (m *multiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
-	case jobAddedMsg:
-		js := m.getOrCreateJob(msg.name)
-		if msg.stepTimeouts != nil {
-			js.stepTimeouts = msg.stepTimeouts
+	case progress.JobAddedMsg:
+		js := m.getOrCreateJob(msg.Job)
+		if msg.StepTimeouts != nil {
+			js.stepTimeouts = msg.StepTimeouts
 		}
-	case jobSkippedMsg:
-		js := m.getOrCreateJob(msg.name)
+	case progress.JobSkippedMsg:
+		js := m.getOrCreateJob(msg.Job)
 		if !js.done {
 			js.done = true
 			js.skipped = true
 		}
-	case stepSkippedMsg:
-		// stepSkippedMsg is sent after solveJob returns, which calls Attach
-		// (and thus jobAddedMsg) internally, so the job is guaranteed to exist.
-		if js, ok := m.jobs[msg.jobName]; ok {
-			js.skippedSteps = append(js.skippedSteps, msg.stepName)
+	case progress.StepSkippedMsg:
+		// StepSkippedMsg is sent after solveJob returns, which sends
+		// JobAddedMsg first, so the job is guaranteed to exist.
+		if js, ok := m.jobs[msg.Job]; ok {
+			js.skippedSteps = append(js.skippedSteps, msg.Step)
 		}
-	case jobStatusMsg:
-		// jobAddedMsg is always sent before the goroutine that produces
-		// jobStatusMsg, so the job is guaranteed to exist here.
-		if js, ok := m.jobs[msg.name]; ok {
-			js.applyStatus(msg.status)
+	case progress.JobStatusMsg:
+		// JobAddedMsg is always sent before the goroutine that produces
+		// JobStatusMsg, so the job is guaranteed to exist here.
+		if js, ok := m.jobs[msg.Job]; ok {
+			js.applyStatus(msg.Status)
 		}
-	case jobRetryMsg:
-		js := m.getOrCreateJob(msg.name)
-		js.retryAttempt = msg.attempt
-		js.maxAttempts = msg.maxAttempts
-	case jobTimeoutMsg:
-		js := m.getOrCreateJob(msg.name)
+	case progress.JobRetryMsg:
+		js := m.getOrCreateJob(msg.Job)
+		js.retryAttempt = msg.Attempt
+		js.maxAttempts = msg.MaxAttempts
+	case progress.JobTimeoutMsg:
+		js := m.getOrCreateJob(msg.Job)
 		js.timedOut = true
-		js.timeout = msg.timeout
-	case jobDoneMsg:
-		if js, ok := m.jobs[msg.name]; ok {
-			js.done = true
-			if js.timedOut {
-				for _, d := range js.order {
-					st := js.vertices[d]
-					if st.status == statusRunning {
-						st.status = statusTimeout
-					}
-				}
+		js.timeout = msg.Timeout
+		for _, d := range js.order {
+			st := js.vertices[d]
+			if st.status == statusRunning {
+				st.status = statusTimeout
 			}
+		}
+	case progress.JobDoneMsg:
+		if js, ok := m.jobs[msg.Job]; ok {
+			js.done = true
 		}
 	case allDoneMsg:
 		m.done = true

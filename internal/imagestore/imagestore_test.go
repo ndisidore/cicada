@@ -3,15 +3,16 @@ package imagestore
 import (
 	"context"
 	"errors"
-	"sync"
+	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb"
 	"github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/ndisidore/cicada/internal/progress"
 )
 
 // fakeSolver implements the Solver interface for testing.
@@ -23,33 +24,10 @@ func (f *fakeSolver) Solve(ctx context.Context, def *llb.Definition, opt client.
 	return f.solveFn(ctx, def, opt, ch)
 }
 
-// fakeDisplay implements progress.Display for testing.
-type fakeDisplay struct {
-	wg sync.WaitGroup
-}
+// fakeSender implements progress.Sender for testing by draining all messages.
+type fakeSender struct{}
 
-func (*fakeDisplay) Start(_ context.Context) error { return nil }
-
-func (f *fakeDisplay) Attach(_ context.Context, _ string, ch <-chan *client.SolveStatus, _ map[string]time.Duration) error {
-	f.wg.Go(func() {
-		//revive:disable-next-line:empty-block // drain
-		for range ch {
-		}
-	})
-	return nil
-}
-
-func (*fakeDisplay) Skip(_ context.Context, _ string) {}
-
-func (*fakeDisplay) SkipStep(_ context.Context, _, _ string) {}
-
-func (*fakeDisplay) Retry(_ context.Context, _ string, _, _ int, _ error) {}
-
-func (*fakeDisplay) Timeout(_ context.Context, _ string, _ time.Duration) {}
-
-func (*fakeDisplay) Seal() {}
-
-func (f *fakeDisplay) Wait() error { f.wg.Wait(); return nil }
+func (*fakeSender) Send(_ progress.Msg) {}
 
 func TestCheckCached(t *testing.T) {
 	t.Parallel()
@@ -164,9 +142,7 @@ func TestPullImages(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			solver := &fakeSolver{solveFn: tt.solveFn}
-			d := &fakeDisplay{}
-			err := PullImages(t.Context(), solver, tt.images, d)
-			require.NoError(t, d.Wait())
+			err := PullImages(t.Context(), solver, tt.images, &fakeSender{})
 			if tt.wantErr {
 				require.Error(t, err)
 				return
@@ -174,4 +150,70 @@ func TestPullImages(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+
+	t.Run("pulls are concurrent", func(t *testing.T) {
+		t.Parallel()
+
+		// Barrier: both pulls must start before either can finish.
+		// If pulls were sequential the first would block on <-allStarted forever.
+		var started atomic.Int32
+		allStarted := make(chan struct{})
+		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			defer close(ch)
+			if started.Add(1) == 2 {
+				close(allStarted)
+			}
+			<-allStarted
+			return &client.SolveResponse{}, nil
+		}}
+
+		err := PullImages(t.Context(), solver, []string{"a:latest", "b:latest"}, &fakeSender{})
+		require.NoError(t, err)
+	})
+
+	t.Run("partial failure cancels in-flight pulls", func(t *testing.T) {
+		t.Parallel()
+
+		var firstCall atomic.Bool
+		solver := &fakeSolver{solveFn: func(ctx context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			defer close(ch)
+			if firstCall.CompareAndSwap(false, true) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}
+			return nil, errors.New("pull failed")
+		}}
+
+		err := PullImages(t.Context(), solver, []string{"slow:latest", "fail:latest"}, &fakeSender{})
+		require.Error(t, err)
+	})
+
+	t.Run("cancellation drains channel", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, cancel := context.WithCancel(t.Context())
+
+		solving := make(chan struct{})
+		solver := &fakeSolver{solveFn: func(ctx context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+			defer close(ch)
+			close(solving)
+			<-ctx.Done()
+			// Post-cancellation writes the bridge must drain. Without the
+			// ctx.Done() select in the bridge, a blocking Sender would
+			// deadlock here because the bridge would call Send instead of
+			// draining, and Solve could not close ch.
+			for range 5 {
+				ch <- &client.SolveStatus{}
+			}
+			return nil, ctx.Err()
+		}}
+
+		go func() {
+			<-solving
+			cancel()
+		}()
+
+		err := pullImage(ctx, solver, "test:latest", &fakeSender{})
+		require.Error(t, err)
+	})
 }

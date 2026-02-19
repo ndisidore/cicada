@@ -266,7 +266,12 @@ func main() {
 		},
 		ExitErrHandler: func(_ context.Context, _ *cli.Command, err error) {
 			if err != nil {
-				_, _ = fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				var de *progress.DisplayError
+				if errors.As(err, &de) {
+					_, _ = fmt.Fprintf(os.Stderr, "error: %s\n", de.Human)
+				} else {
+					_, _ = fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				}
 			}
 		},
 	}
@@ -563,7 +568,7 @@ func resolveSecrets(ctx context.Context, decls []pipeline.SecretDecl) ([]session
 }
 
 // executePipeline connects to BuildKit and runs the pipeline jobs.
-func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipelineRunParams) error {
+func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipelineRunParams) (shutdownErr error) {
 	addr, err := a.resolveAddr(ctx, cmd)
 	if err != nil {
 		return err
@@ -600,10 +605,10 @@ func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipe
 	if err := display.Start(ctx); err != nil {
 		return fmt.Errorf("starting display: %w", err)
 	}
-	defer display.Seal()
+	defer func() { shutdownErr = errors.Join(shutdownErr, display.Shutdown()) }()
 
 	for _, name := range params.skippedJobs {
-		display.Skip(ctx, name)
+		display.Send(progress.JobSkippedMsg{Job: name})
 	}
 
 	runErr := runner.Run(ctx, runner.RunInput{
@@ -613,7 +618,7 @@ func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipe
 		LocalMounts: map[string]fsutil.FS{
 			"context": contextFS,
 		},
-		Display:        display,
+		Sender:         display,
 		Parallelism:    parallelism,
 		FailFast:       params.failFast,
 		Exports:        params.exports,
@@ -626,14 +631,11 @@ func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipe
 		SecretValues:   params.secretValues,
 	})
 
-	display.Seal()
-	waitErr := display.Wait()
-
 	if params.cacheCollector != nil {
 		cache.PrintReport(a.stdout, params.cacheCollector.Report())
 	}
 
-	return errors.Join(runErr, waitErr)
+	return runErr
 }
 
 func (a *app) printDryRun(name string, jobs []runner.Job) {
@@ -742,7 +744,7 @@ func (a *app) resolveAddr(ctx context.Context, cmd *cli.Command) (string, error)
 	return addr, nil
 }
 
-func (a *app) pullAction(ctx context.Context, cmd *cli.Command) error {
+func (a *app) pullAction(ctx context.Context, cmd *cli.Command) (shutdownErr error) {
 	path := cmd.Args().First()
 	if path == "" {
 		return errors.New("usage: cicada pull <file>")
@@ -782,14 +784,9 @@ func (a *app) pullAction(ctx context.Context, cmd *cli.Command) error {
 	if err := display.Start(ctx); err != nil {
 		return fmt.Errorf("starting display: %w", err)
 	}
-	defer display.Seal()
+	defer func() { shutdownErr = errors.Join(shutdownErr, display.Shutdown()) }()
 
-	pullErr := imagestore.PullImages(ctx, solver, images, display)
-
-	display.Seal()
-	waitErr := display.Wait()
-
-	if err := errors.Join(pullErr, waitErr); err != nil {
+	if err := imagestore.PullImages(ctx, solver, images, display); err != nil {
 		return fmt.Errorf("pulling images: %w", err)
 	}
 
