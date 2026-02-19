@@ -13,6 +13,8 @@ import (
 
 	bkclient "github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb/imagemetaresolver"
+	"github.com/moby/buildkit/session"
+	"github.com/moby/buildkit/session/secrets/secretsprovider"
 	"github.com/tonistiigi/fsutil"
 	"github.com/urfave/cli/v3"
 	"golang.org/x/term"
@@ -29,6 +31,7 @@ import (
 	"github.com/ndisidore/cicada/internal/runtime"
 	"github.com/ndisidore/cicada/internal/runtime/docker"
 	"github.com/ndisidore/cicada/internal/runtime/podman"
+	"github.com/ndisidore/cicada/internal/secret"
 	"github.com/ndisidore/cicada/internal/synccontext"
 	"github.com/ndisidore/cicada/pkg/conditional"
 	"github.com/ndisidore/cicada/pkg/gitinfo"
@@ -274,12 +277,19 @@ func main() {
 }
 
 // defaultConnect creates a BuildKit client and returns it as a runner.Solver.
-// bkclient.New is lazy (no network I/O); timeouts are enforced
-// per-operation at Solve/ListWorkers call sites downstream.
+// bkclient.New is lazy (no network I/O), so we eagerly verify reachability
+// via ListWorkers. This also warms the gRPC/HTTP2 connection so that
+// subsequent Solve calls can establish session streams immediately,
+// preventing BuildKit's 5-second session-lookup timeout from firing
+// when secrets require the session during early cache-key computation.
 func defaultConnect(ctx context.Context, addr string) (runner.Solver, func() error, error) {
 	c, err := bkclient.New(ctx, addr)
 	if err != nil {
 		return nil, func() error { return nil }, fmt.Errorf("connecting to buildkitd at %s: %w", addr, err)
+	}
+	if _, err := c.ListWorkers(ctx); err != nil {
+		_ = c.Close()
+		return nil, func() error { return nil }, fmt.Errorf("reaching buildkitd at %s: %w", addr, err)
 	}
 	return c, c.Close, nil
 }
@@ -468,6 +478,11 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 		return nil
 	}
 
+	sessionAttachables, secretValues, err := resolveSecrets(ctx, result.SecretDecls)
+	if err != nil {
+		return err
+	}
+
 	// Parse cache export/import specs.
 	cacheExports, err := cache.ParseSpecs(cmd.StringSlice("cache-to"))
 	if err != nil {
@@ -510,6 +525,8 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 		whenCtx:        &wctx,
 		skippedJobs:    condResult.Skipped,
 		failFast:       cmd.Bool("fail-fast"),
+		session:        sessionAttachables,
+		secretValues:   secretValues,
 	})
 }
 
@@ -527,6 +544,22 @@ type pipelineRunParams struct {
 	whenCtx        *conditional.Context
 	skippedJobs    []string
 	failFast       bool
+	session        []session.Attachable
+	secretValues   map[string]string
+}
+
+// resolveSecrets resolves pipeline secret declarations to host values and
+// returns the BuildKit session attachable and plaintext map for redaction.
+func resolveSecrets(ctx context.Context, decls []pipeline.SecretDecl) ([]session.Attachable, map[string]string, error) {
+	if len(decls) == 0 {
+		return nil, nil, nil
+	}
+	resolved, err := secret.Resolve(ctx, decls)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolving secrets: %w", err)
+	}
+	attachables := []session.Attachable{secretsprovider.FromMap(secret.ToMap(resolved))}
+	return attachables, secret.PlaintextValues(resolved), nil
 }
 
 // executePipeline connects to BuildKit and runs the pipeline jobs.
@@ -589,6 +622,8 @@ func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipe
 		CacheImports:   params.cacheImports,
 		CacheCollector: params.cacheCollector,
 		WhenContext:    params.whenCtx,
+		Session:        params.session,
+		SecretValues:   params.secretValues,
 	})
 
 	display.Seal()

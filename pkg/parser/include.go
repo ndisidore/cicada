@@ -357,10 +357,10 @@ func (p *Parser) parseIncludedFile(rc io.Reader, absPath string, params map[stri
 				return "", nil, fmt.Errorf("%s: %w: multiple %q nodes", absPath, ErrAmbiguousFile, NodeTypeFragment)
 			}
 			fragNode = node
-		case NodeTypeJob, NodeTypeStep, NodeTypeDefaults, NodeTypeMatrix, NodeTypeEnv, NodeTypeInclude:
+		case NodeTypeJob, NodeTypeStep, NodeTypeDefaults, NodeTypeMatrix, NodeTypeEnv, NodeTypeSecret, NodeTypeInclude:
 			hasPipelineChildren = true
 		default:
-			return "", nil, fmt.Errorf("%s: %w: %q (expected fragment, job, step, defaults, matrix, env, or include)", absPath, ErrUnknownNode, string(nt))
+			return "", nil, fmt.Errorf("%s: %w: %q (expected fragment, job, step, defaults, matrix, env, secret, or include)", absPath, ErrUnknownNode, string(nt))
 		}
 	}
 
@@ -452,6 +452,16 @@ func (p *Parser) includePipelineFile(nodes []*document.Node, absPath string, par
 			slog.Warn("included pipeline defaults ignored",
 				slog.String("pipeline", name),
 				slog.String("file", absPath),
+			)
+		case NodeTypeSecret:
+			secretName, err := requireStringArg(node, absPath, string(NodeTypeSecret))
+			if err != nil {
+				secretName = "<unknown>"
+			}
+			slog.Warn("included pipeline secret ignored",
+				slog.String("pipeline", name),
+				slog.String("file", absPath),
+				slog.String("secret", secretName),
 			)
 		case NodeTypeInclude:
 			incJobs, inc, err := p.resolveChildInclude(node, absPath, state)

@@ -230,10 +230,11 @@ type Defaults struct {
 type Pipeline struct {
 	Name      string
 	Jobs      []Job
-	Env       []EnvVar  // pipeline-level env vars inherited by all jobs
-	Matrix    *Matrix   // pipeline-level matrix; nil if not set
-	Defaults  *Defaults // pipeline-wide defaults; nil if not set
-	TopoOrder []int     // cached topological order from Validate; nil if not yet validated
+	Env       []EnvVar     // pipeline-level env vars inherited by all jobs
+	Secrets   []SecretDecl // pipeline-level secret declarations
+	Matrix    *Matrix      // pipeline-level matrix; nil if not set
+	Defaults  *Defaults    // pipeline-wide defaults; nil if not set
+	TopoOrder []int        // cached topological order from Validate; nil if not yet validated
 }
 
 // Job represents a grouping of sequential steps that share a container context.
@@ -246,9 +247,10 @@ type Job struct {
 	DependsOn    []string
 	Mounts       []Mount
 	Caches       []Cache
-	Env          []EnvVar   // job-level env vars (override pipeline-level)
-	Exports      []Export   // container paths this job produces
-	Artifacts    []Artifact // files imported from dependency jobs
+	Env          []EnvVar    // job-level env vars (override pipeline-level)
+	Exports      []Export    // container paths this job produces
+	Artifacts    []Artifact  // files imported from dependency jobs
+	Secrets      []SecretRef // secret refs injected into the job container
 	Steps        []Step
 	When         *conditional.When // conditional execution; nil = always run
 	Matrix       *Matrix           // job-level matrix; nil if not set
@@ -269,6 +271,7 @@ type Step struct {
 	Workdir   string            // set workdir from this step onward (like Docker WORKDIR)
 	Mounts    []Mount           // step-specific bind mounts (additive to job)
 	Caches    []Cache           // step-specific cache volumes (additive to job)
+	Secrets   []SecretRef       // step-scoped secret references (additive to job)
 	Exports   []Export          // declares this step produces files for export
 	Artifacts []Artifact        // files imported from dependency jobs at this point
 	When      *conditional.When // conditional execution; nil = always run
@@ -288,6 +291,11 @@ func (p *Pipeline) Validate() ([]int, error) {
 	if err := validateEnvVars("pipeline", p.Env); err != nil {
 		return nil, err
 	}
+	if err := validateSecretDecls("pipeline", p.Secrets); err != nil {
+		return nil, err
+	}
+
+	declaredSecrets := secretDeclSet(p.Secrets)
 
 	g := jobGraph{
 		jobs:  p.Jobs,
@@ -295,7 +303,7 @@ func (p *Pipeline) Validate() ([]int, error) {
 	}
 
 	for i := range p.Jobs {
-		if err := validateJob(i, &p.Jobs[i], &g); err != nil {
+		if err := validateJob(i, &p.Jobs[i], &g, declaredSecrets); err != nil {
 			return nil, err
 		}
 	}
@@ -315,7 +323,7 @@ func (p *Pipeline) Validate() ([]int, error) {
 // validateJob checks a single job for name, image, steps, and dependency validity.
 //
 //revive:disable-next-line:cognitive-complexity,cyclomatic validateJob is a linear sequence of field checks; splitting it hurts readability.
-func validateJob(idx int, j *Job, g *jobGraph) error {
+func validateJob(idx int, j *Job, g *jobGraph, declaredSecrets map[string]struct{}) error {
 	if j.Name == "" {
 		return fmt.Errorf("job at index %d: %w", idx, ErrEmptyJobName)
 	}
@@ -354,6 +362,10 @@ func validateJob(idx int, j *Job, g *jobGraph) error {
 	if err := validateShell(jobScope, j.Shell); err != nil {
 		return err
 	}
+	jobEnvUsed, jobMountUsed, err := validateSecretRefs(jobScope, j.Secrets, declaredSecrets)
+	if err != nil {
+		return err
+	}
 	// Jobs allow both static and deferred (output()-referencing) conditions,
 	// so only syntax/type validation is needed here.
 	if j.When != nil {
@@ -369,7 +381,17 @@ func validateJob(idx int, j *Job, g *jobGraph) error {
 		if err := validateStep(j.Name, si, s, stepNames); err != nil {
 			return err
 		}
-		if err := validateArtifacts(fmt.Sprintf("job %q step %q", j.Name, s.Name), s.Artifacts, j.DependsOn); err != nil {
+		stepScope := fmt.Sprintf("job %q step %q", j.Name, s.Name)
+		if err := validateArtifacts(stepScope, s.Artifacts, j.DependsOn); err != nil {
+			return err
+		}
+		// Pass job-level env/mount maps so step refs that collide with job
+		// targets are rejected.
+		if _, _, err := validateSecretRefsWithUsed(stepScope, s.Secrets, declaredSecrets,
+			maps.Clone(jobEnvUsed), maps.Clone(jobMountUsed)); err != nil {
+			return err
+		}
+		if err := validateSecretInheritance(stepScope, j.Secrets, s.Secrets); err != nil {
 			return err
 		}
 	}

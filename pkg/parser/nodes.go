@@ -29,6 +29,7 @@ const (
 	NodeTypeRetry     NodeType = "retry"
 	NodeTypeTimeout   NodeType = "timeout"
 	NodeTypeShell     NodeType = "shell"
+	NodeTypeSecret    NodeType = "secret"
 )
 
 // Property keys.
@@ -45,4 +46,9 @@ const (
 	PropAttempts   = "attempts"
 	PropDelay      = "delay"
 	PropBackoff    = "backoff"
+	PropEnv        = "env"
+	PropMount      = "mount"
+	PropPath       = "path"
+	PropCmd        = "cmd"
+	PropVar        = "var"
 )

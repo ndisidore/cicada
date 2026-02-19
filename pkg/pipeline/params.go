@@ -53,6 +53,20 @@ func SubstituteParams(jobs []Job, params map[string]string) []Job {
 	})
 }
 
+// SubstituteSecretDeclParams replaces ${param.*} placeholders in secret
+// declaration fields (Var, Path, Cmd). Called at pipeline level during include
+// resolution.
+func SubstituteSecretDeclParams(decls []SecretDecl, params map[string]string) []SecretDecl {
+	if len(params) == 0 || len(decls) == 0 {
+		return decls
+	}
+	sub := func(v string) string { return substituteVars(v, params, "param.") }
+	out := make([]SecretDecl, len(decls))
+	copy(out, decls)
+	substituteSecretDecls(out, sub)
+	return out
+}
+
 // substituteJobVars applies ${prefix.key} substitution to all string fields
 // of a job and its steps. Returns a deep copy with substitutions applied.
 func substituteJobVars(j Job, combo map[string]string, prefix string) Job {
@@ -70,6 +84,7 @@ func substituteJobVars(j Job, combo map[string]string, prefix string) Job {
 	if c.Publish != nil {
 		c.Publish.Image = sub(c.Publish.Image)
 	}
+	substituteSecretRefs(c.Secrets, sub)
 	if c.When != nil {
 		c.When.Expression = sub(c.When.Expression)
 		c.When.InvalidateAST()
@@ -90,6 +105,7 @@ func substituteStepFields(s *Step, sub func(string) string) {
 	substituteMounts(s.Mounts, sub)
 	substituteCaches(s.Caches, sub)
 	substituteEnvValues(s.Env, sub)
+	substituteSecretRefs(s.Secrets, sub)
 	substituteExports(s.Exports, sub)
 	substituteArtifacts(s.Artifacts, sub)
 	if s.When != nil {
@@ -143,5 +159,20 @@ func substituteArtifacts(artifacts []Artifact, sub func(string) string) {
 	for i := range artifacts {
 		artifacts[i].Source = sub(artifacts[i].Source)
 		artifacts[i].Target = sub(artifacts[i].Target)
+	}
+}
+
+func substituteSecretDecls(decls []SecretDecl, sub func(string) string) {
+	for i := range decls {
+		decls[i].Var = sub(decls[i].Var)
+		decls[i].Path = sub(decls[i].Path)
+		decls[i].Cmd = sub(decls[i].Cmd)
+	}
+}
+
+func substituteSecretRefs(refs []SecretRef, sub func(string) string) {
+	for i := range refs {
+		refs[i].Env = sub(refs[i].Env)
+		refs[i].Mount = sub(refs[i].Mount)
 	}
 }

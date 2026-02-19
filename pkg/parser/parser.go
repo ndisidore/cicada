@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,15 +22,16 @@ import (
 
 // Sentinel errors for parse failures.
 var (
-	ErrUnknownNode    = errors.New("unknown node type")
-	ErrMissingField   = errors.New("missing required field")
-	ErrDuplicateField = errors.New("duplicate field")
-	ErrExtraArgs      = errors.New("too many arguments")
-	ErrTypeMismatch   = errors.New("argument type mismatch")
-	ErrUnknownProp    = errors.New("unknown property")
-	ErrAmbiguousFile  = errors.New("ambiguous file: contains both pipeline and fragment nodes")
-	ErrEmptyInclude   = errors.New("no pipeline or fragment node found")
-	ErrNilResolver    = errors.New("Parser.Resolver is nil")
+	ErrUnknownNode        = errors.New("unknown node type")
+	ErrMissingField       = errors.New("missing required field")
+	ErrDuplicateField     = errors.New("duplicate field")
+	ErrExtraArgs          = errors.New("too many arguments")
+	ErrTypeMismatch       = errors.New("argument type mismatch")
+	ErrUnknownProp        = errors.New("unknown property")
+	ErrUnexpectedChildren = errors.New("unexpected child nodes")
+	ErrAmbiguousFile      = errors.New("ambiguous file: contains both pipeline and fragment nodes")
+	ErrEmptyInclude       = errors.New("no pipeline or fragment node found")
+	ErrNilResolver        = errors.New("Parser.Resolver is nil")
 )
 
 // Parser converts KDL documents into validated pipeline definitions.
@@ -90,6 +93,7 @@ func (p *Parser) parse(r io.Reader, filename string) (pipeline.Pipeline, error) 
 		Name:     nameFromFilename(filename),
 		Jobs:     merged,
 		Env:      acc.Env,
+		Secrets:  acc.Secrets,
 		Matrix:   acc.Matrix,
 		Defaults: acc.Defaults,
 		Aliases:  state.aliases,
@@ -102,11 +106,12 @@ type pipelineAcc struct {
 	Matrix   *pipeline.Matrix
 	Defaults *pipeline.Defaults
 	Env      []pipeline.EnvVar
+	Secrets  []pipeline.SecretDecl
 }
 
 // parsePipelineChild dispatches a single child node of a pipeline block.
 //
-//revive:disable-next-line:cognitive-complexity parsePipelineChild is a flat switch dispatch; splitting it hurts readability.
+//revive:disable-next-line:cognitive-complexity,cyclomatic parsePipelineChild is a flat switch dispatch; splitting it hurts readability.
 func (p *Parser) parsePipelineChild(
 	child *document.Node,
 	filename string,
@@ -151,6 +156,12 @@ func (p *Parser) parsePipelineChild(
 			return err
 		}
 		acc.Env = append(acc.Env, ev)
+	case NodeTypeSecret:
+		sd, err := parseSecretDeclNode(child, filename, "pipeline")
+		if err != nil {
+			return err
+		}
+		acc.Secrets = append(acc.Secrets, sd)
 	case NodeTypeInclude:
 		jobs, inc, err := p.resolveChildInclude(child, filename, state)
 		if err != nil {
@@ -159,7 +170,7 @@ func (p *Parser) parsePipelineChild(
 		gc.addInclude(jobs, inc)
 	default:
 		return fmt.Errorf(
-			"%s: %w: %q (expected job, step, defaults, matrix, env, or include)", filename, ErrUnknownNode, string(nt),
+			"%s: %w: %q (expected job, step, defaults, matrix, env, secret, or include)", filename, ErrUnknownNode, string(nt),
 		)
 	}
 	return nil
@@ -170,6 +181,7 @@ type finalizePipelineInput struct {
 	Name     string
 	Jobs     []pipeline.Job
 	Env      []pipeline.EnvVar
+	Secrets  []pipeline.SecretDecl
 	Matrix   *pipeline.Matrix
 	Defaults *pipeline.Defaults
 	Aliases  map[string][]string
@@ -186,7 +198,14 @@ func finalizePipeline(in finalizePipelineInput) (pipeline.Pipeline, error) {
 	// Apply defaults before expansion and validation.
 	jobs = pipeline.ApplyDefaults(jobs, in.Defaults)
 
-	pl := pipeline.Pipeline{Name: in.Name, Jobs: jobs, Env: in.Env, Matrix: in.Matrix, Defaults: in.Defaults}
+	pl := pipeline.Pipeline{
+		Name:     in.Name,
+		Jobs:     jobs,
+		Env:      in.Env,
+		Secrets:  in.Secrets,
+		Matrix:   in.Matrix,
+		Defaults: in.Defaults,
+	}
 	pl, err = pipeline.Expand(pl)
 	if err != nil {
 		return pipeline.Pipeline{}, fmt.Errorf("%s: %w", in.Filename, err)
@@ -352,6 +371,12 @@ func applyJobField(j *pipeline.Job, node *document.Node, filename string, seen m
 			return err
 		}
 		j.Shell = s
+	case NodeTypeSecret:
+		ref, err := parseSecretRefNode(node, filename, scope)
+		if err != nil {
+			return err
+		}
+		j.Secrets = append(j.Secrets, ref)
 	case NodeTypeStep:
 		step, err := parseJobStep(node, filename, j.Name)
 		if err != nil {
@@ -479,6 +504,12 @@ func applyJobStepField(s *pipeline.Step, node *document.Node, filename, jobName 
 			return err
 		}
 		s.Shell = sh
+	case NodeTypeSecret:
+		ref, err := parseSecretRefNode(node, filename, scope)
+		if err != nil {
+			return err
+		}
+		s.Secrets = append(s.Secrets, ref)
 	case NodeTypeNoCache:
 		if len(node.Arguments) > 0 {
 			return fmt.Errorf("%s: %s: no-cache takes no arguments: %w", filename, scope, ErrExtraArgs)
@@ -862,6 +893,113 @@ func parseShellNode(node *document.Node, filename, scope string) ([]string, erro
 		args = append(args, v)
 	}
 	return args, nil
+}
+
+// parseSecretDeclNode parses a pipeline-level secret declaration from a KDL node.
+// Children: source (required), var (optional), path (optional), cmd (optional).
+// Semantic validation (valid source values, conditional field requirements, var
+// restriction to hostEnv) is deferred to pipeline.Validate via validateSecretDecls.
+//
+//revive:disable-next-line:cognitive-complexity parseSecretDeclNode is a linear field-dispatch parser; splitting it hurts readability.
+func parseSecretDeclNode(node *document.Node, filename, scope string) (pipeline.SecretDecl, error) {
+	name, err := requireStringArg(node, filename, string(NodeTypeSecret))
+	if err != nil {
+		return pipeline.SecretDecl{}, fmt.Errorf("%s: %s: secret missing name: %w", filename, scope, err)
+	}
+	if len(node.Arguments) > 1 {
+		return pipeline.SecretDecl{}, fmt.Errorf(
+			"%s: %s: secret %q: requires exactly one argument, got %d: %w",
+			filename, scope, name, len(node.Arguments), ErrExtraArgs,
+		)
+	}
+	// Secret declarations use children only (source, var, path, cmd); reject stray properties.
+	if len(node.Properties) > 0 {
+		k := slices.Sorted(maps.Keys(node.Properties))[0]
+		return pipeline.SecretDecl{}, fmt.Errorf(
+			"%s: %s: secret %q: %w: %q", filename, scope, name, ErrUnknownProp, k,
+		)
+	}
+	d := pipeline.SecretDecl{Name: name}
+	seen := make(map[string]bool, 4)
+	for _, child := range node.Children {
+		field := child.Name.ValueString()
+		if seen[field] {
+			return pipeline.SecretDecl{}, fmt.Errorf("%s: %s: secret %q: %w: %q", filename, scope, name, ErrDuplicateField, field)
+		}
+		seen[field] = true
+		switch field {
+		case PropSource, PropVar, PropPath, PropCmd:
+			if len(child.Arguments) > 1 {
+				return pipeline.SecretDecl{}, fmt.Errorf(
+					"%s: %s: secret %q: %s requires exactly one argument, got %d: %w",
+					filename, scope, name, field, len(child.Arguments), ErrExtraArgs,
+				)
+			}
+			if len(child.Properties) > 0 {
+				k := slices.Sorted(maps.Keys(child.Properties))[0]
+				return pipeline.SecretDecl{}, fmt.Errorf(
+					"%s: %s: secret %q: %s: %w: %q", filename, scope, name, field, ErrUnknownProp, k,
+				)
+			}
+			v, err := requireStringArg(child, filename, field)
+			if err != nil {
+				return pipeline.SecretDecl{}, fmt.Errorf("%s: %s: secret %q: %s: %w", filename, scope, name, field, err)
+			}
+			switch field {
+			case PropSource:
+				d.Source = pipeline.SecretSource(v)
+			case PropVar:
+				d.Var = v
+			case PropPath:
+				d.Path = v
+			default: // PropCmd (guarded by outer case)
+				d.Cmd = v
+			}
+		default:
+			return pipeline.SecretDecl{}, fmt.Errorf("%s: %s: secret %q: %w: %q", filename, scope, name, ErrUnknownNode, field)
+		}
+	}
+	if d.Source == "" {
+		return pipeline.SecretDecl{}, fmt.Errorf("%s: %s: secret %q: source: %w", filename, scope, name, ErrMissingField)
+	}
+	return d, nil
+}
+
+// parseSecretRefNode parses a job/step-level secret reference from a KDL node.
+// One required string argument (secret name), optional env= and mount= properties.
+func parseSecretRefNode(node *document.Node, filename, scope string) (pipeline.SecretRef, error) {
+	name, err := requireStringArg(node, filename, string(NodeTypeSecret))
+	if err != nil {
+		return pipeline.SecretRef{}, fmt.Errorf("%s: %s: secret ref missing name: %w", filename, scope, err)
+	}
+	if len(node.Arguments) > 1 {
+		return pipeline.SecretRef{}, fmt.Errorf(
+			"%s: %s: secret %q: requires exactly one argument, got %d: %w",
+			filename, scope, name, len(node.Arguments), ErrExtraArgs,
+		)
+	}
+	if len(node.Children) > 0 {
+		return pipeline.SecretRef{}, fmt.Errorf(
+			"%s: %s: secret %q: %w", filename, scope, name, ErrUnexpectedChildren,
+		)
+	}
+	envVal, err := prop[string](node, PropEnv)
+	if err != nil {
+		return pipeline.SecretRef{}, fmt.Errorf("%s: %s: secret %q: %w", filename, scope, name, err)
+	}
+	mountVal, err := prop[string](node, PropMount)
+	if err != nil {
+		return pipeline.SecretRef{}, fmt.Errorf("%s: %s: secret %q: %w", filename, scope, name, err)
+	}
+	// Reject unknown properties deterministically.
+	for _, k := range slices.Sorted(maps.Keys(node.Properties)) {
+		if k != PropEnv && k != PropMount {
+			return pipeline.SecretRef{}, fmt.Errorf(
+				"%s: %s: secret %q: %w: %q", filename, scope, name, ErrUnknownProp, k,
+			)
+		}
+	}
+	return pipeline.SecretRef{Name: name, Env: envVal, Mount: mountVal}, nil
 }
 
 // stringArgs2 extracts exactly two string arguments from a node.

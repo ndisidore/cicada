@@ -22,6 +22,7 @@ import (
 	"github.com/moby/buildkit/exporter/containerimage/exptypes"
 	gateway "github.com/moby/buildkit/frontend/gateway/client"
 	gatewaypb "github.com/moby/buildkit/frontend/gateway/pb"
+	"github.com/moby/buildkit/session"
 	"github.com/tonistiigi/fsutil"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
@@ -174,6 +175,10 @@ type RunInput struct {
 	CacheCollector *cache.Collector
 	// WhenContext provides static bindings for deferred When evaluation.
 	WhenContext *conditional.Context
+	// Session provides secret attachables for BuildKit gRPC session.
+	Session []session.Attachable
+	// SecretValues maps secret names to plaintext values for log redaction.
+	SecretValues map[string]string
 }
 
 // runConfig groups shared dependencies for runNode, solveJob, solveExport, and
@@ -189,6 +194,8 @@ type runConfig struct {
 	cacheImports []client.CacheOptionsEntry
 	collector    *cache.Collector
 	whenCtx      *conditional.Context
+	session      []session.Attachable
+	secretValues map[string]string
 }
 
 // dagNode tracks a job and a done channel that is closed on completion.
@@ -244,6 +251,8 @@ func Run(ctx context.Context, in RunInput) error {
 		cacheImports: in.CacheImports,
 		collector:    in.CacheCollector,
 		whenCtx:      in.WhenContext,
+		session:      in.Session,
+		secretValues: in.SecretValues,
 	}
 
 	var jobErr error
@@ -556,7 +565,7 @@ func solveJob(ctx context.Context, name string, def *llb.Definition, cfg runConf
 	}
 
 	ch := make(chan *client.SolveStatus)
-	displayCh := teeStatus(ctx, ch, cfg.collector, name)
+	displayCh := teeStatus(ctx, ch, cfg.collector, cfg.secretValues, name)
 
 	if err := cfg.display.Attach(ctx, name, displayCh, stepTimeouts); err != nil {
 		close(ch)
@@ -567,6 +576,7 @@ func solveJob(ctx context.Context, name string, def *llb.Definition, cfg runConf
 		LocalMounts:  cfg.localMounts,
 		CacheExports: cfg.cacheExports,
 		CacheImports: cfg.cacheImports,
+		Session:      cfg.session,
 	}, ch)
 	if err != nil {
 		return fmt.Errorf("solving job: %w", err)
@@ -627,7 +637,7 @@ func solveExport(ctx context.Context, exp Export, cfg runConfig) error {
 
 	ch := make(chan *client.SolveStatus)
 	displayName := "export:" + exp.JobName
-	displayCh := teeStatus(ctx, ch, cfg.collector, displayName)
+	displayCh := teeStatus(ctx, ch, cfg.collector, cfg.secretValues, displayName)
 
 	if err := cfg.display.Attach(ctx, displayName, displayCh, nil); err != nil {
 		close(ch)
@@ -641,6 +651,7 @@ func solveExport(ctx context.Context, exp Export, cfg runConfig) error {
 		}},
 		CacheExports: cfg.cacheExports,
 		CacheImports: cfg.cacheImports,
+		Session:      cfg.session,
 	}, ch)
 	if err != nil {
 		return fmt.Errorf("solving export: %w", err)
@@ -833,7 +844,7 @@ func solveMultiPlatformPublish(ctx context.Context, grp publishGroup, cfg runCon
 
 	ch := make(chan *client.SolveStatus)
 	displayName := "publish:" + grp.Image
-	displayCh := teeStatus(ctx, ch, cfg.collector, displayName)
+	displayCh := teeStatus(ctx, ch, cfg.collector, cfg.secretValues, displayName)
 
 	if err := cfg.display.Attach(ctx, displayName, displayCh, nil); err != nil {
 		close(ch)
@@ -847,6 +858,7 @@ func solveMultiPlatformPublish(ctx context.Context, grp publishGroup, cfg runCon
 		}},
 		CacheExports: cfg.cacheExports,
 		CacheImports: cfg.cacheImports,
+		Session:      cfg.session,
 	}, "", multiPlatformBuildFunc(grp.Variants), ch)
 	if err != nil {
 		return fmt.Errorf("solving multi-platform publish: %w", err)
@@ -870,7 +882,7 @@ func solveImagePublish(ctx context.Context, pub ImagePublish, cfg runConfig) err
 
 	ch := make(chan *client.SolveStatus)
 	displayName := "publish:" + pub.JobName
-	displayCh := teeStatus(ctx, ch, cfg.collector, displayName)
+	displayCh := teeStatus(ctx, ch, cfg.collector, cfg.secretValues, displayName)
 
 	if err := cfg.display.Attach(ctx, displayName, displayCh, nil); err != nil {
 		close(ch)
@@ -884,6 +896,7 @@ func solveImagePublish(ctx context.Context, pub ImagePublish, cfg runConfig) err
 		}},
 		CacheExports: cfg.cacheExports,
 		CacheImports: cfg.cacheImports,
+		Session:      cfg.session,
 	}, ch)
 	if err != nil {
 		return fmt.Errorf("solving publish: %w", err)
@@ -902,7 +915,7 @@ func solveImageExportDocker(ctx context.Context, pub ImagePublish, cfg runConfig
 
 	ch := make(chan *client.SolveStatus)
 	displayName := "export-docker:" + pub.JobName
-	displayCh := teeStatus(ctx, ch, cfg.collector, displayName)
+	displayCh := teeStatus(ctx, ch, cfg.collector, cfg.secretValues, displayName)
 
 	if err := cfg.display.Attach(ctx, displayName, displayCh, nil); err != nil {
 		close(ch)
@@ -933,6 +946,7 @@ func solveImageExportDocker(ctx context.Context, pub ImagePublish, cfg runConfig
 			}},
 			CacheExports: cfg.cacheExports,
 			CacheImports: cfg.cacheImports,
+			Session:      cfg.session,
 		}, ch)
 		if err != nil {
 			return fmt.Errorf("solving export-docker: %w", err)
@@ -972,6 +986,7 @@ func extractOutputs(ctx context.Context, def *llb.Definition, cfg runConfig) (ma
 			OutputDir: dir,
 		}},
 		CacheImports: cfg.cacheImports,
+		Session:      cfg.session,
 	}, ch)
 	if err != nil {
 		return nil, fmt.Errorf("solving output extraction: %w", err)
@@ -1013,11 +1028,14 @@ func drainChannel(ch <-chan *client.SolveStatus) {
 	}
 }
 
-// teeStatus interposes a Collector between the source status channel and the
-// display consumer. If collector is nil, returns src directly (zero overhead).
-// On context cancellation the goroutine drains src so the Solve sender can exit.
-func teeStatus(ctx context.Context, src <-chan *client.SolveStatus, collector *cache.Collector, jobName string) <-chan *client.SolveStatus {
-	if collector == nil {
+// teeStatus interposes a Collector and secret redaction between the source
+// status channel and the display consumer. If both collector and secrets are
+// nil/empty, returns src directly (zero overhead). On context cancellation
+// the goroutine drains src so the Solve sender can exit.
+//
+//revive:disable-next-line:cognitive-complexity teeStatus is a channel-forwarding goroutine; splitting it hurts readability.
+func teeStatus(ctx context.Context, src <-chan *client.SolveStatus, collector *cache.Collector, secrets map[string]string, jobName string) <-chan *client.SolveStatus {
+	if collector == nil && len(secrets) == 0 {
 		return src
 	}
 	out := make(chan *client.SolveStatus)
@@ -1030,7 +1048,10 @@ func teeStatus(ctx context.Context, src <-chan *client.SolveStatus, collector *c
 				if !ok {
 					return
 				}
-				collector.Observe(jobName, status)
+				redactStatus(status, secrets)
+				if collector != nil {
+					collector.Observe(jobName, status)
+				}
 				select {
 				case out <- status:
 				case <-ctx.Done():
