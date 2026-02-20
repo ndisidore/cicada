@@ -57,6 +57,17 @@ func (m *MockCondition) EvaluateDeferred(ctx conditional.Context, depOutputs map
 	return args.Bool(0), args.Error(1)
 }
 
+// fakeGatewayClient implements gateway.Client for step-controlled tests.
+// Only Solve is implemented; other methods panic.
+type fakeGatewayClient struct {
+	gateway.Client // embed for unimplemented methods
+	solveFn        func(ctx context.Context, req gateway.SolveRequest) (*gateway.Result, error)
+}
+
+func (f *fakeGatewayClient) Solve(ctx context.Context, req gateway.SolveRequest) (*gateway.Result, error) {
+	return f.solveFn(ctx, req)
+}
+
 // fakeSender implements progress.Sender for testing.
 type fakeSender struct {
 	mu   sync.Mutex
@@ -2328,5 +2339,260 @@ func TestRun_failFast(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), `job "a"`)
 		assert.Contains(t, err.Error(), `job "b"`)
+	})
+}
+
+func TestStepControlledExecution(t *testing.T) {
+	t.Parallel()
+
+	// stepBuildFunc returns a simple StepExec.Build that produces a scratch state.
+	stepBuildFunc := func(base llb.State, _ int) (llb.State, error) {
+		return llb.Scratch(), nil
+	}
+
+	t.Run("all steps succeed", func(t *testing.T) {
+		t.Parallel()
+		sender := &fakeSender{}
+		var solveCount atomic.Int32
+
+		gc := &fakeGatewayClient{solveFn: func(_ context.Context, _ gateway.SolveRequest) (*gateway.Result, error) {
+			solveCount.Add(1)
+			return gateway.NewResult(), nil
+		}}
+
+		solver := &fakeSolver{
+			buildFn: func(ctx context.Context, _ client.SolveOpt, _ string, buildFunc gateway.BuildFunc, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+				defer close(ch)
+				_, err := buildFunc(ctx, gc)
+				return &client.SolveResponse{}, err
+			},
+		}
+
+		def, err := llb.Scratch().Marshal(t.Context())
+		require.NoError(t, err)
+
+		err = Run(t.Context(), RunInput{
+			Solver: solver,
+			Jobs: []Job{{
+				Name:       "test",
+				Definition: def,
+				Steps: []StepExec{
+					{Name: "a", Build: stepBuildFunc},
+					{Name: "b", Build: stepBuildFunc},
+				},
+				BaseState: llb.Scratch(),
+			}},
+			Sender: sender,
+		})
+		require.NoError(t, err)
+		// 2 steps solved.
+		assert.Equal(t, int32(2), solveCount.Load())
+	})
+
+	t.Run("step retry succeeds after failures", func(t *testing.T) {
+		t.Parallel()
+		sender := &fakeSender{}
+		var solveCount atomic.Int32
+
+		gc := &fakeGatewayClient{solveFn: func(_ context.Context, _ gateway.SolveRequest) (*gateway.Result, error) {
+			n := solveCount.Add(1)
+			if n <= 2 {
+				return nil, errors.New("transient")
+			}
+			return gateway.NewResult(), nil
+		}}
+
+		solver := &fakeSolver{
+			buildFn: func(ctx context.Context, _ client.SolveOpt, _ string, buildFunc gateway.BuildFunc, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+				defer close(ch)
+				_, err := buildFunc(ctx, gc)
+				return &client.SolveResponse{}, err
+			},
+		}
+
+		def, err := llb.Scratch().Marshal(t.Context())
+		require.NoError(t, err)
+
+		err = Run(t.Context(), RunInput{
+			Solver: solver,
+			Jobs: []Job{{
+				Name:       "test",
+				Definition: def,
+				Steps: []StepExec{
+					{
+						Name:  "flaky",
+						Retry: &pipeline.Retry{Attempts: 3, Backoff: pipeline.BackoffNone},
+						Build: stepBuildFunc,
+					},
+				},
+				BaseState: llb.Scratch(),
+			}},
+			Sender: sender,
+		})
+		require.NoError(t, err)
+		// 2 failures + 1 success = 3 solves.
+		assert.Equal(t, int32(3), solveCount.Load())
+
+		// Verify StepRetryMsg was sent.
+		sender.mu.Lock()
+		var retryMsgs []progress.StepRetryMsg
+		for _, m := range sender.msgs {
+			if msg, ok := m.(progress.StepRetryMsg); ok {
+				retryMsgs = append(retryMsgs, msg)
+			}
+		}
+		sender.mu.Unlock()
+		assert.Len(t, retryMsgs, 2)
+	})
+
+	t.Run("allow-failure continues to next step", func(t *testing.T) {
+		t.Parallel()
+		sender := &fakeSender{}
+		var solveCount atomic.Int32
+
+		gc := &fakeGatewayClient{solveFn: func(_ context.Context, _ gateway.SolveRequest) (*gateway.Result, error) {
+			n := solveCount.Add(1)
+			if n == 1 {
+				return nil, errors.New("allowed failure")
+			}
+			return gateway.NewResult(), nil
+		}}
+
+		solver := &fakeSolver{
+			buildFn: func(ctx context.Context, _ client.SolveOpt, _ string, buildFunc gateway.BuildFunc, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+				defer close(ch)
+				_, err := buildFunc(ctx, gc)
+				return &client.SolveResponse{}, err
+			},
+		}
+
+		def, err := llb.Scratch().Marshal(t.Context())
+		require.NoError(t, err)
+
+		err = Run(t.Context(), RunInput{
+			Solver: solver,
+			Jobs: []Job{{
+				Name:       "test",
+				Definition: def,
+				Steps: []StepExec{
+					{Name: "optional", AllowFailure: true, Build: stepBuildFunc},
+					{Name: "required", Build: stepBuildFunc},
+				},
+				BaseState: llb.Scratch(),
+			}},
+			Sender: sender,
+		})
+		require.NoError(t, err)
+		// 1 failure (allowed) + 1 success = 2 solves.
+		assert.Equal(t, int32(2), solveCount.Load())
+
+		// Verify StepAllowedFailureMsg was sent.
+		sender.mu.Lock()
+		var allowedMsgs []progress.StepAllowedFailureMsg
+		for _, m := range sender.msgs {
+			if msg, ok := m.(progress.StepAllowedFailureMsg); ok {
+				allowedMsgs = append(allowedMsgs, msg)
+			}
+		}
+		sender.mu.Unlock()
+		require.Len(t, allowedMsgs, 1)
+		assert.Equal(t, "optional", allowedMsgs[0].Step)
+	})
+
+	t.Run("step failure without allow-failure fails job", func(t *testing.T) {
+		t.Parallel()
+		sender := &fakeSender{}
+
+		var solveCount atomic.Int32
+		gc := &fakeGatewayClient{solveFn: func(_ context.Context, _ gateway.SolveRequest) (*gateway.Result, error) {
+			solveCount.Add(1)
+			return nil, errors.New("boom")
+		}}
+
+		solver := &fakeSolver{
+			buildFn: func(ctx context.Context, _ client.SolveOpt, _ string, buildFunc gateway.BuildFunc, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+				defer close(ch)
+				_, err := buildFunc(ctx, gc)
+				return &client.SolveResponse{}, err
+			},
+		}
+
+		def, err := llb.Scratch().Marshal(t.Context())
+		require.NoError(t, err)
+
+		err = Run(t.Context(), RunInput{
+			Solver: solver,
+			Jobs: []Job{{
+				Name:       "test",
+				Definition: def,
+				Steps: []StepExec{
+					{Name: "fail", Build: stepBuildFunc},
+					{Name: "never-reached", Build: stepBuildFunc},
+				},
+				BaseState: llb.Scratch(),
+			}},
+			Sender: sender,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "boom")
+		assert.Equal(t, int32(1), solveCount.Load(), "only the first step should be solved")
+	})
+
+	t.Run("retry then allow-failure", func(t *testing.T) {
+		t.Parallel()
+		sender := &fakeSender{}
+		var solveCount atomic.Int32
+
+		gc := &fakeGatewayClient{solveFn: func(_ context.Context, _ gateway.SolveRequest) (*gateway.Result, error) {
+			solveCount.Add(1)
+			return nil, errors.New("always fails")
+		}}
+
+		solver := &fakeSolver{
+			buildFn: func(ctx context.Context, _ client.SolveOpt, _ string, buildFunc gateway.BuildFunc, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
+				defer close(ch)
+				_, err := buildFunc(ctx, gc)
+				return &client.SolveResponse{}, err
+			},
+		}
+
+		def, err := llb.Scratch().Marshal(t.Context())
+		require.NoError(t, err)
+
+		err = Run(t.Context(), RunInput{
+			Solver: solver,
+			Jobs: []Job{{
+				Name:       "test",
+				Definition: def,
+				Steps: []StepExec{
+					{
+						Name:         "flaky",
+						Retry:        &pipeline.Retry{Attempts: 2, Backoff: pipeline.BackoffNone},
+						AllowFailure: true,
+						Build:        stepBuildFunc,
+					},
+				},
+				BaseState: llb.Scratch(),
+			}},
+			Sender: sender,
+		})
+		require.NoError(t, err)
+		// 1 initial + 2 retries = 3 solves, then allowed to fail.
+		assert.Equal(t, int32(3), solveCount.Load())
+
+		sender.mu.Lock()
+		var retryCount, allowedCount int
+		for _, m := range sender.msgs {
+			switch m.(type) {
+			case progress.StepRetryMsg:
+				retryCount++
+			case progress.StepAllowedFailureMsg:
+				allowedCount++
+			default:
+			}
+		}
+		sender.mu.Unlock()
+		assert.Equal(t, 2, retryCount)
+		assert.Equal(t, 1, allowedCount)
 	})
 }

@@ -725,9 +725,30 @@ func buildRunnerJobs(r builder.Result, p pipeline.Pipeline, skippedSteps map[str
 			Timeout:      info.Timeout,
 			Retry:        info.Retry,
 			StepTimeouts: r.StepTimeouts[r.JobNames[i]],
+			CmdInfos:     r.CmdInfos[r.JobNames[i]],
+		}
+		if defs, ok := r.StepDefs[r.JobNames[i]]; ok {
+			jobs[i].Steps = convertStepDefs(defs)
+			jobs[i].BaseState = r.BaseStates[r.JobNames[i]]
 		}
 	}
 	return jobs, nil
+}
+
+// convertStepDefs converts builder StepDefs to runner StepExec values.
+func convertStepDefs(defs []builder.StepDef) []runner.StepExec {
+	steps := make([]runner.StepExec, len(defs))
+	for i, d := range defs {
+		steps[i] = runner.StepExec{
+			Name:         d.Name,
+			Retry:        d.Retry,
+			AllowFailure: d.AllowFailure,
+			Timeouts:     d.Timeouts,
+			CmdInfos:     d.CmdInfos,
+			Build:        d.Build,
+		}
+	}
+	return steps
 }
 
 // resolveAddr returns the BuildKit daemon address, starting the daemon if needed.

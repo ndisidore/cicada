@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -16,6 +17,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/containerd/errdefs"
+	"github.com/containerd/errdefs/pkg/errgrpc"
 	"github.com/containerd/platforms"
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb"
@@ -115,14 +118,29 @@ type Job struct {
 	Name         string
 	Definition   *llb.Definition
 	DependsOn    []string
-	When         DeferredEvaluator        // deferred condition; nil = always run
-	Env          map[string]string        // pipeline-scoped env for deferred condition evaluation
-	Matrix       map[string]string        // matrix dimension values for deferred condition evaluation
-	OutputDef    *llb.Definition          // extracts /cicada/output for deferred conditions
-	SkippedSteps []string                 // step names skipped by static when conditions
-	Timeout      time.Duration            // job-level timeout; 0 = no timeout
-	Retry        *pipeline.Retry          // job-level retry config; nil = no retry
-	StepTimeouts map[string]time.Duration // vertex name -> configured timeout; nil = no step timeouts
+	When         DeferredEvaluator           // deferred condition; nil = always run
+	Env          map[string]string           // pipeline-scoped env for deferred condition evaluation
+	Matrix       map[string]string           // matrix dimension values for deferred condition evaluation
+	OutputDef    *llb.Definition             // extracts /cicada/output for deferred conditions
+	SkippedSteps []string                    // step names skipped by static when conditions
+	Timeout      time.Duration               // job-level timeout; 0 = no timeout
+	Retry        *pipeline.Retry             // job-level retry config; nil = no retry
+	StepTimeouts map[string]time.Duration    // vertex name -> configured timeout; nil = no step timeouts
+	CmdInfos     map[string]progress.CmdInfo // vertex name -> command metadata
+	Steps        []StepExec                  // per-step execution; nil = monolithic solve
+	BaseState    llb.State                   // pre-step LLB state; set when Steps is non-nil
+}
+
+// StepExec describes a single step for gateway-based step-controlled execution.
+type StepExec struct {
+	Name         string
+	Retry        *pipeline.Retry
+	AllowFailure bool
+	Timeouts     map[string]time.Duration
+	CmdInfos     map[string]progress.CmdInfo // vertex name -> command metadata
+	// Build produces the LLB state for this step given a base state and retry attempt.
+	// retryAttempt is 0 for the first try; >0 triggers cache busting.
+	Build func(base llb.State, retryAttempt int) (llb.State, error)
 }
 
 // Export pairs an LLB definition containing exported files with the
@@ -458,6 +476,14 @@ func runNode(ctx context.Context, node *dagNode, cfg runConfig) error {
 		if len(node.job.StepTimeouts) > 0 {
 			err = cleanTimeoutError(err, node.job.Name, node.job.StepTimeouts)
 		}
+		var exitErr *gatewaypb.ExitError
+		if errors.As(err, &exitErr) {
+			node.err = progress.NewDisplayError(
+				fmt.Sprintf("job %q: exit code: %d", node.job.Name, exitErr.ExitCode),
+				err,
+			)
+			return node.err
+		}
 		node.err = err
 		return fmt.Errorf("job %q: %w", node.job.Name, err)
 	}
@@ -467,7 +493,8 @@ func runNode(ctx context.Context, node *dagNode, cfg runConfig) error {
 	}
 
 	// Extract outputs for downstream deferred conditions.
-	if node.job.OutputDef != nil {
+	// Step-controlled jobs extract outputs inside the gateway BuildFunc.
+	if node.outputs == nil && node.job.OutputDef != nil {
 		node.outputs, err = extractOutputs(ctx, node.job.OutputDef, cfg)
 		if err != nil {
 			node.err = err
@@ -483,15 +510,29 @@ func runNode(ctx context.Context, node *dagNode, cfg runConfig) error {
 //
 //revive:disable-next-line:cognitive-complexity retryJob is a linear retry loop; splitting it hurts readability.
 func retryJob(ctx context.Context, node *dagNode, cfg runConfig) error {
+	// Dispatch to step-controlled or monolithic solve.
+	solve := func() error {
+		if node.job.Steps != nil {
+			return solveJobSteps(ctx, node, cfg)
+		}
+		return solveJob(ctx, solveJobInput{
+			name:         node.job.Name,
+			def:          node.job.Definition,
+			cfg:          cfg,
+			stepTimeouts: node.job.StepTimeouts,
+			cmdInfos:     node.job.CmdInfos,
+		})
+	}
+
 	r := node.job.Retry
 	if r == nil {
-		return solveJob(ctx, node.job.Name, node.job.Definition, cfg, node.job.StepTimeouts)
+		return solve()
 	}
 
 	maxAttempts := 1 + r.Attempts
 	var lastErr error
 	for attempt := range maxAttempts {
-		lastErr = solveJob(ctx, node.job.Name, node.job.Definition, cfg, node.job.StepTimeouts)
+		lastErr = solve()
 		if lastErr == nil {
 			return nil
 		}
@@ -529,6 +570,194 @@ func retryJob(ctx context.Context, node *dagNode, cfg runConfig) error {
 		}
 	}
 	return lastErr
+}
+
+// solveJobSteps uses the gateway API to execute a job's steps individually,
+// enabling per-step retry and allow-failure.
+func solveJobSteps(ctx context.Context, node *dagNode, cfg runConfig) error {
+	// Merge all step timeouts and cmd infos into single maps for JobAddedMsg.
+	var merged map[string]time.Duration
+	var mergedCmds map[string]progress.CmdInfo
+	for _, step := range node.job.Steps {
+		if step.Timeouts != nil {
+			if merged == nil {
+				merged = make(map[string]time.Duration)
+			}
+			maps.Copy(merged, step.Timeouts)
+		}
+		if step.CmdInfos != nil {
+			if mergedCmds == nil {
+				mergedCmds = make(map[string]progress.CmdInfo)
+			}
+			maps.Copy(mergedCmds, step.CmdInfos)
+		}
+	}
+
+	ch := make(chan *client.SolveStatus)
+	displayCh := teeStatus(ctx, ch, cfg.collector, cfg.secretValues, node.job.Name)
+
+	cfg.sender.Send(progress.JobAddedMsg{Job: node.job.Name, StepTimeouts: merged, CmdInfos: mergedCmds})
+	var wg sync.WaitGroup
+	wg.Go(bridgeStatus(ctx, cfg.sender, node.job.Name, displayCh))
+
+	stepOutputs := make(map[string]string)
+	_, err := cfg.solver.Build(ctx, client.SolveOpt{
+		LocalMounts:  cfg.localMounts,
+		CacheExports: cfg.cacheExports,
+		CacheImports: cfg.cacheImports,
+		Session:      cfg.session,
+	}, "", stepControlBuildFunc(node, cfg, &stepOutputs), ch)
+
+	wg.Wait()
+
+	if err != nil {
+		return fmt.Errorf("solving job steps: %w", err)
+	}
+	// Store outputs extracted inside the gateway for deferred conditions.
+	node.outputs = stepOutputs
+	return nil
+}
+
+// stepControlBuildFunc returns a gateway.BuildFunc that executes steps individually
+// with per-step retry and allow-failure support.
+func stepControlBuildFunc(node *dagNode, cfg runConfig, outputs *map[string]string) gateway.BuildFunc {
+	return func(ctx context.Context, c gateway.Client) (*gateway.Result, error) {
+		currentState := node.job.BaseState
+		var lastRef gateway.Reference
+
+		for _, step := range node.job.Steps {
+			stepState, ref, err := solveStep(ctx, solveStepInput{
+				client: c, cfg: cfg,
+				jobName: node.job.Name, step: step, base: currentState,
+			})
+			if err != nil {
+				if step.AllowFailure {
+					cfg.sender.Send(progress.StepAllowedFailureMsg{
+						Job: node.job.Name, Step: step.Name, Err: err,
+					})
+					// Leave currentState unchanged: a failed AllowFailure
+					// step may have tainted the filesystem, so subsequent
+					// steps must build from the last known-good state.
+					continue
+				}
+				return nil, err
+			}
+			currentState = stepState
+			lastRef = ref
+		}
+
+		if lastRef != nil {
+			if extracted := extractRefOutputs(ctx, lastRef, node.job.Name); extracted != nil {
+				*outputs = extracted
+			}
+		}
+
+		res := gateway.NewResult()
+		if lastRef != nil {
+			res.SetRef(lastRef)
+		}
+		return res, nil
+	}
+}
+
+// extractRefOutputs reads /cicada/output from a gateway reference and parses
+// KEY=VALUE lines. Returns an empty map when the file does not exist.
+// ReadFile returns gRPC status errors, so errgrpc.ToNative converts them
+// before errdefs checks.
+func extractRefOutputs(ctx context.Context, ref gateway.Reference, jobName string) map[string]string {
+	data, err := ref.ReadFile(ctx, gateway.ReadRequest{Filename: "cicada/output"})
+	if err != nil {
+		err = errgrpc.ToNative(err)
+	}
+	switch {
+	case err == nil:
+		return parseOutputLines(string(data))
+	case errdefs.IsNotFound(err):
+		return map[string]string{}
+	default:
+		slogctx.FromContext(ctx).LogAttrs(ctx, slog.LevelWarn, "reading step output file",
+			slog.String("job", jobName),
+			slog.String("file", "cicada/output"),
+			slog.String("error", err.Error()))
+		return nil
+	}
+}
+
+// solveStepInput bundles parameters for solveStep (CS-05).
+type solveStepInput struct {
+	client  gateway.Client
+	cfg     runConfig
+	jobName string
+	step    StepExec
+	base    llb.State
+}
+
+// solveStep executes a single step with optional retry logic via the gateway client.
+//
+//revive:disable-next-line:cognitive-complexity solveStep is a linear retry loop; splitting it hurts readability.
+func solveStep(ctx context.Context, in solveStepInput) (llb.State, gateway.Reference, error) {
+	maxAttempts := 1
+	if in.step.Retry != nil {
+		maxAttempts = 1 + in.step.Retry.Attempts
+	}
+
+	var lastErr error
+	for attempt := range maxAttempts {
+		stepState, err := in.step.Build(in.base, attempt)
+		if err != nil {
+			return llb.State{}, nil, fmt.Errorf("building step %q: %w", in.step.Name, err)
+		}
+
+		def, err := stepState.Marshal(ctx)
+		if err != nil {
+			return llb.State{}, nil, fmt.Errorf("marshaling step %q: %w", in.step.Name, err)
+		}
+
+		result, err := in.client.Solve(ctx, gateway.SolveRequest{
+			Definition: def.ToPB(),
+			Evaluate:   true,
+		})
+		if err == nil {
+			ref, refErr := result.SingleRef()
+			if refErr != nil {
+				return llb.State{}, nil, fmt.Errorf("step %q: getting ref: %w", in.step.Name, refErr)
+			}
+			return stepState, ref, nil
+		}
+
+		lastErr = fmt.Errorf("solving step %q: %w", in.step.Name, err)
+		if attempt == maxAttempts-1 {
+			break
+		}
+
+		if ctx.Err() != nil {
+			if cause := context.Cause(ctx); cause != nil {
+				return llb.State{}, nil, cause
+			}
+			return llb.State{}, nil, ctx.Err()
+		}
+
+		in.cfg.sender.Send(progress.StepRetryMsg{
+			Job: in.jobName, Step: in.step.Name,
+			Attempt: attempt + 2, MaxAttempts: maxAttempts,
+			Err: lastErr,
+		})
+
+		delay := retryDelay(in.step.Retry, attempt)
+		if delay > 0 {
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				if cause := context.Cause(ctx); cause != nil {
+					return llb.State{}, nil, cause
+				}
+				return llb.State{}, nil, ctx.Err()
+			}
+		}
+	}
+	return llb.State{}, nil, lastErr
 }
 
 // _maxDelay caps retry delays to prevent overflow.
@@ -590,23 +819,32 @@ func bridgeStatus(ctx context.Context, sender progress.Sender, name string, disp
 	}
 }
 
-func solveJob(ctx context.Context, name string, def *llb.Definition, cfg runConfig, stepTimeouts map[string]time.Duration) error {
-	if def == nil {
+// solveJobInput groups parameters for solveJob (CS-05).
+type solveJobInput struct {
+	name         string
+	def          *llb.Definition
+	cfg          runConfig
+	stepTimeouts map[string]time.Duration
+	cmdInfos     map[string]progress.CmdInfo
+}
+
+func solveJob(ctx context.Context, in solveJobInput) error {
+	if in.def == nil {
 		return ErrNilDefinition
 	}
 
 	ch := make(chan *client.SolveStatus)
-	displayCh := teeStatus(ctx, ch, cfg.collector, cfg.secretValues, name)
+	displayCh := teeStatus(ctx, ch, in.cfg.collector, in.cfg.secretValues, in.name)
 
-	cfg.sender.Send(progress.JobAddedMsg{Job: name, StepTimeouts: stepTimeouts})
+	in.cfg.sender.Send(progress.JobAddedMsg{Job: in.name, StepTimeouts: in.stepTimeouts, CmdInfos: in.cmdInfos})
 	var wg sync.WaitGroup
-	wg.Go(bridgeStatus(ctx, cfg.sender, name, displayCh))
+	wg.Go(bridgeStatus(ctx, in.cfg.sender, in.name, displayCh))
 
-	_, err := cfg.solver.Solve(ctx, def, client.SolveOpt{
-		LocalMounts:  cfg.localMounts,
-		CacheExports: cfg.cacheExports,
-		CacheImports: cfg.cacheImports,
-		Session:      cfg.session,
+	_, err := in.cfg.solver.Solve(ctx, in.def, client.SolveOpt{
+		LocalMounts:  in.cfg.localMounts,
+		CacheExports: in.cfg.cacheExports,
+		CacheImports: in.cfg.cacheImports,
+		Session:      in.cfg.session,
 	}, ch)
 
 	wg.Wait()

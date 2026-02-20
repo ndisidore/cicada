@@ -17,6 +17,7 @@ type Msg interface {
 type JobAddedMsg struct {
 	Job          string
 	StepTimeouts map[string]time.Duration
+	CmdInfos     map[string]CmdInfo // vertex name -> command metadata
 }
 
 // JobStatusMsg carries a BuildKit SolveStatus update for a specific job.
@@ -45,6 +46,22 @@ type JobRetryMsg struct {
 	Err         error
 }
 
+// StepRetryMsg signals a step within a job is being retried after a failure.
+type StepRetryMsg struct {
+	Job         string
+	Step        string
+	Attempt     int
+	MaxAttempts int
+	Err         error
+}
+
+// StepAllowedFailureMsg signals a step failed but was allowed to fail.
+type StepAllowedFailureMsg struct {
+	Job  string
+	Step string
+	Err  error
+}
+
 // JobTimeoutMsg signals a job exceeded its configured timeout.
 type JobTimeoutMsg struct {
 	Job     string
@@ -63,12 +80,14 @@ type LogMsg struct {
 	Message string
 }
 
-func (JobAddedMsg) progressMsg()    {}
-func (JobStatusMsg) progressMsg()   {}
-func (JobDoneMsg) progressMsg()     {}
-func (JobSkippedMsg) progressMsg()  {}
-func (StepSkippedMsg) progressMsg() {}
-func (JobRetryMsg) progressMsg()    {}
-func (JobTimeoutMsg) progressMsg()  {}
-func (ErrorMsg) progressMsg()       {}
-func (LogMsg) progressMsg()         {}
+func (JobAddedMsg) progressMsg()           {}
+func (JobStatusMsg) progressMsg()          {}
+func (JobDoneMsg) progressMsg()            {}
+func (JobSkippedMsg) progressMsg()         {}
+func (StepSkippedMsg) progressMsg()        {}
+func (JobRetryMsg) progressMsg()           {}
+func (StepRetryMsg) progressMsg()          {}
+func (StepAllowedFailureMsg) progressMsg() {}
+func (JobTimeoutMsg) progressMsg()         {}
+func (ErrorMsg) progressMsg()              {}
+func (LogMsg) progressMsg()                {}

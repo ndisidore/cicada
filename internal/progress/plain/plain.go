@@ -78,6 +78,7 @@ type jobTracker struct {
 	seen         map[digest.Digest]vertexState
 	pending      map[digest.Digest]timeoutVertex
 	stepTimeouts map[string]time.Duration
+	cmdInfos     map[string]progress.CmdInfo
 }
 
 //revive:disable-next-line:cognitive-complexity,cyclomatic,function-length consume is a linear message dispatch loop; splitting it hurts readability.
@@ -102,6 +103,7 @@ func (p *Display) consume() {
 		case progress.JobAddedMsg:
 			jt := getJob(msg.Job)
 			jt.stepTimeouts = msg.StepTimeouts
+			jt.cmdInfos = msg.CmdInfos
 
 		case progress.JobStatusMsg:
 			jt := getJob(msg.Job)
@@ -115,6 +117,7 @@ func (p *Display) consume() {
 					seen:       jt.seen,
 					cleanName:  v.Name,
 					cfgTimeout: cfgTimeout,
+					cmdInfos:   jt.cmdInfos,
 				})
 				trackTimeout(v, jt.seen, jt.pending, v.Name, cfgTimeout)
 			}
@@ -149,6 +152,30 @@ func (p *Display) consume() {
 			}
 			attrs = append(attrs, slog.String("event", "job.retry"))
 			log.LogAttrs(p.ctx, slog.LevelWarn, "retrying job", attrs...)
+
+		case progress.StepRetryMsg:
+			attrs := []slog.Attr{
+				slog.String("job", msg.Job),
+				slog.String("step", msg.Step),
+				slog.Int("attempt", msg.Attempt),
+				slog.Int("max_attempts", msg.MaxAttempts),
+			}
+			if msg.Err != nil {
+				attrs = append(attrs, slog.String("error", msg.Err.Error()))
+			}
+			attrs = append(attrs, slog.String("event", "step.retry"))
+			log.LogAttrs(p.ctx, slog.LevelWarn, "retrying step", attrs...)
+
+		case progress.StepAllowedFailureMsg:
+			attrs := []slog.Attr{
+				slog.String("job", msg.Job),
+				slog.String("step", msg.Step),
+			}
+			if msg.Err != nil {
+				attrs = append(attrs, slog.String("error", msg.Err.Error()))
+			}
+			attrs = append(attrs, slog.String("event", "step.allowed_failure"))
+			log.LogAttrs(p.ctx, slog.LevelWarn, "step failed (allowed)", attrs...)
 
 		case progress.JobTimeoutMsg:
 			log.LogAttrs(p.ctx, slog.LevelWarn, "job timed out",
@@ -206,6 +233,7 @@ type logVertexInput struct {
 	seen       map[digest.Digest]vertexState
 	cleanName  string
 	cfgTimeout time.Duration
+	cmdInfos   map[string]progress.CmdInfo
 }
 
 func logVertex(in logVertexInput) {
@@ -223,9 +251,11 @@ func logVertex(in logVertexInput) {
 			//nolint:sloglint // dynamic msg encodes user-facing formatted output
 			in.log.LogAttrs(in.ctx, slog.LevelWarn, fmt.Sprintf("[%s] TIMEOUT %s", in.jobName, in.cleanName), attrs...)
 		} else {
-			attrs := append(base, slog.String("event", "vertex.error"), slog.String("error", in.v.Error))
+			exitInfo := progress.ExitInfo(in.v.Error)
+			attrs := append(base, slog.String("event", "vertex.error"), slog.String("error", exitInfo))
+			attrs = appendDebugCmdAttr(in.ctx, in.log, attrs, in.cmdInfos, in.cleanName)
 			//nolint:sloglint // dynamic msg encodes user-facing formatted output
-			in.log.LogAttrs(in.ctx, slog.LevelError, fmt.Sprintf("[%s] FAIL %s: %s", in.jobName, in.cleanName, in.v.Error), attrs...)
+			in.log.LogAttrs(in.ctx, slog.LevelError, fmt.Sprintf("[%s] FAIL %s: %s", in.jobName, in.cleanName, exitInfo), attrs...)
 		}
 		in.seen[in.v.Digest] = _stateDone
 	case in.v.Cached && prev < _stateDone:
@@ -252,6 +282,19 @@ func logVertex(in logVertexInput) {
 		in.seen[in.v.Digest] = _stateStarted
 	default:
 	}
+}
+
+// appendDebugCmdAttr appends the full_cmd slog attribute when debug logging
+// is enabled and CmdInfo exists for the vertex. The full command is only
+// useful for debugging and may contain internal preamble, so it is gated
+// behind LevelDebug.
+func appendDebugCmdAttr(ctx context.Context, log *slog.Logger, attrs []slog.Attr, cmdInfos map[string]progress.CmdInfo, vertexName string) []slog.Attr {
+	if log.Enabled(ctx, slog.LevelDebug) {
+		if ci, ok := cmdInfos[vertexName]; ok && ci.FullCmd != "" {
+			attrs = append(attrs, slog.String("full_cmd", ci.FullCmd))
+		}
+	}
+	return attrs
 }
 
 // logPendingTimeouts emits timeout warnings for vertices that never

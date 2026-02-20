@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"path"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/containerd/platforms"
 	"github.com/moby/buildkit/client/llb"
 
+	"github.com/ndisidore/cicada/internal/progress"
 	"github.com/ndisidore/cicada/pkg/pipeline"
 )
 
@@ -44,6 +46,24 @@ type jobResult struct {
 	def          *llb.Definition
 	state        llb.State
 	stepTimeouts map[string]time.Duration
+	cmdInfos     map[string]progress.CmdInfo // vertex name -> command metadata
+	stepDefs     []StepDef                   // per-step build closures; nil when no step control needed
+	baseState    llb.State                   // pre-step state; only set when stepDefs is non-nil
+}
+
+// StepBuildFunc builds a single step's LLB state on top of a base state.
+// retryAttempt is 0 for the first try; >0 embeds CICADA_RETRY_ATTEMPT
+// inline in shell commands to bust the BuildKit cache.
+type StepBuildFunc func(base llb.State, retryAttempt int) (llb.State, error)
+
+// StepDef describes a single step for gateway-based step-controlled execution.
+type StepDef struct {
+	Name         string
+	Retry        *pipeline.Retry
+	AllowFailure bool
+	Timeouts     map[string]time.Duration
+	CmdInfos     map[string]progress.CmdInfo // vertex name -> command metadata
+	Build        StepBuildFunc
 }
 
 // Result holds the LLB definitions for a pipeline, one per job in topological order.
@@ -60,8 +80,16 @@ type Result struct {
 	OutputDefs map[string]*llb.Definition
 	// StepTimeouts maps job names to per-vertex timeout durations.
 	StepTimeouts map[string]map[string]time.Duration
+	// CmdInfos maps job names to per-vertex command metadata.
+	CmdInfos map[string]map[string]progress.CmdInfo
 	// SecretDecls carries pipeline-level secret declarations for CLI resolution.
 	SecretDecls []pipeline.SecretDecl
+	// StepDefs maps job names to per-step build closures for step-controlled
+	// execution. Only populated for jobs with step-level retry or allow-failure.
+	StepDefs map[string][]StepDef
+	// BaseStates maps job names to the LLB state before the first step
+	// (after image, env, artifacts, preamble). Only populated alongside StepDefs.
+	BaseStates map[string]llb.State
 }
 
 // BuildOpts configures the LLB build process.
@@ -121,7 +149,10 @@ func Build(ctx context.Context, p pipeline.Pipeline, opts BuildOpts) (Result, er
 		JobNames:     make([]string, 0, len(order)),
 		OutputDefs:   make(map[string]*llb.Definition, len(order)),
 		StepTimeouts: make(map[string]map[string]time.Duration, len(order)),
+		CmdInfos:     make(map[string]map[string]progress.CmdInfo, len(order)),
 		SecretDecls:  p.Secrets,
+		StepDefs:     make(map[string][]StepDef),
+		BaseStates:   make(map[string]llb.State),
 	}
 
 	states := make(map[string]llb.State, len(order))
@@ -145,6 +176,11 @@ func appendJob(ctx context.Context, job *pipeline.Job, states map[string]llb.Sta
 	result.JobNames = append(result.JobNames, job.Name)
 	states[job.Name] = jr.state
 	result.StepTimeouts[job.Name] = jr.stepTimeouts
+	result.CmdInfos[job.Name] = jr.cmdInfos
+	if jr.stepDefs != nil {
+		result.StepDefs[job.Name] = jr.stepDefs
+		result.BaseStates[job.Name] = jr.baseState
+	}
 
 	outputDef, err := buildExportDef(ctx, jr.state, "/cicada/output")
 	if err != nil {
@@ -274,7 +310,9 @@ func buildJob(
 		st = st.File(llb.Copy(depSt, art.Source, art.Target))
 	}
 
-	// Build dep output sourcing preamble (prepended to first step only).
+	// Build dep output sourcing preamble. When dependencies exist, preamble
+	// is prepended to every command emitted by buildStepOps so that
+	// dependency env vars are available in each Run() process.
 	var preamble string
 	if len(job.DependsOn) > 0 {
 		preamble = `for __f in /cicada/deps/*/output; do [ -f "$__f" ] && { set -a; . "$__f"; set +a; }; done` + "\n"
@@ -299,111 +337,67 @@ func buildJob(
 	_, jobFiltered := opts.noCacheFilter[job.Name]
 	jobNoCached := opts.globalNoCache || job.NoCache || jobFiltered
 
+	// Shared context for building individual steps.
+	shared := stepSharedCtx{
+		jobName:      job.Name,
+		preamble:     preamble,
+		depStates:    depStates,
+		depMounts:    depMounts,
+		jobMountOpts: jobMountOpts,
+		baseRunOpts:  baseRunOpts,
+		jobShell:     job.Shell,
+		localOpts:    localOpts,
+		jobNoCached:  jobNoCached,
+		jobSecrets:   job.Secrets,
+	}
+
+	needsStepControl := jobNeedsStepControl(job)
+	var stepDefs []StepDef
+	if needsStepControl {
+		stepDefs = make([]StepDef, 0, len(job.Steps))
+	}
+	baseState := st // capture pre-step state for step control
+
 	// Execute steps sequentially, chaining state.
 	var stepTimeouts map[string]time.Duration
+	var cmdInfos map[string]progress.CmdInfo
 	for i := range job.Steps {
 		step := &job.Steps[i]
 
-		// Step-level artifacts: insert Copy before this step's Run.
-		for _, art := range step.Artifacts {
-			depSt, ok := depStates[art.From]
-			if !ok {
-				return jobResult{}, fmt.Errorf(
-					"step %q: artifact from %q: %w",
-					step.Name, art.From, errMissingDepState,
-				)
+		result, err := buildStepOps(st, step, 0, shared)
+		if err != nil {
+			return jobResult{}, fmt.Errorf("building step %q ops: %w", step.Name, err)
+		}
+		st = result.state
+		if result.timeouts != nil {
+			if stepTimeouts == nil {
+				stepTimeouts = make(map[string]time.Duration)
 			}
-			st = st.File(llb.Copy(depSt, art.Source, art.Target))
+			maps.Copy(stepTimeouts, result.timeouts)
+		}
+		if result.cmdInfos != nil {
+			if cmdInfos == nil {
+				cmdInfos = make(map[string]progress.CmdInfo)
+			}
+			maps.Copy(cmdInfos, result.cmdInfos)
 		}
 
-		// Step workdir override.
-		if step.Workdir != "" {
-			st = st.Dir(step.Workdir)
-		}
-
-		// Step-scoped env (additive to job env already in state).
-		for _, e := range step.Env {
-			st = st.AddEnv(e.Key, e.Value)
-		}
-
-		if len(step.Run) == 0 {
-			return jobResult{}, fmt.Errorf("job %q step %q: %w", job.Name, step.Name, pipeline.ErrMissingRun)
-		}
-
-		// Pre-compute step-level mount/cache and secret run options (shared across all commands).
-		stepMountOpts := buildMountRunOpts(step.Mounts, step.Caches, localOpts)
-		secretRunOpts := buildSecretRunOpts(job.Secrets, step.Secrets)
-
-		shell := resolveShell(job.Shell, step.Shell)
-
-		// Pre-compute quoted inner shell and timeout seconds for timeout wrapping.
-		var innerShell, timeoutSecs string
-		if step.Timeout > 0 {
-			quotedShell := make([]string, len(shell))
-			for k, s := range shell {
-				quotedShell[k] = singleQuote(s)
-			}
-			innerShell = strings.Join(quotedShell, " ")
-			timeoutSecs = strconv.FormatFloat(step.Timeout.Seconds(), 'f', -1, 64)
-		}
-
-		for j, cmd := range step.Run {
-			if strings.TrimSpace(cmd) == "" {
-				return jobResult{}, fmt.Errorf("job %q step %q run[%d]: %w", job.Name, step.Name, j, pipeline.ErrEmptyRunCommand)
-			}
-
-			// Preamble sources dependency output env vars into the shell.
-			// Only applied to the first step: each command runs in a fresh
-			// shell, so every command in step 0 needs it. Later steps
-			// intentionally omit it — cross-step env should use the `env`
-			// directive (which sets LLB-level env) or write to $CICADA_OUTPUT.
-			shellCmd := cmd
-			if i == 0 && preamble != "" {
-				shellCmd = preamble + cmd
-			}
-
-			vertexName := job.Name + "/" + step.Name + "/" + cmd
-
-			if step.Timeout > 0 {
-				if stepTimeouts == nil {
-					stepTimeouts = make(map[string]time.Duration)
-				}
-				stepTimeouts[vertexName] = step.Timeout
-			}
-
-			var args []string
-			if step.Timeout > 0 {
-				// Step timeouts require a `timeout` binary (coreutils or
-				// BusyBox) in the container image.
-				// Nest timeout inside the shell so the shell is PID 1.
-				// PID 1 has special kernel signal protection that drops
-				// default-action signals (including SIGALRM), which breaks
-				// BusyBox timeout when it runs as PID 1.
-				// -s KILL ensures the child can't defer SIGTERM.
-				// "; exit $?" prevents the shell's exec optimization
-				// (which would make timeout PID 1 again) while
-				// preserving the exit code.
-				wrapped := "timeout -s KILL " + timeoutSecs + " " + innerShell + " " + singleQuote(shellCmd) + "; exit $?"
-				args = append(shell, wrapped)
-			} else {
-				args = append(shell, shellCmd)
-			}
-
-			runOpts := append([]llb.RunOption(nil), baseRunOpts...)
-			runOpts = append(runOpts,
-				llb.Args(args),
-				llb.WithCustomName(vertexName),
-			)
-			runOpts = append(runOpts, depMounts...)
-			runOpts = append(runOpts, jobMountOpts...)
-			runOpts = append(runOpts, stepMountOpts...)
-			runOpts = append(runOpts, secretRunOpts...)
-
-			if step.NoCache && !jobNoCached {
-				runOpts = append(runOpts, llb.IgnoreCache)
-			}
-
-			st = st.Run(runOpts...).Root()
+		if needsStepControl {
+			capturedStep := step
+			stepDefs = append(stepDefs, StepDef{
+				Name:         step.Name,
+				Retry:        step.Retry,
+				AllowFailure: step.AllowFailure,
+				Timeouts:     result.timeouts,
+				CmdInfos:     result.cmdInfos,
+				Build: func(base llb.State, retryAttempt int) (llb.State, error) {
+					r, err := buildStepOps(base, capturedStep, retryAttempt, shared)
+					if err != nil {
+						return llb.State{}, err
+					}
+					return r.state, nil
+				},
+			})
 		}
 	}
 
@@ -411,7 +405,166 @@ func buildJob(
 	if err != nil {
 		return jobResult{}, fmt.Errorf("marshaling: %w", err)
 	}
-	return jobResult{def: def, state: st, stepTimeouts: stepTimeouts}, nil
+	jr := jobResult{def: def, state: st, stepTimeouts: stepTimeouts, cmdInfos: cmdInfos}
+	if needsStepControl {
+		jr.stepDefs = stepDefs
+		jr.baseState = baseState
+	}
+	return jr, nil
+}
+
+// jobNeedsStepControl reports whether any step in the job has retry or
+// allow-failure, requiring per-step gateway execution.
+func jobNeedsStepControl(job *pipeline.Job) bool {
+	for i := range job.Steps {
+		if job.Steps[i].Retry != nil || job.Steps[i].AllowFailure {
+			return true
+		}
+	}
+	return false
+}
+
+// stepSharedCtx holds context shared across all steps within a job,
+// captured by closures for step-controlled execution.
+type stepSharedCtx struct {
+	jobName      string
+	preamble     string
+	depStates    map[string]llb.State
+	depMounts    []llb.RunOption
+	jobMountOpts []llb.RunOption
+	baseRunOpts  []llb.RunOption
+	jobShell     []string
+	localOpts    []llb.LocalOption
+	jobNoCached  bool
+	jobSecrets   []pipeline.SecretRef
+}
+
+// stepBuildResult holds the output of building a single step's LLB.
+type stepBuildResult struct {
+	state    llb.State
+	timeouts map[string]time.Duration
+	cmdInfos map[string]progress.CmdInfo
+}
+
+// buildStepOps applies a single step's LLB operations to a base state.
+// retryAttempt > 0 adds a cache buster env var to force re-execution.
+//
+//revive:disable-next-line:cognitive-complexity,cyclomatic,function-length buildStepOps is a linear pipeline of LLB operations; splitting it hurts readability.
+func buildStepOps(
+	base llb.State,
+	step *pipeline.Step,
+	retryAttempt int,
+	shared stepSharedCtx,
+) (stepBuildResult, error) {
+	st := base
+
+	// Step-level artifacts: insert Copy before this step's Run.
+	for _, art := range step.Artifacts {
+		depSt, ok := shared.depStates[art.From]
+		if !ok {
+			return stepBuildResult{}, fmt.Errorf(
+				"step %q: artifact from %q: %w",
+				step.Name, art.From, errMissingDepState,
+			)
+		}
+		st = st.File(llb.Copy(depSt, art.Source, art.Target))
+	}
+
+	// Step workdir override.
+	if step.Workdir != "" {
+		st = st.Dir(step.Workdir)
+	}
+
+	// Step-scoped env (additive to job env already in state).
+	for _, e := range step.Env {
+		st = st.AddEnv(e.Key, e.Value)
+	}
+
+	if len(step.Run) == 0 {
+		return stepBuildResult{}, fmt.Errorf("job %q step %q: %w", shared.jobName, step.Name, pipeline.ErrMissingRun)
+	}
+
+	// Pre-compute step-level mount/cache and secret run options.
+	stepMountOpts := buildMountRunOpts(step.Mounts, step.Caches, shared.localOpts)
+	secretRunOpts := buildSecretRunOpts(shared.jobSecrets, step.Secrets)
+
+	shell := resolveShell(shared.jobShell, step.Shell)
+
+	// Pre-compute quoted inner shell and timeout seconds for timeout wrapping.
+	var innerShell, timeoutSecs string
+	if step.Timeout > 0 {
+		quotedShell := make([]string, len(shell))
+		for k, s := range shell {
+			quotedShell[k] = singleQuote(s)
+		}
+		innerShell = strings.Join(quotedShell, " ")
+		timeoutSecs = strconv.FormatFloat(step.Timeout.Seconds(), 'f', -1, 64)
+	}
+
+	var timeouts map[string]time.Duration
+	var cmdInfos map[string]progress.CmdInfo
+	for j, cmd := range step.Run {
+		if strings.TrimSpace(cmd) == "" {
+			return stepBuildResult{}, fmt.Errorf("job %q step %q run[%d]: %w", shared.jobName, step.Name, j, pipeline.ErrEmptyRunCommand)
+		}
+
+		// Preamble sources dependency output env vars into the shell.
+		// Each Run() is a separate process, so the preamble must be
+		// applied to every command to make dep env vars available.
+		// Retry attempt is embedded inline so it doesn't pollute
+		// downstream step state while still busting the BuildKit cache.
+		shellCmd := cmd
+		if retryAttempt > 0 {
+			shellCmd = "CICADA_RETRY_ATTEMPT=" + strconv.Itoa(retryAttempt) + " " + shellCmd
+		}
+		if shared.preamble != "" {
+			shellCmd = shared.preamble + shellCmd
+		}
+
+		vertexName := shared.jobName + "/" + step.Name + "/" + cmd
+
+		if cmdInfos == nil {
+			cmdInfos = make(map[string]progress.CmdInfo)
+		}
+		cmdInfos[vertexName] = progress.CmdInfo{UserCmd: cmd, FullCmd: shellCmd}
+
+		if step.Timeout > 0 {
+			if timeouts == nil {
+				timeouts = make(map[string]time.Duration)
+			}
+			timeouts[vertexName] = step.Timeout
+		}
+
+		var args []string
+		if step.Timeout > 0 {
+			// Step timeouts require a `timeout` binary (coreutils or BusyBox).
+			// Nest timeout inside the shell so the shell is PID 1.
+			// -s KILL ensures the child can't defer SIGTERM.
+			// "; exit $?" prevents exec optimization while preserving exit code.
+			wrapped := "timeout -s KILL " + timeoutSecs + " " + innerShell + " " + singleQuote(shellCmd) + "; exit $?"
+			args = append(shell, wrapped)
+		} else {
+			args = append(shell, shellCmd)
+		}
+
+		runOpts := append([]llb.RunOption(nil), shared.baseRunOpts...)
+		runOpts = append(runOpts,
+			llb.Args(args),
+			llb.WithCustomName(vertexName),
+		)
+		runOpts = append(runOpts, shared.depMounts...)
+		runOpts = append(runOpts, shared.jobMountOpts...)
+		runOpts = append(runOpts, stepMountOpts...)
+		runOpts = append(runOpts, secretRunOpts...)
+
+		if step.NoCache && !shared.jobNoCached {
+			runOpts = append(runOpts, llb.IgnoreCache)
+		}
+
+		st = st.Run(runOpts...).Root()
+	}
+
+	return stepBuildResult{state: st, timeouts: timeouts, cmdInfos: cmdInfos}, nil
 }
 
 // resolveShell returns a fresh copy of the effective shell for a run command.

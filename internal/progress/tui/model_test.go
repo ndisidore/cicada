@@ -30,17 +30,24 @@ func TestMultiModelUpdate(t *testing.T) {
 		timeout time.Duration
 	}
 
+	type wantAllowedFailure struct {
+		jobName                string
+		allowedFailurePrefixes []string
+	}
+
 	tests := []struct {
-		name             string
-		msgs             []tea.Msg
-		wantDone         bool
-		wantWidth        int
-		wantJobs         int
-		wantSkipped      map[string]bool
-		wantSkippedSteps map[string][]string
-		wantStatus       map[string]map[string]stepStatus
-		wantRetry        *wantRetry
-		wantTimedOut     *wantTimeout
+		name               string
+		msgs               []tea.Msg
+		wantDone           bool
+		wantWidth          int
+		wantJobs           int
+		wantSkipped        map[string]bool
+		wantSkippedSteps   map[string][]string
+		wantStatus         map[string]map[string]stepStatus
+		wantRetry          *wantRetry
+		wantTimedOut       *wantTimeout
+		wantLogs           map[string][]string
+		wantAllowedFailure *wantAllowedFailure
 	}{
 		{
 			name: "job added then status",
@@ -237,6 +244,35 @@ func TestMultiModelUpdate(t *testing.T) {
 			wantStatus: map[string]map[string]stepStatus{"j": {"j/step/cmd": statusRunning}},
 		},
 		{
+			name: "step retry adds log entry",
+			msgs: []tea.Msg{
+				progress.JobAddedMsg{Job: "build"},
+				progress.StepRetryMsg{Job: "build", Step: "compile", Attempt: 2, MaxAttempts: 3},
+			},
+			wantJobs: 1,
+			wantLogs: map[string][]string{
+				"build": {`step "compile": retrying (attempt 2/3)`},
+			},
+		},
+		{
+			name: "step allowed failure updates list and vertex status",
+			msgs: []tea.Msg{
+				progress.JobAddedMsg{Job: "build"},
+				progress.JobStatusMsg{Job: "build", Status: &client.SolveStatus{
+					Vertexes: []*client.Vertex{
+						{Digest: digest.FromString("a"), Name: "build/flaky/run", Error: "exit code: 1"},
+					},
+				}},
+				progress.StepAllowedFailureMsg{Job: "build", Step: "flaky"},
+			},
+			wantJobs: 1,
+			wantAllowedFailure: &wantAllowedFailure{
+				jobName:                "build",
+				allowedFailurePrefixes: []string{"build/flaky/"},
+			},
+			wantStatus: map[string]map[string]stepStatus{"build": {"build/flaky/run": statusAllowedFailure}},
+		},
+		{
 			name: "multiple jobs",
 			msgs: []tea.Msg{
 				progress.JobAddedMsg{Job: "lint"},
@@ -320,6 +356,22 @@ func TestMultiModelUpdate(t *testing.T) {
 				assert.Equal(t, tt.wantTimedOut.timeout, js.timeout)
 			}
 
+			for jobName, wantLogs := range tt.wantLogs {
+				js, ok := rm.jobs[jobName]
+				require.True(t, ok, "job %q not found", jobName)
+				assert.Equal(t, wantLogs, js.logs, "logs mismatch for %q", jobName)
+			}
+
+			if tt.wantAllowedFailure != nil {
+				js, ok := rm.jobs[tt.wantAllowedFailure.jobName]
+				require.True(t, ok, "job %q not found", tt.wantAllowedFailure.jobName)
+				for _, prefix := range tt.wantAllowedFailure.allowedFailurePrefixes {
+					_, ok := js.allowedFailureSet[prefix]
+					assert.True(t, ok,
+						"expected allowed-failure prefix %q in job %q", prefix, tt.wantAllowedFailure.jobName)
+				}
+			}
+
 			for jobName, vertices := range tt.wantStatus {
 				js, ok := rm.jobs[jobName]
 				require.True(t, ok, "job %q not found", jobName)
@@ -381,7 +433,7 @@ func TestMultiModelView(t *testing.T) {
 				m.jobs["build"] = js
 				m.order = append(m.order, "build")
 			},
-			contains: []string{"[done]", "compile", "300ms"},
+			contains: []string{"[+]", "compile", "300ms"},
 		},
 		{
 			name:   "running step shows spinner",
@@ -397,7 +449,7 @@ func TestMultiModelView(t *testing.T) {
 				m.jobs["lint"] = js
 				m.order = append(m.order, "lint")
 			},
-			contains: []string{"[build]", "lint", _boringSpinnerFrames[0]},
+			contains: []string{"[~]", "lint", _boringSpinnerFrames[0]},
 		},
 		{
 			name:   "pending step shows dashes",
@@ -413,7 +465,7 @@ func TestMultiModelView(t *testing.T) {
 				m.jobs["deploy"] = js
 				m.order = append(m.order, "deploy")
 			},
-			contains: []string{"[      ]", "deploy", "--"},
+			contains: []string{"[ ]", "deploy", "--"},
 		},
 		{
 			name:   "error step counts as resolved",
@@ -474,7 +526,7 @@ func TestMultiModelView(t *testing.T) {
 				m.jobs["flaky"] = js
 				m.order = append(m.order, "flaky")
 			},
-			contains: []string{"Job: flaky", _emojiIcons[statusRetry], "attempt 2/4"},
+			contains: []string{"Job: flaky", _richIcons[statusRetry], "attempt 2/4"},
 		},
 		{
 			name:   "retry annotation boring",
@@ -498,7 +550,7 @@ func TestMultiModelView(t *testing.T) {
 				m.jobs["slow"] = js
 				m.order = append(m.order, "slow")
 			},
-			contains: []string{"Job: slow", _emojiIcons[statusTimeout], "timed out (30s)"},
+			contains: []string{"Job: slow", _richIcons[statusTimeout], "timed out (30s)"},
 		},
 		{
 			name:   "job timeout annotation boring",
@@ -541,7 +593,7 @@ func TestMultiModelView(t *testing.T) {
 				m.jobs["build"] = js
 				m.order = append(m.order, "build")
 			},
-			contains: []string{"[time!]", "build/step/cmd"},
+			contains: []string{"[t]", "build/step/cmd"},
 		},
 		{
 			name:   "step timeout counts as resolved",
@@ -553,6 +605,51 @@ func TestMultiModelView(t *testing.T) {
 				js.order = append(js.order, d1)
 				d2 := digest.FromString("v2")
 				js.vertices[d2] = &stepState{name: "slow-test", status: statusTimeout}
+				js.order = append(js.order, d2)
+				d3 := digest.FromString("v3")
+				js.vertices[d3] = &stepState{name: "deploy", status: statusPending}
+				js.order = append(js.order, d3)
+				m.jobs["build"] = js
+				m.order = append(m.order, "build")
+			},
+			contains: []string{"Job: build (2/3)"},
+		},
+		{
+			name:   "allowed failure step emoji",
+			boring: false,
+			setup: func(m *multiModel) {
+				js := newJobState()
+				d := digest.FromString("v1")
+				js.vertices[d] = &stepState{name: "build/flaky/run", status: statusAllowedFailure}
+				js.order = append(js.order, d)
+				m.jobs["build"] = js
+				m.order = append(m.order, "build")
+			},
+			contains: []string{"\u26a0\ufe0f", "build/flaky/run"},
+		},
+		{
+			name:   "allowed failure step boring",
+			boring: true,
+			setup: func(m *multiModel) {
+				js := newJobState()
+				d := digest.FromString("v1")
+				js.vertices[d] = &stepState{name: "build/flaky/run", status: statusAllowedFailure}
+				js.order = append(js.order, d)
+				m.jobs["build"] = js
+				m.order = append(m.order, "build")
+			},
+			contains: []string{"[w]", "build/flaky/run"},
+		},
+		{
+			name:   "allowed failure counts as resolved",
+			boring: true,
+			setup: func(m *multiModel) {
+				js := newJobState()
+				d1 := digest.FromString("v1")
+				js.vertices[d1] = &stepState{name: "compile", status: statusDone, duration: 100 * time.Millisecond}
+				js.order = append(js.order, d1)
+				d2 := digest.FromString("v2")
+				js.vertices[d2] = &stepState{name: "flaky", status: statusAllowedFailure}
 				js.order = append(js.order, d2)
 				d3 := digest.FromString("v3")
 				js.vertices[d3] = &stepState{name: "deploy", status: statusPending}
@@ -580,7 +677,7 @@ func TestMultiModelView(t *testing.T) {
 				m.jobs["build"] = js2
 				m.order = append(m.order, "build")
 			},
-			contains: []string{"Job: lint", "Job: build", "[cached]", "[build]"},
+			contains: []string{"Job: lint", "Job: build", "[=]", "[~]"},
 		},
 	}
 
