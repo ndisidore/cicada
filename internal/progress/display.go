@@ -1,42 +1,20 @@
 // Package progress provides display adapters for BuildKit solve progress.
 package progress
 
-import (
-	"context"
-	"errors"
-	"time"
+import "context"
 
-	"github.com/moby/buildkit/client"
-)
+// Sender sends progress messages to a display. Implementations must be
+// safe for concurrent use from multiple goroutines.
+type Sender interface {
+	Send(Msg)
+}
 
-// ErrNotStarted indicates Attach was called before Start.
-var ErrNotStarted = errors.New("display not started")
-
-// Display renders BuildKit solve progress to the user.
+// Display manages the lifecycle of a progress display.
 type Display interface {
-	// Start initializes the display (e.g. launches a TUI).
+	Sender
+	// Start initializes the display and begins consuming messages.
 	Start(ctx context.Context) error
-	// Attach registers a job's status channel and spawns a consumer goroutine.
-	// May be called concurrently from multiple goroutines. The caller must
-	// ensure ch is closed promptly (including on context cancellation) so the
-	// consumer goroutine can exit.
-	Attach(ctx context.Context, jobName string, ch <-chan *client.SolveStatus, stepTimeouts map[string]time.Duration) error
-	// Skip reports that a job was skipped due to a when condition.
-	// Called for both static (pre-build) and deferred (runtime) skips.
-	Skip(ctx context.Context, jobName string)
-	// SkipStep reports that a step within a job was skipped due to a when condition.
-	SkipStep(ctx context.Context, jobName, stepName string)
-	// Retry reports that a job is being retried after a failure.
-	// attempt is the 1-based total attempt number (2 = first retry).
-	// maxAttempts is the total number of attempts including the initial run
-	// (i.e. 1 + pipeline.Retry.Attempts).
-	Retry(ctx context.Context, jobName string, attempt, maxAttempts int, err error)
-	// Timeout reports that a job exceeded its configured timeout.
-	Timeout(ctx context.Context, jobName string, timeout time.Duration)
-	// Seal signals that no more Attach calls will be made. Must be called
-	// before Wait to prevent premature completion detection.
-	Seal()
-	// Wait blocks until all attached jobs complete and returns any error encountered.
-	// Seal must be called before Wait.
-	Wait() error
+	// Shutdown signals no more messages will be sent, waits for all
+	// messages to be processed, and returns any display error.
+	Shutdown() error
 }

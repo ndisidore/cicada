@@ -38,8 +38,8 @@ import (
 // ErrNilSolver indicates that Solver was not provided.
 var ErrNilSolver = errors.New("solver must not be nil")
 
-// ErrNilDisplay indicates that Display was not provided.
-var ErrNilDisplay = errors.New("display must not be nil")
+// ErrNilSender indicates that Sender was not provided.
+var ErrNilSender = errors.New("sender must not be nil")
 
 // ErrNilDefinition indicates that an LLB Definition is unexpectedly nil.
 var ErrNilDefinition = errors.New("definition must not be nil")
@@ -92,7 +92,7 @@ var ErrDuplicatePlatform = errors.New("duplicate platform in multi-platform publ
 // Channel close contract: the status channel passed to Solve is owned by the caller
 // of Solve (e.g. solveJob) until the implementer closes it. Implementations of Solver
 // MUST close the provided status channel when Solve returns or completes, so that
-// consumers such as solveJob and display.Attach do not hang.
+// consumers such as solveJob and its bridge goroutines do not hang.
 type Solver interface {
 	// Solve runs the LLB definition. The implementer must close statusChan when
 	// Solve returns or completes; ownership of the channel remains with the
@@ -155,8 +155,8 @@ type RunInput struct {
 	Jobs []Job
 	// LocalMounts maps mount names to local filesystem sources.
 	LocalMounts map[string]fsutil.FS
-	// Display renders solve progress to the user (TUI, plain, or quiet).
-	Display progress.Display
+	// Sender delivers progress messages to the display.
+	Sender progress.Sender
 	// Parallelism limits concurrent job execution. 0 means unlimited.
 	Parallelism int
 	// FailFast cancels all running jobs on first failure when true. When
@@ -186,7 +186,7 @@ type RunInput struct {
 type runConfig struct {
 	solver       Solver
 	rt           runtime.Runtime
-	display      progress.Display
+	sender       progress.Sender
 	nodes        map[string]*dagNode
 	sem          *semaphore.Weighted
 	localMounts  map[string]fsutil.FS
@@ -219,8 +219,8 @@ func Run(ctx context.Context, in RunInput) error {
 	if in.Solver == nil {
 		return ErrNilSolver
 	}
-	if in.Display == nil {
-		return ErrNilDisplay
+	if in.Sender == nil {
+		return ErrNilSender
 	}
 	if in.Runtime == nil && slices.ContainsFunc(in.ImagePublishes, func(p ImagePublish) bool { return p.ExportDocker }) {
 		return ErrNilRuntime
@@ -243,7 +243,7 @@ func Run(ctx context.Context, in RunInput) error {
 	cfg := runConfig{
 		solver:       in.Solver,
 		rt:           in.Runtime,
-		display:      in.Display,
+		sender:       in.Sender,
 		nodes:        nodes,
 		sem:          sem,
 		localMounts:  in.LocalMounts,
@@ -398,7 +398,7 @@ func runNode(ctx context.Context, node *dagNode, cfg runConfig) error {
 			}
 			if cfg.nodes[dep].skipped {
 				node.skipped = true
-				cfg.display.Skip(ctx, node.job.Name)
+				cfg.sender.Send(progress.JobSkippedMsg{Job: node.job.Name})
 				return nil
 			}
 		case <-ctx.Done():
@@ -425,7 +425,7 @@ func runNode(ctx context.Context, node *dagNode, cfg runConfig) error {
 		}
 		if !result {
 			node.skipped = true
-			cfg.display.Skip(ctx, node.job.Name)
+			cfg.sender.Send(progress.JobSkippedMsg{Job: node.job.Name})
 			return nil
 		}
 	}
@@ -448,8 +448,11 @@ func runNode(ctx context.Context, node *dagNode, cfg runConfig) error {
 	err := retryJob(solveCtx, node, cfg)
 	if err != nil {
 		if cause := context.Cause(solveCtx); errors.Is(cause, ErrJobTimeout) {
-			cfg.display.Timeout(ctx, node.job.Name, node.job.Timeout)
-			node.err = cause
+			cfg.sender.Send(progress.JobTimeoutMsg{Job: node.job.Name, Timeout: node.job.Timeout})
+			node.err = progress.NewDisplayError(
+				fmt.Sprintf("job %q timed out after %s", node.job.Name, node.job.Timeout),
+				cause,
+			)
 			return node.err
 		}
 		if len(node.job.StepTimeouts) > 0 {
@@ -460,7 +463,7 @@ func runNode(ctx context.Context, node *dagNode, cfg runConfig) error {
 	}
 
 	for _, step := range node.job.SkippedSteps {
-		cfg.display.SkipStep(ctx, node.job.Name, step)
+		cfg.sender.Send(progress.StepSkippedMsg{Job: node.job.Name, Step: step})
 	}
 
 	// Extract outputs for downstream deferred conditions.
@@ -506,7 +509,10 @@ func retryJob(ctx context.Context, node *dagNode, cfg runConfig) error {
 			return ctx.Err()
 		}
 
-		cfg.display.Retry(ctx, node.job.Name, attempt+2, maxAttempts, lastErr)
+		cfg.sender.Send(progress.JobRetryMsg{
+			Job: node.job.Name, Attempt: attempt + 2,
+			MaxAttempts: maxAttempts, Err: lastErr,
+		})
 
 		delay := retryDelay(r, attempt)
 		if delay > 0 {
@@ -559,6 +565,31 @@ func checkedMul(d time.Duration, n int64) time.Duration {
 	return d * time.Duration(n)
 }
 
+// bridgeStatus returns a closure that forwards JobStatusMsg events from
+// displayCh to sender. JobDoneMsg is sent on all exit paths (normal close
+// and context cancellation). On context cancellation the bridge drains
+// displayCh so the upstream Solve can exit.
+// The caller is responsible for running the returned func (e.g. via wg.Go).
+func bridgeStatus(ctx context.Context, sender progress.Sender, name string, displayCh <-chan *client.SolveStatus) func() {
+	return func() {
+		defer func() { sender.Send(progress.JobDoneMsg{Job: name}) }()
+		for {
+			select {
+			case <-ctx.Done():
+				//revive:disable-next-line:empty-block // drain so sender can close ch
+				for range displayCh {
+				}
+				return
+			case status, ok := <-displayCh:
+				if !ok {
+					return
+				}
+				sender.Send(progress.JobStatusMsg{Job: name, Status: status})
+			}
+		}
+	}
+}
+
 func solveJob(ctx context.Context, name string, def *llb.Definition, cfg runConfig, stepTimeouts map[string]time.Duration) error {
 	if def == nil {
 		return ErrNilDefinition
@@ -567,10 +598,9 @@ func solveJob(ctx context.Context, name string, def *llb.Definition, cfg runConf
 	ch := make(chan *client.SolveStatus)
 	displayCh := teeStatus(ctx, ch, cfg.collector, cfg.secretValues, name)
 
-	if err := cfg.display.Attach(ctx, name, displayCh, stepTimeouts); err != nil {
-		close(ch)
-		return fmt.Errorf("attaching display: %w", err)
-	}
+	cfg.sender.Send(progress.JobAddedMsg{Job: name, StepTimeouts: stepTimeouts})
+	var wg sync.WaitGroup
+	wg.Go(bridgeStatus(ctx, cfg.sender, name, displayCh))
 
 	_, err := cfg.solver.Solve(ctx, def, client.SolveOpt{
 		LocalMounts:  cfg.localMounts,
@@ -578,6 +608,9 @@ func solveJob(ctx context.Context, name string, def *llb.Definition, cfg runConf
 		CacheImports: cfg.cacheImports,
 		Session:      cfg.session,
 	}, ch)
+
+	wg.Wait()
+
 	if err != nil {
 		return fmt.Errorf("solving job: %w", err)
 	}
@@ -639,10 +672,9 @@ func solveExport(ctx context.Context, exp Export, cfg runConfig) error {
 	displayName := "export:" + exp.JobName
 	displayCh := teeStatus(ctx, ch, cfg.collector, cfg.secretValues, displayName)
 
-	if err := cfg.display.Attach(ctx, displayName, displayCh, nil); err != nil {
-		close(ch)
-		return fmt.Errorf("attaching export display: %w", err)
-	}
+	cfg.sender.Send(progress.JobAddedMsg{Job: displayName})
+	var wg sync.WaitGroup
+	wg.Go(bridgeStatus(ctx, cfg.sender, displayName, displayCh))
 
 	_, err := cfg.solver.Solve(ctx, exp.Definition, client.SolveOpt{
 		Exports: []client.ExportEntry{{
@@ -653,6 +685,9 @@ func solveExport(ctx context.Context, exp Export, cfg runConfig) error {
 		CacheImports: cfg.cacheImports,
 		Session:      cfg.session,
 	}, ch)
+
+	wg.Wait()
+
 	if err != nil {
 		return fmt.Errorf("solving export: %w", err)
 	}
@@ -846,10 +881,9 @@ func solveMultiPlatformPublish(ctx context.Context, grp publishGroup, cfg runCon
 	displayName := "publish:" + grp.Image
 	displayCh := teeStatus(ctx, ch, cfg.collector, cfg.secretValues, displayName)
 
-	if err := cfg.display.Attach(ctx, displayName, displayCh, nil); err != nil {
-		close(ch)
-		return fmt.Errorf("attaching multi-platform publish display: %w", err)
-	}
+	cfg.sender.Send(progress.JobAddedMsg{Job: displayName})
+	var wg sync.WaitGroup
+	wg.Go(bridgeStatus(ctx, cfg.sender, displayName, displayCh))
 
 	_, err := cfg.solver.Build(ctx, client.SolveOpt{
 		Exports: []client.ExportEntry{{
@@ -860,6 +894,9 @@ func solveMultiPlatformPublish(ctx context.Context, grp publishGroup, cfg runCon
 		CacheImports: cfg.cacheImports,
 		Session:      cfg.session,
 	}, "", multiPlatformBuildFunc(grp.Variants), ch)
+
+	wg.Wait()
+
 	if err != nil {
 		return fmt.Errorf("solving multi-platform publish: %w", err)
 	}
@@ -884,10 +921,9 @@ func solveImagePublish(ctx context.Context, pub ImagePublish, cfg runConfig) err
 	displayName := "publish:" + pub.JobName
 	displayCh := teeStatus(ctx, ch, cfg.collector, cfg.secretValues, displayName)
 
-	if err := cfg.display.Attach(ctx, displayName, displayCh, nil); err != nil {
-		close(ch)
-		return fmt.Errorf("attaching publish display: %w", err)
-	}
+	cfg.sender.Send(progress.JobAddedMsg{Job: displayName})
+	var wg sync.WaitGroup
+	wg.Go(bridgeStatus(ctx, cfg.sender, displayName, displayCh))
 
 	_, err := cfg.solver.Solve(ctx, pub.Definition, client.SolveOpt{
 		Exports: []client.ExportEntry{{
@@ -898,6 +934,9 @@ func solveImagePublish(ctx context.Context, pub ImagePublish, cfg runConfig) err
 		CacheImports: cfg.cacheImports,
 		Session:      cfg.session,
 	}, ch)
+
+	wg.Wait()
+
 	if err != nil {
 		return fmt.Errorf("solving publish: %w", err)
 	}
@@ -917,12 +956,9 @@ func solveImageExportDocker(ctx context.Context, pub ImagePublish, cfg runConfig
 	displayName := "export-docker:" + pub.JobName
 	displayCh := teeStatus(ctx, ch, cfg.collector, cfg.secretValues, displayName)
 
-	if err := cfg.display.Attach(ctx, displayName, displayCh, nil); err != nil {
-		close(ch)
-		_ = pw.Close()
-		_ = pr.Close()
-		return fmt.Errorf("attaching export-docker display: %w", err)
-	}
+	cfg.sender.Send(progress.JobAddedMsg{Job: displayName})
+	var bridgeWg sync.WaitGroup
+	bridgeWg.Go(bridgeStatus(ctx, cfg.sender, displayName, displayCh))
 
 	eg, ectx := errgroup.WithContext(ctx)
 
@@ -954,7 +990,9 @@ func solveImageExportDocker(ctx context.Context, pub ImagePublish, cfg runConfig
 		return nil
 	})
 
-	return eg.Wait()
+	err := eg.Wait()
+	bridgeWg.Wait()
+	return err
 }
 
 // collectDepOutputs gathers parsed outputs from completed dependency nodes.

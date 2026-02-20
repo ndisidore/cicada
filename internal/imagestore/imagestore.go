@@ -4,6 +4,7 @@ package imagestore
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/containerd/errdefs"
 	"github.com/moby/buildkit/client"
@@ -18,7 +19,7 @@ import (
 // Channel close contract: the status channel passed to Solve is owned by the caller
 // of Solve (e.g. pullImage, isImageCached) until the implementer closes it. Implementations
 // of Solver MUST close the provided status channel when Solve returns or completes, so that
-// consumers such as display.Attach and collectVertexCachedStates do not hang.
+// consumers such as bridge goroutines and collectVertexCachedStates do not hang.
 type Solver interface {
 	// Solve runs the LLB definition. The implementer must close statusChan when
 	// Solve returns or completes; ownership of the channel remains with the
@@ -26,18 +27,22 @@ type Solver interface {
 	Solve(ctx context.Context, def *llb.Definition, opt client.SolveOpt, statusChan chan *client.SolveStatus) (*client.SolveResponse, error)
 }
 
-// PullImages pulls all images into the BuildKit cache by solving minimal LLB
-// definitions. Each image is pulled sequentially to provide clear progress.
-func PullImages(ctx context.Context, c Solver, images []string, display progress.Display) error {
+// PullImages pulls all images into the BuildKit cache concurrently by solving
+// minimal LLB definitions.
+func PullImages(ctx context.Context, c Solver, images []string, sender progress.Sender) error {
+	g, gctx := errgroup.WithContext(ctx)
 	for _, ref := range images {
-		if err := pullImage(ctx, c, ref, display); err != nil {
-			return fmt.Errorf("pulling %q: %w", ref, err)
-		}
+		g.Go(func() error {
+			if err := pullImage(gctx, c, ref, sender); err != nil {
+				return fmt.Errorf("pulling %q: %w", ref, err)
+			}
+			return nil
+		})
 	}
-	return nil
+	return g.Wait()
 }
 
-func pullImage(ctx context.Context, c Solver, ref string, display progress.Display) error {
+func pullImage(ctx context.Context, c Solver, ref string, sender progress.Sender) error {
 	st := llb.Image(ref)
 	def, err := st.Marshal(ctx)
 	if err != nil {
@@ -45,13 +50,32 @@ func pullImage(ctx context.Context, c Solver, ref string, display progress.Displ
 	}
 
 	ch := make(chan *client.SolveStatus)
+	displayName := "pull " + ref
 
-	if err := display.Attach(ctx, "pull "+ref, ch, nil); err != nil {
-		close(ch)
-		return fmt.Errorf("attaching pull display: %w", err)
-	}
+	sender.Send(progress.JobAddedMsg{Job: displayName})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		defer func() { sender.Send(progress.JobDoneMsg{Job: displayName}) }()
+		for {
+			select {
+			case <-ctx.Done():
+				//revive:disable-next-line:empty-block // drain so Solve can close ch
+				for range ch {
+				}
+				return
+			case status, ok := <-ch:
+				if !ok {
+					return
+				}
+				sender.Send(progress.JobStatusMsg{Job: displayName, Status: status})
+			}
+		}
+	})
 
 	_, err = c.Solve(ctx, def, client.SolveOpt{}, ch)
+
+	wg.Wait()
+
 	if err != nil {
 		return fmt.Errorf("solving image pull: %w", err)
 	}

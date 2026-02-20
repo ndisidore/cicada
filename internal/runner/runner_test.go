@@ -23,6 +23,7 @@ import (
 	"golang.org/x/sync/semaphore"
 
 	"github.com/ndisidore/cicada/internal/cache"
+	"github.com/ndisidore/cicada/internal/progress"
 	"github.com/ndisidore/cicada/internal/runtime/runtimetest"
 	"github.com/ndisidore/cicada/pkg/conditional"
 	"github.com/ndisidore/cicada/pkg/pipeline"
@@ -56,57 +57,42 @@ func (m *MockCondition) EvaluateDeferred(ctx conditional.Context, depOutputs map
 	return args.Bool(0), args.Error(1)
 }
 
-// fakeDisplay implements progress.Display for testing.
-type fakeDisplay struct {
-	wg         sync.WaitGroup
-	attachFn   func(ctx context.Context, name string, ch <-chan *client.SolveStatus, stepTimeouts map[string]time.Duration) error
-	skipFn     func(ctx context.Context, jobName string)
-	skipStepFn func(ctx context.Context, jobName, stepName string)
-	retryFn    func(ctx context.Context, jobName string, attempt, maxAttempts int, err error)
-	timeoutFn  func(ctx context.Context, jobName string, timeout time.Duration)
+// fakeSender implements progress.Sender for testing.
+type fakeSender struct {
+	mu   sync.Mutex
+	msgs []progress.Msg
 }
 
-func (*fakeDisplay) Start(_ context.Context) error { return nil }
+func (s *fakeSender) Send(msg progress.Msg) {
+	s.mu.Lock()
+	s.msgs = append(s.msgs, msg)
+	s.mu.Unlock()
+}
 
-func (f *fakeDisplay) Attach(ctx context.Context, name string, ch <-chan *client.SolveStatus, stepTimeouts map[string]time.Duration) error {
-	if f.attachFn != nil {
-		return f.attachFn(ctx, name, ch, stepTimeouts)
-	}
-	f.wg.Go(func() {
-		//revive:disable-next-line:empty-block // drain
-		for range ch {
+// jobAddedOrder returns the ordered job names from JobAddedMsg messages.
+func (s *fakeSender) jobAddedOrder() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var names []string
+	for _, m := range s.msgs {
+		if msg, ok := m.(progress.JobAddedMsg); ok {
+			names = append(names, msg.Job)
 		}
-	})
-	return nil
-}
-
-func (f *fakeDisplay) Skip(ctx context.Context, jobName string) {
-	if f.skipFn != nil {
-		f.skipFn(ctx, jobName)
 	}
+	return names
 }
 
-func (f *fakeDisplay) SkipStep(ctx context.Context, jobName, stepName string) {
-	if f.skipStepFn != nil {
-		f.skipStepFn(ctx, jobName, stepName)
+// hasJobAdded returns whether a JobAddedMsg was sent for the given job.
+func (s *fakeSender) hasJobAdded(job string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, m := range s.msgs {
+		if msg, ok := m.(progress.JobAddedMsg); ok && msg.Job == job {
+			return true
+		}
 	}
+	return false
 }
-
-func (f *fakeDisplay) Retry(ctx context.Context, jobName string, attempt, maxAttempts int, err error) {
-	if f.retryFn != nil {
-		f.retryFn(ctx, jobName, attempt, maxAttempts, err)
-	}
-}
-
-func (f *fakeDisplay) Timeout(ctx context.Context, jobName string, timeout time.Duration) {
-	if f.timeoutFn != nil {
-		f.timeoutFn(ctx, jobName, timeout)
-	}
-}
-
-func (*fakeDisplay) Seal() {}
-
-func (f *fakeDisplay) Wait() error { f.wg.Wait(); return nil }
 
 // indexOf returns the position of s in slice, or -1 if not found.
 func indexOf(slice []string, s string) int {
@@ -142,8 +128,8 @@ func TestRun(t *testing.T) {
 					close(ch)
 					return &client.SolveResponse{}, nil
 				}},
-				Jobs:    []Job{{Name: "build", Definition: def}},
-				Display: &fakeDisplay{},
+				Jobs:   []Job{{Name: "build", Definition: def}},
+				Sender: &fakeSender{},
 			},
 		},
 		{
@@ -158,7 +144,7 @@ func TestRun(t *testing.T) {
 					{Name: "second", Definition: def},
 					{Name: "third", Definition: def},
 				},
-				Display: &fakeDisplay{},
+				Sender: &fakeSender{},
 			},
 		},
 		{
@@ -168,43 +154,42 @@ func TestRun(t *testing.T) {
 					close(ch)
 					return nil, errors.New("connection refused")
 				}},
-				Jobs:    []Job{{Name: "deploy", Definition: def}},
-				Display: &fakeDisplay{},
+				Jobs:   []Job{{Name: "deploy", Definition: def}},
+				Sender: &fakeSender{},
 			},
 			wantErr: `job "deploy"`,
 		},
 		{
 			name: "empty jobs is a no-op",
 			input: RunInput{
-				Solver:  &fakeSolver{},
-				Jobs:    []Job{},
-				Display: &fakeDisplay{},
+				Solver: &fakeSolver{},
+				Jobs:   []Job{},
+				Sender: &fakeSender{},
 			},
 		},
 		{
 			name: "nil solver returns error",
 			input: RunInput{
-				Solver:  nil,
-				Jobs:    []Job{{Name: "x", Definition: def}},
-				Display: &fakeDisplay{},
+				Solver: nil,
+				Jobs:   []Job{{Name: "x", Definition: def}},
+				Sender: &fakeSender{},
 			},
 			wantSentinel: ErrNilSolver,
 		},
 		{
-			name: "nil display returns error",
+			name: "nil sender returns error",
 			input: RunInput{
-				Solver:  &fakeSolver{},
-				Jobs:    []Job{{Name: "x", Definition: def}},
-				Display: nil,
+				Solver: &fakeSolver{},
+				Jobs:   []Job{{Name: "x", Definition: def}},
 			},
-			wantSentinel: ErrNilDisplay,
+			wantSentinel: ErrNilSender,
 		},
 		{
 			name: "nil runtime with export-docker returns error",
 			input: RunInput{
 				Solver:  &fakeSolver{},
 				Jobs:    []Job{{Name: "x", Definition: def}},
-				Display: &fakeDisplay{},
+				Sender:  &fakeSender{},
 				Runtime: nil,
 				ImagePublishes: []ImagePublish{
 					{ExportDocker: true, Image: "test:latest"},
@@ -215,9 +200,9 @@ func TestRun(t *testing.T) {
 		{
 			name: "unknown dependency",
 			input: RunInput{
-				Solver:  &fakeSolver{},
-				Jobs:    []Job{{Name: "a", Definition: def, DependsOn: []string{"nonexistent"}}},
-				Display: &fakeDisplay{},
+				Solver: &fakeSolver{},
+				Jobs:   []Job{{Name: "a", Definition: def, DependsOn: []string{"nonexistent"}}},
+				Sender: &fakeSender{},
 			},
 			wantSentinel: pipeline.ErrUnknownDep,
 		},
@@ -229,7 +214,7 @@ func TestRun(t *testing.T) {
 					{Name: "a", Definition: def},
 					{Name: "a", Definition: def},
 				},
-				Display: &fakeDisplay{},
+				Sender: &fakeSender{},
 			},
 			wantSentinel: pipeline.ErrDuplicateJob,
 		},
@@ -241,7 +226,7 @@ func TestRun(t *testing.T) {
 					{Name: "a", Definition: def, DependsOn: []string{"b"}},
 					{Name: "b", Definition: def, DependsOn: []string{"a"}},
 				},
-				Display: &fakeDisplay{},
+				Sender: &fakeSender{},
 			},
 			wantSentinel: pipeline.ErrCycleDetected,
 		},
@@ -252,16 +237,16 @@ func TestRun(t *testing.T) {
 				Jobs: []Job{
 					{Name: "a", Definition: def, DependsOn: []string{"a"}},
 				},
-				Display: &fakeDisplay{},
+				Sender: &fakeSender{},
 			},
 			wantSentinel: pipeline.ErrCycleDetected,
 		},
 		{
 			name: "nil definition returns error",
 			input: RunInput{
-				Solver:  &fakeSolver{},
-				Jobs:    []Job{{Name: "bad", Definition: nil}},
-				Display: &fakeDisplay{},
+				Solver: &fakeSolver{},
+				Jobs:   []Job{{Name: "bad", Definition: nil}},
+				Sender: &fakeSender{},
 			},
 			wantSentinel: ErrNilDefinition,
 		},
@@ -273,8 +258,8 @@ func TestRun(t *testing.T) {
 					close(ch)
 					return nil, ctx.Err()
 				}},
-				Jobs:    []Job{{Name: "cancelled", Definition: def}},
-				Display: &fakeDisplay{},
+				Jobs:   []Job{{Name: "cancelled", Definition: def}},
+				Sender: &fakeSender{},
 			},
 			wantSentinel: context.Canceled,
 		},
@@ -311,25 +296,11 @@ func TestRun_ordering(t *testing.T) {
 	t.Run("linear chain", func(t *testing.T) {
 		t.Parallel()
 
-		var mu sync.Mutex
-		var order []string
-
 		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 			close(ch)
 			return &client.SolveResponse{}, nil
 		}}
-		display := &fakeDisplay{}
-		display.attachFn = func(_ context.Context, name string, ch <-chan *client.SolveStatus, _ map[string]time.Duration) error {
-			mu.Lock()
-			order = append(order, name)
-			mu.Unlock()
-			display.wg.Go(func() {
-				//revive:disable-next-line:empty-block // drain
-				for range ch {
-				}
-			})
-			return nil
-		}
+		sender := &fakeSender{}
 
 		// Chain a -> b -> c so they must run in order.
 		err := Run(t.Context(), RunInput{
@@ -339,9 +310,11 @@ func TestRun_ordering(t *testing.T) {
 				{Name: "b", Definition: def, DependsOn: []string{"a"}},
 				{Name: "c", Definition: def, DependsOn: []string{"b"}},
 			},
-			Display: display,
+			Sender: sender,
 		})
 		require.NoError(t, err)
+
+		order := sender.jobAddedOrder()
 		require.Len(t, order, 3)
 		idxA, idxB, idxC := indexOf(order, "a"), indexOf(order, "b"), indexOf(order, "c")
 		require.NotEqual(t, -1, idxA, "a must appear in order")
@@ -354,33 +327,11 @@ func TestRun_ordering(t *testing.T) {
 	t.Run("diamond", func(t *testing.T) {
 		t.Parallel()
 
-		var mu sync.Mutex
-		completed := make(map[string]bool)
-
 		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 			close(ch)
 			return &client.SolveResponse{}, nil
 		}}
-		display := &fakeDisplay{}
-		display.attachFn = func(_ context.Context, name string, ch <-chan *client.SolveStatus, _ map[string]time.Duration) error {
-			mu.Lock()
-			switch name {
-			case "b", "c":
-				assert.True(t, completed["a"], "%s should run after a", name)
-			case "d":
-				assert.True(t, completed["b"], "d should run after b")
-				assert.True(t, completed["c"], "d should run after c")
-			default:
-			}
-			completed[name] = true
-			mu.Unlock()
-			display.wg.Go(func() {
-				//revive:disable-next-line:empty-block // drain
-				for range ch {
-				}
-			})
-			return nil
-		}
+		sender := &fakeSender{}
 
 		// Diamond: a -> {b, c} -> d
 		err := Run(t.Context(), RunInput{
@@ -391,10 +342,20 @@ func TestRun_ordering(t *testing.T) {
 				{Name: "c", Definition: def, DependsOn: []string{"a"}},
 				{Name: "d", Definition: def, DependsOn: []string{"b", "c"}},
 			},
-			Display: display,
+			Sender: sender,
 		})
 		require.NoError(t, err)
-		assert.Len(t, completed, 4)
+
+		order := sender.jobAddedOrder()
+		require.Len(t, order, 4)
+		idxA := indexOf(order, "a")
+		idxB := indexOf(order, "b")
+		idxC := indexOf(order, "c")
+		idxD := indexOf(order, "d")
+		assert.Less(t, idxA, idxB, "a must run before b")
+		assert.Less(t, idxA, idxC, "a must run before c")
+		assert.Less(t, idxB, idxD, "b must run before d")
+		assert.Less(t, idxC, idxD, "c must run before d")
 	})
 }
 
@@ -430,7 +391,7 @@ func TestRun_parallelism(t *testing.T) {
 					{Name: "b", Definition: def},
 					{Name: "c", Definition: def},
 				},
-				Display: &fakeDisplay{},
+				Sender: &fakeSender{},
 			})
 			require.NoError(t, err)
 			assert.Equal(t, int64(3), maxConcurrent.Load(), "all 3 independent jobs should run concurrently")
@@ -467,7 +428,7 @@ func TestRun_parallelism(t *testing.T) {
 					{Name: "c", Definition: def},
 					{Name: "d", Definition: def},
 				},
-				Display:     &fakeDisplay{},
+				Sender:      &fakeSender{},
 				Parallelism: 2,
 			})
 			require.NoError(t, err)
@@ -494,20 +455,7 @@ func TestRun_errorPropagation(t *testing.T) {
 		defC, err := llb.Scratch().Marshal(t.Context())
 		require.NoError(t, err)
 
-		var cExecuted atomic.Bool
-
-		display := &fakeDisplay{}
-		display.attachFn = func(_ context.Context, name string, ch <-chan *client.SolveStatus, _ map[string]time.Duration) error {
-			if name == "c" {
-				cExecuted.Store(true)
-			}
-			display.wg.Go(func() {
-				//revive:disable-next-line:empty-block // drain
-				for range ch {
-				}
-			})
-			return nil
-		}
+		sender := &fakeSender{}
 
 		// "a" succeeds, "b" fails at solve, "c" depends on "b".
 		solver := &fakeSolver{solveFn: func(_ context.Context, def *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
@@ -525,34 +473,21 @@ func TestRun_errorPropagation(t *testing.T) {
 				{Name: "b", Definition: defB, DependsOn: []string{"a"}},
 				{Name: "c", Definition: defC, DependsOn: []string{"b"}},
 			},
-			Display: display,
+			Sender: sender,
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "job b exploded")
-		assert.False(t, cExecuted.Load(), "job c should never execute when dep b fails")
+		assert.False(t, sender.hasJobAdded("c"), "job c should never execute when dep b fails")
 	})
 
 	t.Run("propagates to grandchild", func(t *testing.T) {
 		t.Parallel()
 
-		var cSolved atomic.Bool
-
 		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 			close(ch)
 			return nil, errors.New("job a failed")
 		}}
-		display := &fakeDisplay{}
-		display.attachFn = func(_ context.Context, name string, ch <-chan *client.SolveStatus, _ map[string]time.Duration) error {
-			if name == "c" {
-				cSolved.Store(true)
-			}
-			display.wg.Go(func() {
-				//revive:disable-next-line:empty-block // drain
-				for range ch {
-				}
-			})
-			return nil
-		}
+		sender := &fakeSender{}
 
 		// Chain a -> b -> c. Job "a" fails; "c" should never be solved.
 		err := Run(t.Context(), RunInput{
@@ -562,11 +497,11 @@ func TestRun_errorPropagation(t *testing.T) {
 				{Name: "b", Definition: def, DependsOn: []string{"a"}},
 				{Name: "c", Definition: def, DependsOn: []string{"b"}},
 			},
-			Display:     display,
+			Sender:      sender,
 			Parallelism: 1,
 		})
 		require.Error(t, err)
-		assert.False(t, cSolved.Load(), "job c should never be solved when grandparent a fails")
+		assert.False(t, sender.hasJobAdded("c"), "job c should never be solved when grandparent a fails")
 	})
 
 	t.Run("failed job unblocks deps", func(t *testing.T) {
@@ -577,7 +512,7 @@ func TestRun_errorPropagation(t *testing.T) {
 			return nil, errors.New("job a failed")
 		}}
 
-		display := &fakeDisplay{}
+		sender := &fakeSender{}
 
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		defer cancel()
@@ -588,7 +523,7 @@ func TestRun_errorPropagation(t *testing.T) {
 				{Name: "a", Definition: def},
 				{Name: "b", Definition: def, DependsOn: []string{"a"}},
 			},
-			Display: display,
+			Sender: sender,
 		})
 		require.Error(t, err)
 		// Must not be a context deadline exceeded (that would mean it hung).
@@ -598,24 +533,11 @@ func TestRun_errorPropagation(t *testing.T) {
 	t.Run("dep error skips solve", func(t *testing.T) {
 		t.Parallel()
 
-		var bSolved atomic.Bool
-
 		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 			close(ch)
 			return nil, errors.New("job a failed")
 		}}
-		display := &fakeDisplay{}
-		display.attachFn = func(_ context.Context, name string, ch <-chan *client.SolveStatus, _ map[string]time.Duration) error {
-			if name == "b" {
-				bSolved.Store(true)
-			}
-			display.wg.Go(func() {
-				//revive:disable-next-line:empty-block // drain
-				for range ch {
-				}
-			})
-			return nil
-		}
+		sender := &fakeSender{}
 
 		err := Run(t.Context(), RunInput{
 			Solver: solver,
@@ -623,11 +545,11 @@ func TestRun_errorPropagation(t *testing.T) {
 				{Name: "a", Definition: def},
 				{Name: "b", Definition: def, DependsOn: []string{"a"}},
 			},
-			Display:     display,
+			Sender:      sender,
 			Parallelism: 1,
 		})
 		require.Error(t, err)
-		assert.False(t, bSolved.Load(), "job b's solve should never be invoked when dep a fails")
+		assert.False(t, sender.hasJobAdded("b"), "job b's solve should never be invoked when dep a fails")
 	})
 }
 
@@ -640,31 +562,31 @@ func TestRun_display(t *testing.T) {
 	t.Run("solver writes status events", func(t *testing.T) {
 		t.Parallel()
 
-		var received atomic.Int64
 		solver := &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 			ch <- &client.SolveStatus{}
 			ch <- &client.SolveStatus{}
 			close(ch)
 			return &client.SolveResponse{}, nil
 		}}
-		display := &fakeDisplay{}
-		display.attachFn = func(_ context.Context, _ string, ch <-chan *client.SolveStatus, _ map[string]time.Duration) error {
-			display.wg.Go(func() {
-				for range ch {
-					received.Add(1)
-				}
-			})
-			return nil
-		}
+		sender := &fakeSender{}
 
 		err := Run(t.Context(), RunInput{
-			Solver:  solver,
-			Jobs:    []Job{{Name: "status-test", Definition: def}},
-			Display: display,
+			Solver: solver,
+			Jobs:   []Job{{Name: "status-test", Definition: def}},
+			Sender: sender,
 		})
 		require.NoError(t, err)
-		require.NoError(t, display.Wait())
-		assert.Equal(t, int64(2), received.Load())
+
+		// Lock manually because we need to filter by type, not just count.
+		var statusCount int
+		sender.mu.Lock()
+		for _, m := range sender.msgs {
+			if _, ok := m.(progress.JobStatusMsg); ok {
+				statusCount++
+			}
+		}
+		sender.mu.Unlock()
+		assert.Equal(t, 2, statusCount)
 	})
 }
 
@@ -691,7 +613,7 @@ func TestRun_semAcquireFailurePropagates(t *testing.T) {
 			{Name: "a", Definition: def},
 			{Name: "b", Definition: def, DependsOn: []string{"a"}},
 		},
-		Display:     &fakeDisplay{},
+		Sender:      &fakeSender{},
 		Parallelism: 1,
 	})
 	require.ErrorIs(t, err, context.Canceled)
@@ -708,7 +630,7 @@ func TestRun_exports(t *testing.T) {
 		name          string
 		exports       []Export
 		solver        *fakeSolver
-		display       *fakeDisplay
+		sender        *fakeSender
 		wantErr       string
 		wantSentinel  error
 		checkOpt      bool   // whether to assert on capturedExportOpt after Run
@@ -723,7 +645,7 @@ func TestRun_exports(t *testing.T) {
 				close(ch)
 				return &client.SolveResponse{}, nil
 			}},
-			display:       &fakeDisplay{},
+			sender:        &fakeSender{},
 			checkOpt:      true,
 			wantOutputDir: "/tmp/out",
 		},
@@ -736,7 +658,7 @@ func TestRun_exports(t *testing.T) {
 				close(ch)
 				return &client.SolveResponse{}, nil
 			}},
-			display:       &fakeDisplay{},
+			sender:        &fakeSender{},
 			checkOpt:      true,
 			wantOutputDir: "/tmp/out/dist",
 		},
@@ -749,7 +671,7 @@ func TestRun_exports(t *testing.T) {
 				close(ch)
 				return nil, errors.New("disk full")
 			}},
-			display: &fakeDisplay{},
+			sender:  &fakeSender{},
 			wantErr: `exporting "/tmp/bin/app" from job "compile"`,
 		},
 		{
@@ -758,7 +680,7 @@ func TestRun_exports(t *testing.T) {
 				{Definition: nil, JobName: "bad", Local: "/tmp/out/x"},
 			},
 			solver:       &fakeSolver{},
-			display:      &fakeDisplay{},
+			sender:       &fakeSender{},
 			wantSentinel: ErrNilDefinition,
 		},
 		{
@@ -767,7 +689,7 @@ func TestRun_exports(t *testing.T) {
 				{Definition: def, JobName: "bad", Local: ""},
 			},
 			solver:       &fakeSolver{},
-			display:      &fakeDisplay{},
+			sender:       &fakeSender{},
 			wantSentinel: pipeline.ErrEmptyExportLocal,
 		},
 	}
@@ -793,7 +715,7 @@ func TestRun_exports(t *testing.T) {
 			err := Run(t.Context(), RunInput{
 				Solver:  jobSolver,
 				Jobs:    []Job{{Name: "job", Definition: def}},
-				Display: tt.display,
+				Sender:  tt.sender,
 				Exports: tt.exports,
 			})
 			if tt.wantSentinel != nil {
@@ -842,9 +764,9 @@ func TestRun_exports(t *testing.T) {
 			}}
 
 			err = Run(t.Context(), RunInput{
-				Solver:  solver,
-				Jobs:    []Job{{Name: "build", Definition: def}},
-				Display: &fakeDisplay{},
+				Solver: solver,
+				Jobs:   []Job{{Name: "build", Definition: def}},
+				Sender: &fakeSender{},
 				Exports: []Export{
 					{Definition: def, JobName: "build", Local: "/tmp/a"},
 					{Definition: def, JobName: "build", Local: "/tmp/b"},
@@ -881,9 +803,9 @@ func TestRun_exports(t *testing.T) {
 			}}
 
 			err = Run(t.Context(), RunInput{
-				Solver:  solver,
-				Jobs:    []Job{{Name: "build", Definition: def}},
-				Display: &fakeDisplay{},
+				Solver: solver,
+				Jobs:   []Job{{Name: "build", Definition: def}},
+				Sender: &fakeSender{},
 				Exports: []Export{
 					{Definition: def, JobName: "build", Local: "/tmp/a"},
 					{Definition: def, JobName: "build", Local: "/tmp/b"},
@@ -914,7 +836,7 @@ func TestRun_cacheEntriesFlowToSolveOpt(t *testing.T) {
 	err = Run(t.Context(), RunInput{
 		Solver:       solver,
 		Jobs:         []Job{{Name: "build", Definition: def}},
-		Display:      &fakeDisplay{},
+		Sender:       &fakeSender{},
 		CacheExports: exports,
 		CacheImports: imports,
 	})
@@ -945,9 +867,9 @@ func TestRun_imagePublish(t *testing.T) {
 		}}
 
 		err := Run(t.Context(), RunInput{
-			Solver:  solver,
-			Jobs:    []Job{{Name: "build", Definition: def}},
-			Display: &fakeDisplay{},
+			Solver: solver,
+			Jobs:   []Job{{Name: "build", Definition: def}},
+			Sender: &fakeSender{},
 			ImagePublishes: []ImagePublish{
 				{Definition: def, JobName: "build", Image: "ghcr.io/user/app:v1", Push: true, Platform: "linux/amd64"},
 			},
@@ -975,9 +897,9 @@ func TestRun_imagePublish(t *testing.T) {
 		}}
 
 		err := Run(t.Context(), RunInput{
-			Solver:  solver,
-			Jobs:    []Job{{Name: "build", Definition: def}},
-			Display: &fakeDisplay{},
+			Solver: solver,
+			Jobs:   []Job{{Name: "build", Definition: def}},
+			Sender: &fakeSender{},
 			ImagePublishes: []ImagePublish{
 				{Definition: def, JobName: "build", Image: "localhost:5000/app:dev", Push: true, Insecure: true, Platform: "linux/amd64"},
 			},
@@ -1002,9 +924,9 @@ func TestRun_imagePublish(t *testing.T) {
 		}}
 
 		err := Run(t.Context(), RunInput{
-			Solver:  solver,
-			Jobs:    []Job{{Name: "build", Definition: def}},
-			Display: &fakeDisplay{},
+			Solver: solver,
+			Jobs:   []Job{{Name: "build", Definition: def}},
+			Sender: &fakeSender{},
 			ImagePublishes: []ImagePublish{
 				{Definition: def, JobName: "build", Image: "myapp:dev", Push: false, Platform: "linux/amd64"},
 			},
@@ -1029,9 +951,9 @@ func TestRun_imagePublish(t *testing.T) {
 		}}
 
 		err := Run(t.Context(), RunInput{
-			Solver:  solver,
-			Jobs:    []Job{{Name: "build", Definition: def}},
-			Display: &fakeDisplay{},
+			Solver: solver,
+			Jobs:   []Job{{Name: "build", Definition: def}},
+			Sender: &fakeSender{},
 			ImagePublishes: []ImagePublish{
 				{Definition: def, JobName: "build", Image: "ghcr.io/user/app:v1", Push: true, Platform: "linux/amd64"},
 			},
@@ -1050,9 +972,9 @@ func TestRun_imagePublish(t *testing.T) {
 		}}
 
 		err := Run(t.Context(), RunInput{
-			Solver:  solver,
-			Jobs:    []Job{{Name: "build", Definition: def}},
-			Display: &fakeDisplay{},
+			Solver: solver,
+			Jobs:   []Job{{Name: "build", Definition: def}},
+			Sender: &fakeSender{},
 			ImagePublishes: []ImagePublish{
 				{Definition: nil, JobName: "build", Image: "ghcr.io/user/app:v1", Push: true},
 			},
@@ -1163,7 +1085,7 @@ func TestRun_exportDockerMultiPlatformError(t *testing.T) {
 		Solver:  solver,
 		Runtime: rt,
 		Jobs:    []Job{{Name: "build", Definition: def}},
-		Display: &fakeDisplay{},
+		Sender:  &fakeSender{},
 		ImagePublishes: []ImagePublish{
 			{Definition: def, JobName: "build-amd64", Image: "myapp:latest", ExportDocker: true, Platform: "linux/amd64"},
 			{Definition: def, JobName: "build-arm64", Image: "myapp:latest", ExportDocker: true, Platform: "linux/arm64"},
@@ -1193,9 +1115,9 @@ func TestRun_duplicatePlatformError(t *testing.T) {
 	}
 
 	err = Run(t.Context(), RunInput{
-		Solver:  solver,
-		Jobs:    []Job{{Name: "build", Definition: def}},
-		Display: &fakeDisplay{},
+		Solver: solver,
+		Jobs:   []Job{{Name: "build", Definition: def}},
+		Sender: &fakeSender{},
 		ImagePublishes: []ImagePublish{
 			{Definition: def, JobName: "build-a", Image: "myapp:latest", Push: true, Platform: "linux/amd64"},
 			{Definition: def, JobName: "build-b", Image: "myapp:latest", Push: true, Platform: "linux/amd64"},
@@ -1230,7 +1152,7 @@ func TestRun_exportDocker(t *testing.T) {
 			Solver:  solver,
 			Runtime: rt,
 			Jobs:    []Job{{Name: "build", Definition: def}},
-			Display: &fakeDisplay{},
+			Sender:  &fakeSender{},
 			ImagePublishes: []ImagePublish{
 				{Definition: def, JobName: "build", Image: "myapp:dev", ExportDocker: true, Platform: "linux/amd64"},
 			},
@@ -1271,7 +1193,7 @@ func TestRun_exportDocker(t *testing.T) {
 			Solver:  solver,
 			Runtime: rt,
 			Jobs:    []Job{{Name: "build", Definition: def}},
-			Display: &fakeDisplay{},
+			Sender:  &fakeSender{},
 			ImagePublishes: []ImagePublish{
 				{Definition: def, JobName: "build", Image: "ghcr.io/user/app:v1", Push: true, ExportDocker: true, Platform: "linux/amd64"},
 			},
@@ -1295,7 +1217,7 @@ func TestRun_exportDocker(t *testing.T) {
 			Solver:  solver,
 			Runtime: rt,
 			Jobs:    []Job{{Name: "build", Definition: def}},
-			Display: &fakeDisplay{},
+			Sender:  &fakeSender{},
 			ImagePublishes: []ImagePublish{
 				{Definition: nil, JobName: "build", Image: "myapp:dev", ExportDocker: true, Platform: "linux/amd64"},
 			},
@@ -1448,10 +1370,7 @@ func TestRunNodeDeferredWhenSkip(t *testing.T) {
 		},
 	}
 
-	var skippedJob string
-	display := &fakeDisplay{
-		skipFn: func(_ context.Context, jobName string) { skippedJob = jobName },
-	}
+	sender := &fakeSender{}
 
 	wctx := &conditional.Context{
 		Getenv:      func(string) string { return "" },
@@ -1489,7 +1408,7 @@ func TestRunNodeDeferredWhenSkip(t *testing.T) {
 
 	cfg := runConfig{
 		solver:  solver,
-		display: display,
+		sender:  sender,
 		nodes:   nodes,
 		sem:     semaphore.NewWeighted(1),
 		whenCtx: wctx,
@@ -1498,6 +1417,14 @@ func TestRunNodeDeferredWhenSkip(t *testing.T) {
 	err := runNode(t.Context(), node, cfg)
 	require.NoError(t, err)
 	assert.True(t, node.skipped)
+
+	// Verify a JobSkippedMsg was sent for "deploy".
+	var skippedJob string
+	for _, m := range sender.msgs {
+		if msg, ok := m.(progress.JobSkippedMsg); ok {
+			skippedJob = msg.Job
+		}
+	}
 	assert.Equal(t, "deploy", skippedJob)
 	whenMock.AssertExpectations(t)
 }
@@ -1512,10 +1439,7 @@ func TestRunNodeSkippedDepPropagatesSkip(t *testing.T) {
 		},
 	}
 
-	var skippedJobs []string
-	display := &fakeDisplay{
-		skipFn: func(_ context.Context, jobName string) { skippedJobs = append(skippedJobs, jobName) },
-	}
+	sender := &fakeSender{}
 
 	depNode := &dagNode{
 		job:     Job{Name: "build", Definition: &llb.Definition{Def: [][]byte{{}}}},
@@ -1546,10 +1470,10 @@ func TestRunNodeSkippedDepPropagatesSkip(t *testing.T) {
 	}
 
 	cfg := runConfig{
-		solver:  solver,
-		display: display,
-		nodes:   nodes,
-		sem:     semaphore.NewWeighted(1),
+		solver: solver,
+		sender: sender,
+		nodes:  nodes,
+		sem:    semaphore.NewWeighted(1),
 		whenCtx: &conditional.Context{
 			Getenv:      func(string) string { return "" },
 			PipelineEnv: map[string]string{},
@@ -1559,6 +1483,14 @@ func TestRunNodeSkippedDepPropagatesSkip(t *testing.T) {
 	err := runNode(t.Context(), node, cfg)
 	require.NoError(t, err)
 	assert.True(t, node.skipped)
+
+	// Verify a JobSkippedMsg was sent for "deploy".
+	var skippedJobs []string
+	for _, m := range sender.msgs {
+		if msg, ok := m.(progress.JobSkippedMsg); ok {
+			skippedJobs = append(skippedJobs, msg.Job)
+		}
+	}
 	assert.Equal(t, []string{"deploy"}, skippedJobs)
 	// EvaluateDeferred must not be called when dep is skipped.
 	whenMock.AssertNotCalled(t, "EvaluateDeferred", mock.Anything, mock.Anything)
@@ -1577,15 +1509,7 @@ func TestRunNodeSkippedStepsReported(t *testing.T) {
 		},
 	}
 
-	var mu sync.Mutex
-	var reported []string
-	display := &fakeDisplay{
-		skipStepFn: func(_ context.Context, jobName, stepName string) {
-			mu.Lock()
-			reported = append(reported, jobName+"/"+stepName)
-			mu.Unlock()
-		},
-	}
+	sender := &fakeSender{}
 
 	node := &dagNode{
 		job: Job{
@@ -1599,14 +1523,22 @@ func TestRunNodeSkippedStepsReported(t *testing.T) {
 	nodes := map[string]*dagNode{"build": node}
 
 	cfg := runConfig{
-		solver:  solver,
-		display: display,
-		nodes:   nodes,
-		sem:     semaphore.NewWeighted(1),
+		solver: solver,
+		sender: sender,
+		nodes:  nodes,
+		sem:    semaphore.NewWeighted(1),
 	}
 
 	err = runNode(t.Context(), node, cfg)
 	require.NoError(t, err)
+
+	// Verify StepSkippedMsg messages.
+	var reported []string
+	for _, m := range sender.msgs {
+		if msg, ok := m.(progress.StepSkippedMsg); ok {
+			reported = append(reported, msg.Job+"/"+msg.Step)
+		}
+	}
 	assert.Equal(t, []string{"build/slow-test", "build/lint"}, reported)
 }
 
@@ -1632,7 +1564,7 @@ func TestRunNodeOutputExtractionFailure(t *testing.T) {
 		},
 	}
 
-	display := &fakeDisplay{}
+	sender := &fakeSender{}
 
 	node := &dagNode{
 		job: Job{
@@ -1646,10 +1578,10 @@ func TestRunNodeOutputExtractionFailure(t *testing.T) {
 	nodes := map[string]*dagNode{"build": node}
 
 	cfg := runConfig{
-		solver:  solver,
-		display: display,
-		nodes:   nodes,
-		sem:     semaphore.NewWeighted(1),
+		solver: solver,
+		sender: sender,
+		nodes:  nodes,
+		sem:    semaphore.NewWeighted(1),
 	}
 
 	err = runNode(t.Context(), node, cfg)
@@ -1681,7 +1613,7 @@ func TestRunNode_jobTimeout(t *testing.T) {
 					Definition: def,
 					Timeout:    1 * time.Second,
 				}},
-				Display: &fakeDisplay{},
+				Sender: &fakeSender{},
 			})
 			require.Error(t, err)
 			assert.ErrorIs(t, err, ErrJobTimeout)
@@ -1706,7 +1638,7 @@ func TestRunNode_jobTimeout(t *testing.T) {
 					Definition: def,
 					Timeout:    5 * time.Second,
 				}},
-				Display: &fakeDisplay{},
+				Sender: &fakeSender{},
 			})
 			require.NoError(t, err)
 		})
@@ -1739,7 +1671,7 @@ func TestRunNode_retry(t *testing.T) {
 				Definition: def,
 				Retry:      &pipeline.Retry{Attempts: 3, Backoff: pipeline.BackoffNone},
 			}},
-			Display: &fakeDisplay{},
+			Sender: &fakeSender{},
 		})
 		require.NoError(t, err)
 		assert.Equal(t, int64(3), attempts.Load())
@@ -1766,7 +1698,7 @@ func TestRunNode_retry(t *testing.T) {
 				Definition: def,
 				Retry:      &pipeline.Retry{Attempts: 2, Backoff: pipeline.BackoffNone},
 			}},
-			Display: &fakeDisplay{},
+			Sender: &fakeSender{},
 		})
 		require.ErrorIs(t, err, solveErr)
 		assert.Equal(t, int64(3), attempts.Load(), "1 initial + 2 retries = 3 attempts")
@@ -1799,7 +1731,7 @@ func TestRunNode_retry(t *testing.T) {
 						Backoff:  pipeline.BackoffExponential,
 					},
 				}},
-				Display: &fakeDisplay{},
+				Sender: &fakeSender{},
 			})
 			require.NoError(t, err)
 			assert.Equal(t, int64(3), attempts.Load())
@@ -1829,7 +1761,7 @@ func TestRunNode_retry(t *testing.T) {
 						Backoff:  pipeline.BackoffNone,
 					},
 				}},
-				Display: &fakeDisplay{},
+				Sender: &fakeSender{},
 			})
 			require.Error(t, err)
 			assert.ErrorIs(t, err, ErrJobTimeout)
@@ -1966,10 +1898,10 @@ func TestRunNode_jobTimeout_sentinelError(t *testing.T) {
 		nodes := map[string]*dagNode{"slow-job": node}
 
 		cfg := runConfig{
-			solver:  solver,
-			display: &fakeDisplay{},
-			nodes:   nodes,
-			sem:     semaphore.NewWeighted(1),
+			solver: solver,
+			sender: &fakeSender{},
+			nodes:  nodes,
+			sem:    semaphore.NewWeighted(1),
 		}
 
 		err = runNode(t.Context(), node, cfg)
@@ -1999,21 +1931,7 @@ func TestRunNode_retry_displaysRetry(t *testing.T) {
 		return &client.SolveResponse{}, nil
 	}}
 
-	type retryCall struct {
-		jobName     string
-		attempt     int
-		maxAttempts int
-	}
-	var mu sync.Mutex
-	var retryCalls []retryCall
-
-	display := &fakeDisplay{
-		retryFn: func(_ context.Context, jobName string, attempt, maxAttempts int, _ error) {
-			mu.Lock()
-			retryCalls = append(retryCalls, retryCall{jobName, attempt, maxAttempts})
-			mu.Unlock()
-		},
-	}
+	sender := &fakeSender{}
 
 	node := &dagNode{
 		job: Job{
@@ -2027,17 +1945,29 @@ func TestRunNode_retry_displaysRetry(t *testing.T) {
 	nodes := map[string]*dagNode{"flaky": node}
 
 	cfg := runConfig{
-		solver:  solver,
-		display: display,
-		nodes:   nodes,
-		sem:     semaphore.NewWeighted(1),
+		solver: solver,
+		sender: sender,
+		nodes:  nodes,
+		sem:    semaphore.NewWeighted(1),
 	}
 
 	err = runNode(t.Context(), node, cfg)
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), solveAttempts.Load())
 
-	require.Len(t, retryCalls, 2, "retryFn called before each retry attempt")
+	// Extract JobRetryMsg messages.
+	type retryCall struct {
+		jobName     string
+		attempt     int
+		maxAttempts int
+	}
+	var retryCalls []retryCall
+	for _, m := range sender.msgs {
+		if msg, ok := m.(progress.JobRetryMsg); ok {
+			retryCalls = append(retryCalls, retryCall{msg.Job, msg.Attempt, msg.MaxAttempts})
+		}
+	}
+	require.Len(t, retryCalls, 2, "JobRetryMsg sent before each retry attempt")
 	// First retry: attempt 2 of 4 (1 initial + 3 retries).
 	assert.Equal(t, "flaky", retryCalls[0].jobName)
 	assert.Equal(t, 2, retryCalls[0].attempt)
@@ -2060,19 +1990,7 @@ func TestRunNode_jobTimeout_displaysTimeout(t *testing.T) {
 			return nil, ctx.Err()
 		}}
 
-		type timeoutCall struct {
-			jobName string
-			timeout time.Duration
-		}
-		var timeoutCalls []timeoutCall
-
-		// timeoutFn is called synchronously from runNode (not a separate
-		// goroutine), so no mutex is needed around timeoutCalls.
-		display := &fakeDisplay{
-			timeoutFn: func(_ context.Context, jobName string, timeout time.Duration) {
-				timeoutCalls = append(timeoutCalls, timeoutCall{jobName, timeout})
-			},
-		}
+		sender := &fakeSender{}
 
 		node := &dagNode{
 			job: Job{
@@ -2086,15 +2004,26 @@ func TestRunNode_jobTimeout_displaysTimeout(t *testing.T) {
 		nodes := map[string]*dagNode{"slow-job": node}
 
 		cfg := runConfig{
-			solver:  solver,
-			display: display,
-			nodes:   nodes,
-			sem:     semaphore.NewWeighted(1),
+			solver: solver,
+			sender: sender,
+			nodes:  nodes,
+			sem:    semaphore.NewWeighted(1),
 		}
 
 		err = runNode(t.Context(), node, cfg)
 		require.Error(t, err)
 
+		// Extract JobTimeoutMsg messages.
+		type timeoutCall struct {
+			jobName string
+			timeout time.Duration
+		}
+		var timeoutCalls []timeoutCall
+		for _, m := range sender.msgs {
+			if msg, ok := m.(progress.JobTimeoutMsg); ok {
+				timeoutCalls = append(timeoutCalls, timeoutCall{msg.Job, msg.Timeout})
+			}
+		}
 		require.Len(t, timeoutCalls, 1)
 		assert.Equal(t, "slow-job", timeoutCalls[0].jobName)
 		assert.Equal(t, 1*time.Second, timeoutCalls[0].timeout)
@@ -2226,7 +2155,7 @@ func TestRun_failFast(t *testing.T) {
 					{Name: "b", Definition: defB},
 					{Name: "c", Definition: defC},
 				},
-				Display:  &fakeDisplay{},
+				Sender:   &fakeSender{},
 				FailFast: true,
 			})
 			require.Error(t, err)
@@ -2265,7 +2194,7 @@ func TestRun_failFast(t *testing.T) {
 					{Name: "b", Definition: defB},
 					{Name: "c", Definition: defC},
 				},
-				Display:  &fakeDisplay{},
+				Sender:   &fakeSender{},
 				FailFast: false,
 			})
 			require.Error(t, err)
@@ -2303,19 +2232,7 @@ func TestRun_failFast(t *testing.T) {
 			}
 		}}
 
-		var bAttached atomic.Bool
-		display := &fakeDisplay{}
-		display.attachFn = func(_ context.Context, name string, ch <-chan *client.SolveStatus, _ map[string]time.Duration) error {
-			if name == "b" {
-				bAttached.Store(true)
-			}
-			display.wg.Go(func() {
-				//revive:disable-next-line:empty-block // drain
-				for range ch {
-				}
-			})
-			return nil
-		}
+		sender := &fakeSender{}
 
 		err = Run(t.Context(), RunInput{
 			Solver: solver,
@@ -2324,14 +2241,14 @@ func TestRun_failFast(t *testing.T) {
 				{Name: "b", Definition: defB, DependsOn: []string{"a"}},
 				{Name: "d", Definition: defD},
 			},
-			Display:  display,
+			Sender:   sender,
 			FailFast: false,
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "job a exploded")
 		assert.Contains(t, err.Error(), `dependency "a"`)
 		assert.True(t, dCompleted.Load(), "independent job d should complete")
-		assert.False(t, bAttached.Load(), "job b should not be solved when dep a fails")
+		assert.False(t, sender.hasJobAdded("b"), "job b should not be solved when dep a fails")
 	})
 
 	t.Run("no-fail-fast filters exports", func(t *testing.T) {
@@ -2371,7 +2288,7 @@ func TestRun_failFast(t *testing.T) {
 				{Name: "a", Definition: defA},
 				{Name: "b", Definition: defB},
 			},
-			Display:  &fakeDisplay{},
+			Sender:   &fakeSender{},
 			FailFast: false,
 			Exports: []Export{
 				{Definition: exportDefA, JobName: "a", Local: "/tmp/a/out"},
@@ -2405,7 +2322,7 @@ func TestRun_failFast(t *testing.T) {
 				{Name: "a", Definition: defA},
 				{Name: "b", Definition: defB},
 			},
-			Display:  &fakeDisplay{},
+			Sender:   &fakeSender{},
 			FailFast: false,
 		})
 		require.Error(t, err)
