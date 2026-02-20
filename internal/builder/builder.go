@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"path"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/containerd/platforms"
 	"github.com/moby/buildkit/client/llb"
 
+	"github.com/ndisidore/cicada/internal/progress"
 	"github.com/ndisidore/cicada/pkg/pipeline"
 )
 
@@ -44,8 +46,9 @@ type jobResult struct {
 	def          *llb.Definition
 	state        llb.State
 	stepTimeouts map[string]time.Duration
-	stepDefs     []StepDef // per-step build closures; nil when no step control needed
-	baseState    llb.State // pre-step state; only set when stepDefs is non-nil
+	cmdInfos     map[string]progress.CmdInfo // vertex name -> command metadata
+	stepDefs     []StepDef                   // per-step build closures; nil when no step control needed
+	baseState    llb.State                   // pre-step state; only set when stepDefs is non-nil
 }
 
 // StepBuildFunc builds a single step's LLB state on top of a base state.
@@ -59,6 +62,7 @@ type StepDef struct {
 	Retry        *pipeline.Retry
 	AllowFailure bool
 	Timeouts     map[string]time.Duration
+	CmdInfos     map[string]progress.CmdInfo // vertex name -> command metadata
 	Build        StepBuildFunc
 }
 
@@ -76,6 +80,8 @@ type Result struct {
 	OutputDefs map[string]*llb.Definition
 	// StepTimeouts maps job names to per-vertex timeout durations.
 	StepTimeouts map[string]map[string]time.Duration
+	// CmdInfos maps job names to per-vertex command metadata.
+	CmdInfos map[string]map[string]progress.CmdInfo
 	// SecretDecls carries pipeline-level secret declarations for CLI resolution.
 	SecretDecls []pipeline.SecretDecl
 	// StepDefs maps job names to per-step build closures for step-controlled
@@ -143,6 +149,7 @@ func Build(ctx context.Context, p pipeline.Pipeline, opts BuildOpts) (Result, er
 		JobNames:     make([]string, 0, len(order)),
 		OutputDefs:   make(map[string]*llb.Definition, len(order)),
 		StepTimeouts: make(map[string]map[string]time.Duration, len(order)),
+		CmdInfos:     make(map[string]map[string]progress.CmdInfo, len(order)),
 		SecretDecls:  p.Secrets,
 		StepDefs:     make(map[string][]StepDef),
 		BaseStates:   make(map[string]llb.State),
@@ -169,6 +176,7 @@ func appendJob(ctx context.Context, job *pipeline.Job, states map[string]llb.Sta
 	result.JobNames = append(result.JobNames, job.Name)
 	states[job.Name] = jr.state
 	result.StepTimeouts[job.Name] = jr.stepTimeouts
+	result.CmdInfos[job.Name] = jr.cmdInfos
 	if jr.stepDefs != nil {
 		result.StepDefs[job.Name] = jr.stepDefs
 		result.BaseStates[job.Name] = jr.baseState
@@ -352,6 +360,7 @@ func buildJob(
 
 	// Execute steps sequentially, chaining state.
 	var stepTimeouts map[string]time.Duration
+	var cmdInfos map[string]progress.CmdInfo
 	for i := range job.Steps {
 		step := &job.Steps[i]
 
@@ -364,9 +373,13 @@ func buildJob(
 			if stepTimeouts == nil {
 				stepTimeouts = make(map[string]time.Duration)
 			}
-			for k, v := range result.timeouts {
-				stepTimeouts[k] = v
+			maps.Copy(stepTimeouts, result.timeouts)
+		}
+		if result.cmdInfos != nil {
+			if cmdInfos == nil {
+				cmdInfos = make(map[string]progress.CmdInfo)
 			}
+			maps.Copy(cmdInfos, result.cmdInfos)
 		}
 
 		if needsStepControl {
@@ -376,6 +389,7 @@ func buildJob(
 				Retry:        step.Retry,
 				AllowFailure: step.AllowFailure,
 				Timeouts:     result.timeouts,
+				CmdInfos:     result.cmdInfos,
 				Build: func(base llb.State, retryAttempt int) (llb.State, error) {
 					r, err := buildStepOps(base, capturedStep, retryAttempt, shared)
 					if err != nil {
@@ -391,7 +405,7 @@ func buildJob(
 	if err != nil {
 		return jobResult{}, fmt.Errorf("marshaling: %w", err)
 	}
-	jr := jobResult{def: def, state: st, stepTimeouts: stepTimeouts}
+	jr := jobResult{def: def, state: st, stepTimeouts: stepTimeouts, cmdInfos: cmdInfos}
 	if needsStepControl {
 		jr.stepDefs = stepDefs
 		jr.baseState = baseState
@@ -429,6 +443,7 @@ type stepSharedCtx struct {
 type stepBuildResult struct {
 	state    llb.State
 	timeouts map[string]time.Duration
+	cmdInfos map[string]progress.CmdInfo
 }
 
 // buildStepOps applies a single step's LLB operations to a base state.
@@ -487,6 +502,7 @@ func buildStepOps(
 	}
 
 	var timeouts map[string]time.Duration
+	var cmdInfos map[string]progress.CmdInfo
 	for j, cmd := range step.Run {
 		if strings.TrimSpace(cmd) == "" {
 			return stepBuildResult{}, fmt.Errorf("job %q step %q run[%d]: %w", shared.jobName, step.Name, j, pipeline.ErrEmptyRunCommand)
@@ -506,6 +522,11 @@ func buildStepOps(
 		}
 
 		vertexName := shared.jobName + "/" + step.Name + "/" + cmd
+
+		if cmdInfos == nil {
+			cmdInfos = make(map[string]progress.CmdInfo)
+		}
+		cmdInfos[vertexName] = progress.CmdInfo{UserCmd: cmd, FullCmd: shellCmd}
 
 		if step.Timeout > 0 {
 			if timeouts == nil {
@@ -543,7 +564,7 @@ func buildStepOps(
 		st = st.Run(runOpts...).Root()
 	}
 
-	return stepBuildResult{state: st, timeouts: timeouts}, nil
+	return stepBuildResult{state: st, timeouts: timeouts, cmdInfos: cmdInfos}, nil
 }
 
 // resolveShell returns a fresh copy of the effective shell for a run command.

@@ -17,6 +17,7 @@ type Msg interface {
 type JobAddedMsg struct {
 	Job          string
 	StepTimeouts map[string]time.Duration
+	CmdInfos     map[string]CmdInfo // vertex name -> command metadata
 }
 
 // JobStatusMsg carries a BuildKit SolveStatus update for a specific job.

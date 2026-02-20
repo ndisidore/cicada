@@ -78,6 +78,7 @@ type jobTracker struct {
 	seen         map[digest.Digest]vertexState
 	pending      map[digest.Digest]timeoutVertex
 	stepTimeouts map[string]time.Duration
+	cmdInfos     map[string]progress.CmdInfo
 }
 
 //revive:disable-next-line:cognitive-complexity,cyclomatic,function-length consume is a linear message dispatch loop; splitting it hurts readability.
@@ -102,6 +103,7 @@ func (p *Display) consume() {
 		case progress.JobAddedMsg:
 			jt := getJob(msg.Job)
 			jt.stepTimeouts = msg.StepTimeouts
+			jt.cmdInfos = msg.CmdInfos
 
 		case progress.JobStatusMsg:
 			jt := getJob(msg.Job)
@@ -115,6 +117,7 @@ func (p *Display) consume() {
 					seen:       jt.seen,
 					cleanName:  v.Name,
 					cfgTimeout: cfgTimeout,
+					cmdInfos:   jt.cmdInfos,
 				})
 				trackTimeout(v, jt.seen, jt.pending, v.Name, cfgTimeout)
 			}
@@ -230,6 +233,7 @@ type logVertexInput struct {
 	seen       map[digest.Digest]vertexState
 	cleanName  string
 	cfgTimeout time.Duration
+	cmdInfos   map[string]progress.CmdInfo
 }
 
 func logVertex(in logVertexInput) {
@@ -247,9 +251,13 @@ func logVertex(in logVertexInput) {
 			//nolint:sloglint // dynamic msg encodes user-facing formatted output
 			in.log.LogAttrs(in.ctx, slog.LevelWarn, fmt.Sprintf("[%s] TIMEOUT %s", in.jobName, in.cleanName), attrs...)
 		} else {
-			attrs := append(base, slog.String("event", "vertex.error"), slog.String("error", in.v.Error))
+			exitInfo := progress.ExitInfo(in.v.Error)
+			attrs := append(base, slog.String("event", "vertex.error"), slog.String("error", exitInfo))
+			if ci, ok := in.cmdInfos[in.cleanName]; ok && ci.FullCmd != "" {
+				attrs = append(attrs, slog.String("full_cmd", ci.FullCmd))
+			}
 			//nolint:sloglint // dynamic msg encodes user-facing formatted output
-			in.log.LogAttrs(in.ctx, slog.LevelError, fmt.Sprintf("[%s] FAIL %s: %s", in.jobName, in.cleanName, in.v.Error), attrs...)
+			in.log.LogAttrs(in.ctx, slog.LevelError, fmt.Sprintf("[%s] FAIL %s: %s", in.jobName, in.cleanName, exitInfo), attrs...)
 		}
 		in.seen[in.v.Digest] = _stateDone
 	case in.v.Cached && prev < _stateDone:

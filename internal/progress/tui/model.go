@@ -77,16 +77,17 @@ type jobState struct {
 	order             []digest.Digest
 	logs              []string
 	done              bool
-	skipped           bool                     // true if job was skipped by a when condition
-	skippedSteps      []string                 // step names skipped by static when conditions
-	started           *time.Time               // earliest vertex start
-	ended             *time.Time               // latest vertex completion
-	retryAttempt      int                      // current retry attempt (0 = no retry)
-	maxAttempts       int                      // total max attempts
-	timedOut          bool                     // whether the job timed out
-	timeout           time.Duration            // the configured timeout
-	stepTimeouts      map[string]time.Duration // vertex name -> configured step timeout
-	allowedFailureSet map[string]struct{}      // step name prefixes whose failures are allowed
+	skipped           bool                        // true if job was skipped by a when condition
+	skippedSteps      []string                    // step names skipped by static when conditions
+	started           *time.Time                  // earliest vertex start
+	ended             *time.Time                  // latest vertex completion
+	retryAttempt      int                         // current retry attempt (0 = no retry)
+	maxAttempts       int                         // total max attempts
+	timedOut          bool                        // whether the job timed out
+	timeout           time.Duration               // the configured timeout
+	stepTimeouts      map[string]time.Duration    // vertex name -> configured step timeout
+	cmdInfos          map[string]progress.CmdInfo // vertex name -> command metadata
+	allowedFailureSet map[string]struct{}         // step name prefixes whose failures are allowed
 }
 
 // jobDuration returns the wall-clock duration for a completed job. For
@@ -232,6 +233,7 @@ func (m *multiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.StepTimeouts != nil {
 			js.stepTimeouts = msg.StepTimeouts
 		}
+		js.cmdInfos = msg.CmdInfos
 	case progress.JobSkippedMsg:
 		js := m.getOrCreateJob(msg.Job)
 		if !js.done {

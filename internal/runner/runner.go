@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -116,16 +117,17 @@ type Job struct {
 	Name         string
 	Definition   *llb.Definition
 	DependsOn    []string
-	When         DeferredEvaluator        // deferred condition; nil = always run
-	Env          map[string]string        // pipeline-scoped env for deferred condition evaluation
-	Matrix       map[string]string        // matrix dimension values for deferred condition evaluation
-	OutputDef    *llb.Definition          // extracts /cicada/output for deferred conditions
-	SkippedSteps []string                 // step names skipped by static when conditions
-	Timeout      time.Duration            // job-level timeout; 0 = no timeout
-	Retry        *pipeline.Retry          // job-level retry config; nil = no retry
-	StepTimeouts map[string]time.Duration // vertex name -> configured timeout; nil = no step timeouts
-	Steps        []StepExec               // per-step execution; nil = monolithic solve
-	BaseState    llb.State                // pre-step LLB state; set when Steps is non-nil
+	When         DeferredEvaluator           // deferred condition; nil = always run
+	Env          map[string]string           // pipeline-scoped env for deferred condition evaluation
+	Matrix       map[string]string           // matrix dimension values for deferred condition evaluation
+	OutputDef    *llb.Definition             // extracts /cicada/output for deferred conditions
+	SkippedSteps []string                    // step names skipped by static when conditions
+	Timeout      time.Duration               // job-level timeout; 0 = no timeout
+	Retry        *pipeline.Retry             // job-level retry config; nil = no retry
+	StepTimeouts map[string]time.Duration    // vertex name -> configured timeout; nil = no step timeouts
+	CmdInfos     map[string]progress.CmdInfo // vertex name -> command metadata
+	Steps        []StepExec                  // per-step execution; nil = monolithic solve
+	BaseState    llb.State                   // pre-step LLB state; set when Steps is non-nil
 }
 
 // StepExec describes a single step for gateway-based step-controlled execution.
@@ -134,6 +136,7 @@ type StepExec struct {
 	Retry        *pipeline.Retry
 	AllowFailure bool
 	Timeouts     map[string]time.Duration
+	CmdInfos     map[string]progress.CmdInfo // vertex name -> command metadata
 	// Build produces the LLB state for this step given a base state and retry attempt.
 	// retryAttempt is 0 for the first try; >0 triggers cache busting.
 	Build func(base llb.State, retryAttempt int) (llb.State, error)
@@ -472,6 +475,14 @@ func runNode(ctx context.Context, node *dagNode, cfg runConfig) error {
 		if len(node.job.StepTimeouts) > 0 {
 			err = cleanTimeoutError(err, node.job.Name, node.job.StepTimeouts)
 		}
+		var exitErr *gatewaypb.ExitError
+		if errors.As(err, &exitErr) {
+			node.err = progress.NewDisplayError(
+				fmt.Sprintf("job %q: exit code: %d", node.job.Name, exitErr.ExitCode),
+				err,
+			)
+			return node.err
+		}
 		node.err = err
 		return fmt.Errorf("job %q: %w", node.job.Name, err)
 	}
@@ -503,7 +514,7 @@ func retryJob(ctx context.Context, node *dagNode, cfg runConfig) error {
 		if node.job.Steps != nil {
 			return solveJobSteps(ctx, node, cfg)
 		}
-		return solveJob(ctx, node.job.Name, node.job.Definition, cfg, node.job.StepTimeouts)
+		return solveJob(ctx, node.job.Name, node.job.Definition, cfg, node.job.StepTimeouts, node.job.CmdInfos)
 	}
 
 	r := node.job.Retry
@@ -557,23 +568,28 @@ func retryJob(ctx context.Context, node *dagNode, cfg runConfig) error {
 // solveJobSteps uses the gateway API to execute a job's steps individually,
 // enabling per-step retry and allow-failure.
 func solveJobSteps(ctx context.Context, node *dagNode, cfg runConfig) error {
-	// Merge all step timeouts into a single map for JobAddedMsg.
+	// Merge all step timeouts and cmd infos into single maps for JobAddedMsg.
 	var merged map[string]time.Duration
+	var mergedCmds map[string]progress.CmdInfo
 	for _, step := range node.job.Steps {
 		if step.Timeouts != nil {
 			if merged == nil {
 				merged = make(map[string]time.Duration)
 			}
-			for k, v := range step.Timeouts {
-				merged[k] = v
+			maps.Copy(merged, step.Timeouts)
+		}
+		if step.CmdInfos != nil {
+			if mergedCmds == nil {
+				mergedCmds = make(map[string]progress.CmdInfo)
 			}
+			maps.Copy(mergedCmds, step.CmdInfos)
 		}
 	}
 
 	ch := make(chan *client.SolveStatus)
 	displayCh := teeStatus(ctx, ch, cfg.collector, cfg.secretValues, node.job.Name)
 
-	cfg.sender.Send(progress.JobAddedMsg{Job: node.job.Name, StepTimeouts: merged})
+	cfg.sender.Send(progress.JobAddedMsg{Job: node.job.Name, StepTimeouts: merged, CmdInfos: mergedCmds})
 	var wg sync.WaitGroup
 	wg.Go(bridgeStatus(ctx, cfg.sender, node.job.Name, displayCh))
 
@@ -786,7 +802,7 @@ func bridgeStatus(ctx context.Context, sender progress.Sender, name string, disp
 	}
 }
 
-func solveJob(ctx context.Context, name string, def *llb.Definition, cfg runConfig, stepTimeouts map[string]time.Duration) error {
+func solveJob(ctx context.Context, name string, def *llb.Definition, cfg runConfig, stepTimeouts map[string]time.Duration, cmdInfos map[string]progress.CmdInfo) error {
 	if def == nil {
 		return ErrNilDefinition
 	}
@@ -794,7 +810,7 @@ func solveJob(ctx context.Context, name string, def *llb.Definition, cfg runConf
 	ch := make(chan *client.SolveStatus)
 	displayCh := teeStatus(ctx, ch, cfg.collector, cfg.secretValues, name)
 
-	cfg.sender.Send(progress.JobAddedMsg{Job: name, StepTimeouts: stepTimeouts})
+	cfg.sender.Send(progress.JobAddedMsg{Job: name, StepTimeouts: stepTimeouts, CmdInfos: cmdInfos})
 	var wg sync.WaitGroup
 	wg.Go(bridgeStatus(ctx, cfg.sender, name, displayCh))
 
