@@ -1015,6 +1015,59 @@ func TestValidateRetry(t *testing.T) {
 	}
 }
 
+func TestValidateStepRetry(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		retry   *Retry
+		wantErr error
+	}{
+		{name: "nil step retry valid", retry: nil},
+		{
+			name:  "valid step retry",
+			retry: &Retry{Attempts: 2, Delay: time.Second, Backoff: BackoffLinear},
+		},
+		{
+			name:    "step retry zero attempts",
+			retry:   &Retry{Attempts: 0, Backoff: BackoffNone},
+			wantErr: ErrInvalidRetryAttempts,
+		},
+		{
+			name:    "step retry invalid backoff",
+			retry:   &Retry{Attempts: 1, Backoff: "bad"},
+			wantErr: ErrInvalidBackoff,
+		},
+		{
+			name:    "step retry negative delay",
+			retry:   &Retry{Attempts: 1, Delay: -time.Second, Backoff: BackoffNone},
+			wantErr: ErrNegativeDelay,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := Pipeline{
+				Name: "test",
+				Jobs: []Job{
+					{
+						Name:  "build",
+						Image: "alpine:latest",
+						Steps: []Step{{Name: "s", Run: []string{"echo"}, Retry: tt.retry}},
+					},
+				},
+			}
+			_, err := p.Validate()
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestValidateTimeout(t *testing.T) {
 	t.Parallel()
 

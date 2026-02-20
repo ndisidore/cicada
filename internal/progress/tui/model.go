@@ -25,30 +25,32 @@ const (
 	statusError
 	statusTimeout
 	statusRetry
+	statusAllowedFailure
 )
 
-// TUI status icons and spinners use unicode/emoji intentionally — they are
-// rendered in the interactive terminal display, not in logs or code.
-
-//nolint:revive // CS-07 exception: emoji icons are TUI-only visual indicators.
-var _emojiIcons = map[stepStatus]string{
-	statusDone:    "\u2705",
-	statusRunning: "\U0001f528",
-	statusCached:  "\u26a1",
-	statusPending: "\u23f3",
-	statusError:   "\u274c",
-	statusTimeout: "\u23f0",
-	statusRetry:   "\U0001f504",
+// TUI status icons use unicode/emoji for the interactive terminal display.
+//
+//nolint:revive // CS-07 exception (2): TUI-only visual indicators.
+var _richIcons = map[stepStatus]string{
+	statusDone:           "\u2705",
+	statusRunning:        "\U0001f528",
+	statusCached:         "\u26a1",
+	statusPending:        "\u23f3",
+	statusError:          "\U0001f6a8",
+	statusTimeout:        "\u23f0",
+	statusRetry:          "\U0001f504",
+	statusAllowedFailure: "\u26a0\ufe0f",
 }
 
 var _boringIcons = map[stepStatus]string{
-	statusDone:    "[done]  ",
-	statusRunning: "[build] ",
-	statusCached:  "[cached]",
-	statusPending: "[      ]",
-	statusError:   "[FAIL]  ",
-	statusTimeout: "[time!] ",
-	statusRetry:   "[retry] ",
+	statusDone:           "[+] ",
+	statusRunning:        "[~] ",
+	statusCached:         "[=] ",
+	statusPending:        "[ ] ",
+	statusError:          "[!] ",
+	statusTimeout:        "[t] ",
+	statusRetry:          "[r] ",
+	statusAllowedFailure: "[w] ",
 }
 
 var (
@@ -71,19 +73,20 @@ const _maxLogs = 10
 
 // jobState tracks all vertex and log state for a single job.
 type jobState struct {
-	vertices     map[digest.Digest]*stepState
-	order        []digest.Digest
-	logs         []string
-	done         bool
-	skipped      bool                     // true if job was skipped by a when condition
-	skippedSteps []string                 // step names skipped by static when conditions
-	started      *time.Time               // earliest vertex start
-	ended        *time.Time               // latest vertex completion
-	retryAttempt int                      // current retry attempt (0 = no retry)
-	maxAttempts  int                      // total max attempts
-	timedOut     bool                     // whether the job timed out
-	timeout      time.Duration            // the configured timeout
-	stepTimeouts map[string]time.Duration // vertex name -> configured step timeout
+	vertices          map[digest.Digest]*stepState
+	order             []digest.Digest
+	logs              []string
+	done              bool
+	skipped           bool                     // true if job was skipped by a when condition
+	skippedSteps      []string                 // step names skipped by static when conditions
+	started           *time.Time               // earliest vertex start
+	ended             *time.Time               // latest vertex completion
+	retryAttempt      int                      // current retry attempt (0 = no retry)
+	maxAttempts       int                      // total max attempts
+	timedOut          bool                     // whether the job timed out
+	timeout           time.Duration            // the configured timeout
+	stepTimeouts      map[string]time.Duration // vertex name -> configured step timeout
+	allowedFailureSet map[string]struct{}      // step name prefixes whose failures are allowed
 }
 
 // jobDuration returns the wall-clock duration for a completed job. For
@@ -123,7 +126,7 @@ func (js *jobState) applyVertex(v *client.Vertex) {
 		js.order = append(js.order, v.Digest)
 	}
 
-	if st.status == statusDone || st.status == statusCached || st.status == statusError || st.status == statusTimeout {
+	if st.status == statusDone || st.status == statusCached || st.status == statusError || st.status == statusTimeout || st.status == statusAllowedFailure {
 		return
 	}
 
@@ -141,6 +144,9 @@ func (js *jobState) applyVertex(v *client.Vertex) {
 		} else {
 			st.status = statusError
 		}
+		if js.isAllowedFailure(st.name) {
+			st.status = statusAllowedFailure
+		}
 	case v.Cached:
 		st.status = statusCached
 	case v.Completed != nil:
@@ -154,6 +160,25 @@ func (js *jobState) applyVertex(v *client.Vertex) {
 	}
 }
 
+// isAllowedFailure reports whether the vertex name matches any allowed-failure
+// step prefix, enabling order-independent promotion regardless of message arrival.
+func (js *jobState) isAllowedFailure(vertexName string) bool {
+	for prefix := range js.allowedFailureSet {
+		if strings.HasPrefix(vertexName, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// addLog appends a single line to the job's log buffer and enforces _maxLogs.
+func (js *jobState) addLog(line string) {
+	js.logs = append(js.logs, line)
+	if len(js.logs) > _maxLogs {
+		js.logs = append([]string(nil), js.logs[len(js.logs)-_maxLogs:]...)
+	}
+}
+
 func (js *jobState) appendLogs(logs []*client.VertexLog) {
 	for _, l := range logs {
 		if len(l.Data) == 0 {
@@ -163,10 +188,7 @@ func (js *jobState) appendLogs(logs []*client.VertexLog) {
 		if msg == "" {
 			continue
 		}
-		js.logs = append(js.logs, msg)
-	}
-	if len(js.logs) > _maxLogs {
-		js.logs = append([]string(nil), js.logs[len(js.logs)-_maxLogs:]...)
+		js.addLog(msg)
 	}
 }
 
@@ -200,7 +222,7 @@ func (*multiModel) Init() tea.Cmd {
 
 // Update implements tea.Model.
 //
-//revive:disable-next-line:cyclomatic,cognitive-complexity Update is a flat message dispatch; splitting it hurts readability.
+//revive:disable-next-line:cyclomatic,cognitive-complexity,function-length Update is a flat message dispatch; splitting it hurts readability.
 func (m *multiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -232,6 +254,24 @@ func (m *multiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		js := m.getOrCreateJob(msg.Job)
 		js.retryAttempt = msg.Attempt
 		js.maxAttempts = msg.MaxAttempts
+	case progress.StepRetryMsg:
+		if js, ok := m.jobs[msg.Job]; ok {
+			js.addLog(fmt.Sprintf("step %q: retrying (attempt %d/%d)", msg.Step, msg.Attempt, msg.MaxAttempts))
+		}
+	case progress.StepAllowedFailureMsg:
+		if js, ok := m.jobs[msg.Job]; ok {
+			prefix := msg.Job + "/" + msg.Step + "/"
+			if js.allowedFailureSet == nil {
+				js.allowedFailureSet = make(map[string]struct{})
+			}
+			js.allowedFailureSet[prefix] = struct{}{}
+			// Retrofit any vertices already in error/timeout state.
+			for _, st := range js.vertices {
+				if (st.status == statusError || st.status == statusTimeout) && strings.HasPrefix(st.name, prefix) {
+					st.status = statusAllowedFailure
+				}
+			}
+		}
 	case progress.JobTimeoutMsg:
 		js := m.getOrCreateJob(msg.Job)
 		js.timedOut = true
@@ -272,15 +312,17 @@ func (m *multiModel) getOrCreateJob(name string) *jobState {
 }
 
 var (
-	_headerStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")) // bright white
-	_logStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))             // dim
-	_durationStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))             // cyan
-	_stepDoneStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))             // green
-	_stepErrorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))             // red
-	_stepRunningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))             // yellow
-	_stepCachedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))             // magenta
-	_stepTimeoutStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("208"))           // orange
-	_skipStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("178"))           // gold
+	_headerStyle          = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")) // bright white
+	_logStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))             // dim
+	_durationStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))             // cyan
+	_stepDoneStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))             // green
+	_stepErrorStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))             // red
+	_stepRunningStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))             // blue
+	_stepCachedStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))             // magenta
+	_stepTimeoutStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("208"))           // orange
+	_stepRetryStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("178"))           // gold
+	_stepAllowedFailStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("208"))           // orange
+	_skipStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("178"))           // gold
 )
 
 func statusStyle(s stepStatus) lipgloss.Style {
@@ -295,6 +337,10 @@ func statusStyle(s stepStatus) lipgloss.Style {
 		return _stepRunningStyle
 	case statusCached:
 		return _stepCachedStyle
+	case statusRetry:
+		return _stepRetryStyle
+	case statusAllowedFailure:
+		return _stepAllowedFailStyle
 	default:
 		return lipgloss.NewStyle()
 	}
@@ -304,7 +350,7 @@ func statusStyle(s stepStatus) lipgloss.Style {
 func (m *multiModel) View() string {
 	var b strings.Builder
 
-	icons := _emojiIcons
+	icons := _richIcons
 	spinnerFrames := _spinnerFrames[:]
 	if m.boring {
 		icons = _boringIcons
@@ -344,7 +390,7 @@ func (js *jobState) renderTo(b *strings.Builder, name string, rc renderCtx) {
 	resolvedCount := 0
 	for _, d := range js.order {
 		switch js.vertices[d].status {
-		case statusDone, statusCached, statusError, statusTimeout:
+		case statusDone, statusCached, statusError, statusTimeout, statusAllowedFailure:
 			resolvedCount++
 		default:
 		}

@@ -150,6 +150,30 @@ func (p *Display) consume() {
 			attrs = append(attrs, slog.String("event", "job.retry"))
 			log.LogAttrs(p.ctx, slog.LevelWarn, "retrying job", attrs...)
 
+		case progress.StepRetryMsg:
+			attrs := []slog.Attr{
+				slog.String("job", msg.Job),
+				slog.String("step", msg.Step),
+				slog.Int("attempt", msg.Attempt),
+				slog.Int("max_attempts", msg.MaxAttempts),
+			}
+			if msg.Err != nil {
+				attrs = append(attrs, slog.String("error", msg.Err.Error()))
+			}
+			attrs = append(attrs, slog.String("event", "step.retry"))
+			log.LogAttrs(p.ctx, slog.LevelWarn, "retrying step", attrs...)
+
+		case progress.StepAllowedFailureMsg:
+			attrs := []slog.Attr{
+				slog.String("job", msg.Job),
+				slog.String("step", msg.Step),
+			}
+			if msg.Err != nil {
+				attrs = append(attrs, slog.String("error", msg.Err.Error()))
+			}
+			attrs = append(attrs, slog.String("event", "step.allowed_failure"))
+			log.LogAttrs(p.ctx, slog.LevelWarn, "step failed (allowed)", attrs...)
+
 		case progress.JobTimeoutMsg:
 			log.LogAttrs(p.ctx, slog.LevelWarn, "job timed out",
 				slog.String("job", msg.Job),

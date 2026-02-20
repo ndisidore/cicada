@@ -1,0 +1,24 @@
+// Demonstrates step-level retry and allow-failure.
+//
+// Job "test" has a flaky step that always fails but is configured with
+// step-level retry (2 retries for 3 total attempts, 1s delay) and
+// allow-failure. After exhausting retries the step is marked as a
+// warning instead of an error,
+// and the job continues. The subsequent "must-pass" step runs on the
+// filesystem state from before "flaky" and succeeds, so the overall job
+// passes.
+
+job "test" {
+    image "alpine:3.19"
+    step "flaky" {
+        run "sh -c 'exit 1'"
+        retry {
+            attempts 2
+            delay "1s"
+        }
+        allow-failure
+    }
+    step "must-pass" {
+        run "echo success"
+    }
+}

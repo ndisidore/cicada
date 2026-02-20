@@ -61,7 +61,7 @@ internal/runner  # BuildKit runner (internal only)
 - **CS-04**: Follow [Effective Go](https://go.dev/doc/effective_go) and Go idioms.
 - **CS-05**: Functions with >5 parameters **MUST** use an input struct.
 - **CS-06**: Underscore prefix for unexported package-level globals (e.g. `_defaultAddr`).
-- **CS-07**: **NEVER** use emoji, or unicode that emulates emoji (e.g. check marks, X marks). The only exception is when writing tests and testing the impact of multibyte characters.
+- **CS-07**: **NEVER** use emoji, or unicode that emulates emoji (e.g. check marks, X marks). Exceptions: (1) tests verifying multibyte character handling; (2) interactive TUI display elements (icons, spinners) rendered only in terminal output, with an `//nolint:revive` citing this exception.
 - **CS-08 (SHOULD)**: Prefer generics to eliminate duplicated logic across types; avoid when concrete types or interfaces are clearer.
 
 ## Logging & Observability (OBS)

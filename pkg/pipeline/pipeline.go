@@ -90,7 +90,7 @@ const (
 	BackoffExponential BackoffStrategy = "exponential"
 )
 
-// Retry configures job-level retry behavior.
+// Retry configures retry behavior for jobs and steps.
 type Retry struct {
 	Attempts int             // max number of retries (not counting first attempt)
 	Delay    time.Duration   // base delay between retries
@@ -265,19 +265,21 @@ type Job struct {
 // Step represents a single execution unit within a job.
 // Steps within a job are sequential RUN layers on the same container state.
 type Step struct {
-	Name      string
-	Run       []string
-	Env       []EnvVar          // step-scoped env vars (additive to job)
-	Workdir   string            // set workdir from this step onward (like Docker WORKDIR)
-	Mounts    []Mount           // step-specific bind mounts (additive to job)
-	Caches    []Cache           // step-specific cache volumes (additive to job)
-	Secrets   []SecretRef       // step-scoped secret references (additive to job)
-	Exports   []Export          // declares this step produces files for export
-	Artifacts []Artifact        // files imported from dependency jobs at this point
-	When      *conditional.When // conditional execution; nil = always run
-	NoCache   bool              // disable caching for this step
-	Timeout   time.Duration     // step-level timeout; 0 = no timeout
-	Shell     []string          // custom shell args; nil = inherit from job
+	Name         string
+	Run          []string
+	Env          []EnvVar          // step-scoped env vars (additive to job)
+	Workdir      string            // set workdir from this step onward (like Docker WORKDIR)
+	Mounts       []Mount           // step-specific bind mounts (additive to job)
+	Caches       []Cache           // step-specific cache volumes (additive to job)
+	Secrets      []SecretRef       // step-scoped secret references (additive to job)
+	Exports      []Export          // declares this step produces files for export
+	Artifacts    []Artifact        // files imported from dependency jobs at this point
+	When         *conditional.When // conditional execution; nil = always run
+	NoCache      bool              // disable caching for this step
+	Timeout      time.Duration     // step-level timeout; 0 = no timeout
+	Shell        []string          // custom shell args; nil = inherit from job
+	Retry        *Retry            // step-level retry config; nil = no retry
+	AllowFailure bool              // if true, step failure does not fail the job
 }
 
 // Validate checks that the pipeline is well-formed and returns job indices
@@ -437,6 +439,9 @@ func validateStep(jobName string, idx int, s *Step, seen map[string]struct{}) er
 		return err
 	}
 	if err := validateEnvVars(stepScope, s.Env); err != nil {
+		return err
+	}
+	if err := validateRetry(stepScope, s.Retry); err != nil {
 		return err
 	}
 	return validateExports(stepScope, s.Exports)

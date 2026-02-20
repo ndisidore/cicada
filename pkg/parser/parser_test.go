@@ -749,6 +749,71 @@ func TestParse(t *testing.T) {
 			wantErr: ErrExtraArgs,
 		},
 		{
+			name: "bare step with allow-failure flag",
+			input: `step "test" {
+				image "golang:1.23"
+				run "go test ./..."
+				allow-failure
+			}`,
+			want: pipeline.Pipeline{
+				Jobs: []pipeline.Job{
+					{
+						Name:  "test",
+						Image: "golang:1.23",
+						Steps: []pipeline.Step{{
+							Name:         "test",
+							Run:          []string{"go test ./..."},
+							AllowFailure: true,
+						}},
+					},
+				},
+				TopoOrder: []int{0},
+			},
+		},
+		{
+			name: "job step with allow-failure flag",
+			input: `job "build" {
+				image "alpine:latest"
+				step "lint" {
+					run "echo lint"
+					allow-failure
+				}
+			}`,
+			want: pipeline.Pipeline{
+				Jobs: []pipeline.Job{
+					{
+						Name:  "build",
+						Image: "alpine:latest",
+						Steps: []pipeline.Step{{
+							Name:         "lint",
+							Run:          []string{"echo lint"},
+							AllowFailure: true,
+						}},
+					},
+				},
+				TopoOrder: []int{0},
+			},
+		},
+		{
+			name: "duplicate allow-failure rejected",
+			input: `step "test" {
+				image "alpine:latest"
+				run "echo hi"
+				allow-failure
+				allow-failure
+			}`,
+			wantErr: ErrDuplicateField,
+		},
+		{
+			name: "allow-failure with arguments rejected",
+			input: `step "test" {
+				image "alpine:latest"
+				run "echo hi"
+				allow-failure "true"
+			}`,
+			wantErr: ErrExtraArgs,
+		},
+		{
 			name: "defaults with arguments rejected",
 			input: `defaults "extra" {
 				image "alpine:latest"
@@ -1767,12 +1832,15 @@ func TestParseRetryTimeoutShell(t *testing.T) {
 					{
 						Name:  "flaky",
 						Image: "alpine:latest",
-						Retry: &pipeline.Retry{
-							Attempts: 3,
-							Delay:    5 * time.Second,
-							Backoff:  pipeline.BackoffExponential,
-						},
-						Steps: []pipeline.Step{{Name: "flaky", Run: []string{"echo test"}}},
+						Steps: []pipeline.Step{{
+							Name: "flaky",
+							Run:  []string{"echo test"},
+							Retry: &pipeline.Retry{
+								Attempts: 3,
+								Delay:    5 * time.Second,
+								Backoff:  pipeline.BackoffExponential,
+							},
+						}},
 					},
 				},
 				TopoOrder: []int{0},
@@ -1791,11 +1859,14 @@ func TestParseRetryTimeoutShell(t *testing.T) {
 					{
 						Name:  "flaky",
 						Image: "alpine:latest",
-						Retry: &pipeline.Retry{
-							Attempts: 1,
-							Backoff:  pipeline.BackoffNone,
-						},
-						Steps: []pipeline.Step{{Name: "flaky", Run: []string{"echo test"}}},
+						Steps: []pipeline.Step{{
+							Name: "flaky",
+							Run:  []string{"echo test"},
+							Retry: &pipeline.Retry{
+								Attempts: 1,
+								Backoff:  pipeline.BackoffNone,
+							},
+						}},
 					},
 				},
 				TopoOrder: []int{0},
@@ -2086,6 +2157,85 @@ func TestParseRetryTimeoutShell(t *testing.T) {
 					backoff "exponential"
 				}
 				run "echo hi"
+			}`,
+			wantErr: ErrDuplicateField,
+		},
+		{
+			name: "step-level retry config",
+			input: `job "build" {
+				image "alpine:latest"
+				step "flaky" {
+					run "echo flaky"
+					retry {
+						attempts 3
+						delay "2s"
+						backoff "linear"
+					}
+				}
+			}`,
+			want: pipeline.Pipeline{
+				Jobs: []pipeline.Job{
+					{
+						Name:  "build",
+						Image: "alpine:latest",
+						Steps: []pipeline.Step{{
+							Name: "flaky",
+							Run:  []string{"echo flaky"},
+							Retry: &pipeline.Retry{
+								Attempts: 3,
+								Delay:    2 * time.Second,
+								Backoff:  pipeline.BackoffLinear,
+							},
+						}},
+					},
+				},
+				TopoOrder: []int{0},
+			},
+		},
+		{
+			name: "step-level retry with allow-failure",
+			input: `job "build" {
+				image "alpine:latest"
+				step "optional" {
+					run "echo optional"
+					retry {
+						attempts 2
+					}
+					allow-failure
+				}
+			}`,
+			want: pipeline.Pipeline{
+				Jobs: []pipeline.Job{
+					{
+						Name:  "build",
+						Image: "alpine:latest",
+						Steps: []pipeline.Step{{
+							Name: "optional",
+							Run:  []string{"echo optional"},
+							Retry: &pipeline.Retry{
+								Attempts: 2,
+								Backoff:  pipeline.BackoffNone,
+							},
+							AllowFailure: true,
+						}},
+					},
+				},
+				TopoOrder: []int{0},
+			},
+		},
+		{
+			name: "duplicate step-level retry rejected",
+			input: `job "build" {
+				image "alpine:latest"
+				step "flaky" {
+					run "echo hi"
+					retry {
+						attempts 1
+					}
+					retry {
+						attempts 2
+					}
+				}
 			}`,
 			wantErr: ErrDuplicateField,
 		},

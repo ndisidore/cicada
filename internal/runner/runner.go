@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb"
@@ -123,6 +124,19 @@ type Job struct {
 	Timeout      time.Duration            // job-level timeout; 0 = no timeout
 	Retry        *pipeline.Retry          // job-level retry config; nil = no retry
 	StepTimeouts map[string]time.Duration // vertex name -> configured timeout; nil = no step timeouts
+	Steps        []StepExec               // per-step execution; nil = monolithic solve
+	BaseState    llb.State                // pre-step LLB state; set when Steps is non-nil
+}
+
+// StepExec describes a single step for gateway-based step-controlled execution.
+type StepExec struct {
+	Name         string
+	Retry        *pipeline.Retry
+	AllowFailure bool
+	Timeouts     map[string]time.Duration
+	// Build produces the LLB state for this step given a base state and retry attempt.
+	// retryAttempt is 0 for the first try; >0 triggers cache busting.
+	Build func(base llb.State, retryAttempt int) (llb.State, error)
 }
 
 // Export pairs an LLB definition containing exported files with the
@@ -467,7 +481,8 @@ func runNode(ctx context.Context, node *dagNode, cfg runConfig) error {
 	}
 
 	// Extract outputs for downstream deferred conditions.
-	if node.job.OutputDef != nil {
+	// Step-controlled jobs extract outputs inside the gateway BuildFunc.
+	if node.outputs == nil && node.job.OutputDef != nil {
 		node.outputs, err = extractOutputs(ctx, node.job.OutputDef, cfg)
 		if err != nil {
 			node.err = err
@@ -483,15 +498,23 @@ func runNode(ctx context.Context, node *dagNode, cfg runConfig) error {
 //
 //revive:disable-next-line:cognitive-complexity retryJob is a linear retry loop; splitting it hurts readability.
 func retryJob(ctx context.Context, node *dagNode, cfg runConfig) error {
+	// Dispatch to step-controlled or monolithic solve.
+	solve := func() error {
+		if node.job.Steps != nil {
+			return solveJobSteps(ctx, node, cfg)
+		}
+		return solveJob(ctx, node.job.Name, node.job.Definition, cfg, node.job.StepTimeouts)
+	}
+
 	r := node.job.Retry
 	if r == nil {
-		return solveJob(ctx, node.job.Name, node.job.Definition, cfg, node.job.StepTimeouts)
+		return solve()
 	}
 
 	maxAttempts := 1 + r.Attempts
 	var lastErr error
 	for attempt := range maxAttempts {
-		lastErr = solveJob(ctx, node.job.Name, node.job.Definition, cfg, node.job.StepTimeouts)
+		lastErr = solve()
 		if lastErr == nil {
 			return nil
 		}
@@ -529,6 +552,179 @@ func retryJob(ctx context.Context, node *dagNode, cfg runConfig) error {
 		}
 	}
 	return lastErr
+}
+
+// solveJobSteps uses the gateway API to execute a job's steps individually,
+// enabling per-step retry and allow-failure.
+func solveJobSteps(ctx context.Context, node *dagNode, cfg runConfig) error {
+	// Merge all step timeouts into a single map for JobAddedMsg.
+	var merged map[string]time.Duration
+	for _, step := range node.job.Steps {
+		if step.Timeouts != nil {
+			if merged == nil {
+				merged = make(map[string]time.Duration)
+			}
+			for k, v := range step.Timeouts {
+				merged[k] = v
+			}
+		}
+	}
+
+	ch := make(chan *client.SolveStatus)
+	displayCh := teeStatus(ctx, ch, cfg.collector, cfg.secretValues, node.job.Name)
+
+	cfg.sender.Send(progress.JobAddedMsg{Job: node.job.Name, StepTimeouts: merged})
+	var wg sync.WaitGroup
+	wg.Go(bridgeStatus(ctx, cfg.sender, node.job.Name, displayCh))
+
+	stepOutputs := make(map[string]string)
+	_, err := cfg.solver.Build(ctx, client.SolveOpt{
+		LocalMounts:  cfg.localMounts,
+		CacheExports: cfg.cacheExports,
+		CacheImports: cfg.cacheImports,
+		Session:      cfg.session,
+	}, "", stepControlBuildFunc(node, cfg, &stepOutputs), ch)
+
+	wg.Wait()
+
+	if err != nil {
+		return fmt.Errorf("solving job steps: %w", err)
+	}
+	// Store outputs extracted inside the gateway for deferred conditions.
+	node.outputs = stepOutputs
+	return nil
+}
+
+// stepControlBuildFunc returns a gateway.BuildFunc that executes steps individually
+// with per-step retry and allow-failure support.
+func stepControlBuildFunc(node *dagNode, cfg runConfig, outputs *map[string]string) gateway.BuildFunc {
+	return func(ctx context.Context, c gateway.Client) (*gateway.Result, error) {
+		currentState := node.job.BaseState
+		var lastRef gateway.Reference
+
+		for _, step := range node.job.Steps {
+			stepState, ref, err := solveStep(ctx, solveStepInput{
+				client: c, cfg: cfg,
+				jobName: node.job.Name, step: step, base: currentState,
+			})
+			if err != nil {
+				if step.AllowFailure {
+					cfg.sender.Send(progress.StepAllowedFailureMsg{
+						Job: node.job.Name, Step: step.Name, Err: err,
+					})
+					// Leave currentState unchanged: a failed AllowFailure
+					// step may have tainted the filesystem, so subsequent
+					// steps must build from the last known-good state.
+					continue
+				}
+				return nil, err
+			}
+			currentState = stepState
+			lastRef = ref
+		}
+
+		// Extract /cicada/output from the final state for deferred conditions.
+		// The monolithic OutputDef can't be used because allowed-failure steps
+		// may have tainted the chain. lastRef is nil when every step failed
+		// (even if allowed); callers handle a nil/empty outputs map.
+		if lastRef != nil {
+			data, err := lastRef.ReadFile(ctx, gateway.ReadRequest{Filename: "cicada/output"})
+			switch {
+			case err == nil:
+				*outputs = parseOutputLines(string(data))
+			case errdefs.IsNotFound(err):
+				// No output file; leave outputs empty.
+			default:
+				slogctx.FromContext(ctx).LogAttrs(ctx, slog.LevelWarn, "reading step output file",
+					slog.String("job", node.job.Name),
+					slog.String("file", "cicada/output"),
+					slog.String("error", err.Error()))
+			}
+		}
+
+		res := gateway.NewResult()
+		if lastRef != nil {
+			res.SetRef(lastRef)
+		}
+		return res, nil
+	}
+}
+
+// solveStepInput bundles parameters for solveStep (CS-05).
+type solveStepInput struct {
+	client  gateway.Client
+	cfg     runConfig
+	jobName string
+	step    StepExec
+	base    llb.State
+}
+
+// solveStep executes a single step with optional retry logic via the gateway client.
+//
+//revive:disable-next-line:cognitive-complexity solveStep is a linear retry loop; splitting it hurts readability.
+func solveStep(ctx context.Context, in solveStepInput) (llb.State, gateway.Reference, error) {
+	maxAttempts := 1
+	if in.step.Retry != nil {
+		maxAttempts = 1 + in.step.Retry.Attempts
+	}
+
+	var lastErr error
+	for attempt := range maxAttempts {
+		stepState, err := in.step.Build(in.base, attempt)
+		if err != nil {
+			return llb.State{}, nil, fmt.Errorf("building step %q: %w", in.step.Name, err)
+		}
+
+		def, err := stepState.Marshal(ctx)
+		if err != nil {
+			return llb.State{}, nil, fmt.Errorf("marshaling step %q: %w", in.step.Name, err)
+		}
+
+		result, err := in.client.Solve(ctx, gateway.SolveRequest{
+			Definition: def.ToPB(),
+			Evaluate:   true,
+		})
+		if err == nil {
+			ref, refErr := result.SingleRef()
+			if refErr != nil {
+				return llb.State{}, nil, fmt.Errorf("step %q: getting ref: %w", in.step.Name, refErr)
+			}
+			return stepState, ref, nil
+		}
+
+		lastErr = fmt.Errorf("solving step %q: %w", in.step.Name, err)
+		if attempt == maxAttempts-1 {
+			break
+		}
+
+		if ctx.Err() != nil {
+			if cause := context.Cause(ctx); cause != nil {
+				return llb.State{}, nil, cause
+			}
+			return llb.State{}, nil, ctx.Err()
+		}
+
+		in.cfg.sender.Send(progress.StepRetryMsg{
+			Job: in.jobName, Step: in.step.Name,
+			Attempt: attempt + 2, MaxAttempts: maxAttempts,
+			Err: lastErr,
+		})
+
+		delay := retryDelay(in.step.Retry, attempt)
+		if delay > 0 {
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				if cause := context.Cause(ctx); cause != nil {
+					return llb.State{}, nil, cause
+				}
+				return llb.State{}, nil, ctx.Err()
+			}
+		}
+	}
+	return llb.State{}, nil, lastErr
 }
 
 // _maxDelay caps retry delays to prevent overflow.

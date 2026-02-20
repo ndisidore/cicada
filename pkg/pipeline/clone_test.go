@@ -8,15 +8,17 @@ import (
 
 func testStep() Step {
 	return Step{
-		Name:      "build",
-		Run:       []string{"go build", "go test"},
-		Workdir:   "/app",
-		NoCache:   true,
-		Env:       []EnvVar{{Key: "GO", Value: "1.22"}},
-		Mounts:    []Mount{{Source: "/src", Target: "/dst"}},
-		Caches:    []Cache{{ID: "go-mod", Target: "/go/pkg"}},
-		Exports:   []Export{{Path: "/out", Local: "./out"}},
-		Artifacts: []Artifact{{From: "dep", Source: "/bin", Target: "/app/bin"}},
+		Name:         "build",
+		Run:          []string{"go build", "go test"},
+		Workdir:      "/app",
+		NoCache:      true,
+		AllowFailure: true,
+		Env:          []EnvVar{{Key: "GO", Value: "1.22"}},
+		Mounts:       []Mount{{Source: "/src", Target: "/dst"}},
+		Caches:       []Cache{{ID: "go-mod", Target: "/go/pkg"}},
+		Exports:      []Export{{Path: "/out", Local: "./out"}},
+		Artifacts:    []Artifact{{From: "dep", Source: "/bin", Target: "/app/bin"}},
+		Retry:        &Retry{Attempts: 3, Backoff: BackoffExponential},
 	}
 }
 
@@ -138,6 +140,14 @@ func TestStepClone(t *testing.T) {
 			check: func(t *testing.T, orig Step) {
 				t.Helper()
 				assert.Equal(t, "dep", orig.Artifacts[0].From)
+			},
+		},
+		{
+			name:   "Retry independent",
+			mutate: func(s *Step) { s.Retry.Attempts = 99 },
+			check: func(t *testing.T, orig Step) {
+				t.Helper()
+				assert.Equal(t, 3, orig.Retry.Attempts)
 			},
 		},
 	}

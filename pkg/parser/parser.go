@@ -518,6 +518,20 @@ func applyJobStepField(s *pipeline.Step, node *document.Node, filename, jobName 
 			return fmt.Errorf("%s: %s: %w: %q", filename, scope, ErrDuplicateField, string(nt))
 		}
 		s.NoCache = true
+	case NodeTypeAllowFailure:
+		if len(node.Arguments) > 0 {
+			return fmt.Errorf("%s: %s: allow-failure takes no arguments: %w", filename, scope, ErrExtraArgs)
+		}
+		if s.AllowFailure {
+			return fmt.Errorf("%s: %s: %w: %q", filename, scope, ErrDuplicateField, string(nt))
+		}
+		s.AllowFailure = true
+	case NodeTypeRetry:
+		r, err := parseRetryNode(node, filename, scope)
+		if err != nil {
+			return err
+		}
+		return setOnce(&s.Retry, r, filename, scope, string(nt))
 	default:
 		return fmt.Errorf(
 			"%s: %s: %w: %q", filename, scope, ErrUnknownNode, string(nt),
@@ -555,6 +569,25 @@ func parseBareStep(node *document.Node, filename string) (pipeline.Job, error) {
 				return pipeline.Job{}, err
 			}
 			s.Run = append(s.Run, v)
+		case NodeTypeAllowFailure:
+			if len(child.Arguments) > 0 {
+				return pipeline.Job{}, fmt.Errorf(
+					"%s: step %q: allow-failure takes no arguments: %w", filename, name, ErrExtraArgs)
+			}
+			if s.AllowFailure {
+				return pipeline.Job{}, fmt.Errorf(
+					"%s: step %q: %w: %q", filename, name, ErrDuplicateField, string(nt))
+			}
+			s.AllowFailure = true
+		case NodeTypeRetry:
+			scope := fmt.Sprintf("step %q", name)
+			r, err := parseRetryNode(child, filename, scope)
+			if err != nil {
+				return pipeline.Job{}, err
+			}
+			if err := setOnce(&s.Retry, r, filename, scope, string(nt)); err != nil {
+				return pipeline.Job{}, err
+			}
 		case NodeTypeStep:
 			return pipeline.Job{}, fmt.Errorf(
 				"%s: step %q: %w: nested %q (use job for multi-step)",

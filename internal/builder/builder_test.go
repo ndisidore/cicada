@@ -551,7 +551,7 @@ func TestBuild(t *testing.T) {
 			},
 		},
 		{
-			name: "preamble prepended to all commands in first step",
+			name: "preamble prepended to all commands in all steps",
 			p: pipeline.Pipeline{
 				Name: "preamble-multi",
 				Jobs: []pipeline.Job{
@@ -590,8 +590,12 @@ func TestBuild(t *testing.T) {
 				assert.Contains(t, secondArgs[2], "for __f in /cicada/deps/*/output")
 				assert.Contains(t, secondArgs[2], "echo second")
 
-				// Second step does NOT get the preamble.
-				assert.Equal(t, []string{"/bin/sh", "-c", "echo third"}, buildMetas[2].GetArgs())
+				// Second step also gets the preamble (each Run is a
+				// separate process, so dep env vars must be re-sourced).
+				thirdArgs := buildMetas[2].GetArgs()
+				require.GreaterOrEqual(t, len(thirdArgs), 3, "expected at least 3 args in third build ExecOp")
+				assert.Contains(t, thirdArgs[2], "for __f in /cicada/deps/*/output")
+				assert.Contains(t, thirdArgs[2], "echo third")
 			},
 		},
 		{
@@ -1439,4 +1443,145 @@ func TestBuild_defaultShell(t *testing.T) {
 
 	meta := execMeta(t, result.Definitions[0].Def)
 	assert.Equal(t, []string{"/bin/sh", "-c", "echo hi"}, meta.GetArgs())
+}
+
+func TestJobNeedsStepControl(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		job  pipeline.Job
+		want bool
+	}{
+		{
+			name: "no step control",
+			job: pipeline.Job{
+				Steps: []pipeline.Step{{Name: "s", Run: []string{"echo"}}},
+			},
+			want: false,
+		},
+		{
+			name: "step with retry",
+			job: pipeline.Job{
+				Steps: []pipeline.Step{{
+					Name:  "s",
+					Run:   []string{"echo"},
+					Retry: &pipeline.Retry{Attempts: 1, Backoff: pipeline.BackoffNone},
+				}},
+			},
+			want: true,
+		},
+		{
+			name: "step with allow-failure",
+			job: pipeline.Job{
+				Steps: []pipeline.Step{{
+					Name:         "s",
+					Run:          []string{"echo"},
+					AllowFailure: true,
+				}},
+			},
+			want: true,
+		},
+		{
+			name: "mixed steps only one with control",
+			job: pipeline.Job{
+				Steps: []pipeline.Step{
+					{Name: "a", Run: []string{"echo a"}},
+					{Name: "b", Run: []string{"echo b"}, AllowFailure: true},
+				},
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, jobNeedsStepControl(&tt.job))
+		})
+	}
+}
+
+func TestBuild_stepDefs(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name            string
+		p               pipeline.Pipeline
+		jobName         string
+		expectStepDefs  bool
+		expectDefsCount int
+	}{
+		{
+			name: "step control produces defs",
+			p: pipeline.Pipeline{
+				Name: "step-defs",
+				Jobs: []pipeline.Job{
+					{
+						Name:  "test",
+						Image: "alpine:latest",
+						Steps: []pipeline.Step{
+							{Name: "setup", Run: []string{"echo setup"}},
+							{
+								Name:         "flaky",
+								Run:          []string{"echo flaky"},
+								Retry:        &pipeline.Retry{Attempts: 2, Backoff: pipeline.BackoffNone},
+								AllowFailure: true,
+							},
+							{Name: "final", Run: []string{"echo final"}},
+						},
+					},
+				},
+			},
+			jobName:         "test",
+			expectStepDefs:  true,
+			expectDefsCount: 3,
+		},
+		{
+			name: "no defs without step control",
+			p: pipeline.Pipeline{
+				Name: "no-step-defs",
+				Jobs: []pipeline.Job{
+					{
+						Name:  "simple",
+						Image: "alpine:latest",
+						Steps: []pipeline.Step{
+							{Name: "a", Run: []string{"echo a"}},
+							{Name: "b", Run: []string{"echo b"}},
+						},
+					},
+				},
+			},
+			jobName:        "simple",
+			expectStepDefs: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			result, err := Build(t.Context(), tc.p, BuildOpts{})
+			require.NoError(t, err)
+
+			if tc.expectStepDefs {
+				defs, ok := result.StepDefs[tc.jobName]
+				require.True(t, ok, "expected StepDefs for job %q", tc.jobName)
+				require.Len(t, defs, tc.expectDefsCount)
+
+				_, hasBase := result.BaseStates[tc.jobName]
+				require.True(t, hasBase, "expected BaseState for job %q", tc.jobName)
+
+				for i, sd := range defs {
+					st, err := sd.Build(result.BaseStates[tc.jobName], 0)
+					require.NoError(t, err, "step %d build failed", i)
+					_, err = st.Marshal(t.Context())
+					require.NoError(t, err, "step %d marshal failed", i)
+				}
+			} else {
+				_, ok := result.StepDefs[tc.jobName]
+				assert.False(t, ok, "expected no StepDefs for job %q", tc.jobName)
+			}
+		})
+	}
 }

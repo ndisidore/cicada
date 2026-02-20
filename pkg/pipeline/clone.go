@@ -57,6 +57,10 @@ func (s Step) Clone() Step {
 		s.When = &w
 	}
 	s.Shell = slices.Clone(s.Shell)
+	if s.Retry != nil {
+		r := *s.Retry
+		s.Retry = &r
+	}
 	return s
 }
 
