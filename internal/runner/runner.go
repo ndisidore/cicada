@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/containerd/errdefs/pkg/errgrpc"
 	"github.com/containerd/platforms"
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb"
@@ -514,7 +515,13 @@ func retryJob(ctx context.Context, node *dagNode, cfg runConfig) error {
 		if node.job.Steps != nil {
 			return solveJobSteps(ctx, node, cfg)
 		}
-		return solveJob(ctx, node.job.Name, node.job.Definition, cfg, node.job.StepTimeouts, node.job.CmdInfos)
+		return solveJob(ctx, solveJobInput{
+			name:         node.job.Name,
+			def:          node.job.Definition,
+			cfg:          cfg,
+			stepTimeouts: node.job.StepTimeouts,
+			cmdInfos:     node.job.CmdInfos,
+		})
 	}
 
 	r := node.job.Retry
@@ -639,22 +646,9 @@ func stepControlBuildFunc(node *dagNode, cfg runConfig, outputs *map[string]stri
 			lastRef = ref
 		}
 
-		// Extract /cicada/output from the final state for deferred conditions.
-		// The monolithic OutputDef can't be used because allowed-failure steps
-		// may have tainted the chain. lastRef is nil when every step failed
-		// (even if allowed); callers handle a nil/empty outputs map.
 		if lastRef != nil {
-			data, err := lastRef.ReadFile(ctx, gateway.ReadRequest{Filename: "cicada/output"})
-			switch {
-			case err == nil:
-				*outputs = parseOutputLines(string(data))
-			case errdefs.IsNotFound(err):
-				// No output file; leave outputs empty.
-			default:
-				slogctx.FromContext(ctx).LogAttrs(ctx, slog.LevelWarn, "reading step output file",
-					slog.String("job", node.job.Name),
-					slog.String("file", "cicada/output"),
-					slog.String("error", err.Error()))
+			if extracted := extractRefOutputs(ctx, lastRef, node.job.Name); extracted != nil {
+				*outputs = extracted
 			}
 		}
 
@@ -663,6 +657,29 @@ func stepControlBuildFunc(node *dagNode, cfg runConfig, outputs *map[string]stri
 			res.SetRef(lastRef)
 		}
 		return res, nil
+	}
+}
+
+// extractRefOutputs reads /cicada/output from a gateway reference and parses
+// KEY=VALUE lines. Returns an empty map when the file does not exist.
+// ReadFile returns gRPC status errors, so errgrpc.ToNative converts them
+// before errdefs checks.
+func extractRefOutputs(ctx context.Context, ref gateway.Reference, jobName string) map[string]string {
+	data, err := ref.ReadFile(ctx, gateway.ReadRequest{Filename: "cicada/output"})
+	if err != nil {
+		err = errgrpc.ToNative(err)
+	}
+	switch {
+	case err == nil:
+		return parseOutputLines(string(data))
+	case errdefs.IsNotFound(err):
+		return map[string]string{}
+	default:
+		slogctx.FromContext(ctx).LogAttrs(ctx, slog.LevelWarn, "reading step output file",
+			slog.String("job", jobName),
+			slog.String("file", "cicada/output"),
+			slog.String("error", err.Error()))
+		return nil
 	}
 }
 
@@ -802,23 +819,32 @@ func bridgeStatus(ctx context.Context, sender progress.Sender, name string, disp
 	}
 }
 
-func solveJob(ctx context.Context, name string, def *llb.Definition, cfg runConfig, stepTimeouts map[string]time.Duration, cmdInfos map[string]progress.CmdInfo) error {
-	if def == nil {
+// solveJobInput groups parameters for solveJob (CS-05).
+type solveJobInput struct {
+	name         string
+	def          *llb.Definition
+	cfg          runConfig
+	stepTimeouts map[string]time.Duration
+	cmdInfos     map[string]progress.CmdInfo
+}
+
+func solveJob(ctx context.Context, in solveJobInput) error {
+	if in.def == nil {
 		return ErrNilDefinition
 	}
 
 	ch := make(chan *client.SolveStatus)
-	displayCh := teeStatus(ctx, ch, cfg.collector, cfg.secretValues, name)
+	displayCh := teeStatus(ctx, ch, in.cfg.collector, in.cfg.secretValues, in.name)
 
-	cfg.sender.Send(progress.JobAddedMsg{Job: name, StepTimeouts: stepTimeouts, CmdInfos: cmdInfos})
+	in.cfg.sender.Send(progress.JobAddedMsg{Job: in.name, StepTimeouts: in.stepTimeouts, CmdInfos: in.cmdInfos})
 	var wg sync.WaitGroup
-	wg.Go(bridgeStatus(ctx, cfg.sender, name, displayCh))
+	wg.Go(bridgeStatus(ctx, in.cfg.sender, in.name, displayCh))
 
-	_, err := cfg.solver.Solve(ctx, def, client.SolveOpt{
-		LocalMounts:  cfg.localMounts,
-		CacheExports: cfg.cacheExports,
-		CacheImports: cfg.cacheImports,
-		Session:      cfg.session,
+	_, err := in.cfg.solver.Solve(ctx, in.def, client.SolveOpt{
+		LocalMounts:  in.cfg.localMounts,
+		CacheExports: in.cfg.cacheExports,
+		CacheImports: in.cfg.cacheImports,
+		Session:      in.cfg.session,
 	}, ch)
 
 	wg.Wait()

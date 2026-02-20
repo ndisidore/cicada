@@ -30,7 +30,7 @@ const (
 
 // TUI status icons use unicode/emoji for the interactive terminal display.
 //
-//nolint:revive // CS-07 exception (2): TUI-only visual indicators.
+//codecheck:allow-emojis // CS-07 exception (2): TUI-only visual indicators.
 var _richIcons = map[stepStatus]string{
 	statusDone:           "\u2705",
 	statusRunning:        "\U0001f528",
@@ -262,6 +262,7 @@ func (m *multiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case progress.StepAllowedFailureMsg:
 		if js, ok := m.jobs[msg.Job]; ok {
+			js.addLog(fmt.Sprintf("step %q: failed (allowed)", msg.Step))
 			prefix := msg.Job + "/" + msg.Step + "/"
 			if js.allowedFailureSet == nil {
 				js.allowedFailureSet = make(map[string]struct{})
@@ -323,7 +324,7 @@ var (
 	_stepCachedStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))             // magenta
 	_stepTimeoutStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("208"))           // orange
 	_stepRetryStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("178"))           // gold
-	_stepAllowedFailStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("208"))           // orange
+	_stepAllowedFailStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))            // bright yellow
 	_skipStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("178"))           // gold
 )
 

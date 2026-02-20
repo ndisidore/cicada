@@ -78,7 +78,7 @@ func TestStepClone(t *testing.T) {
 		assert.Equal(t, orig, orig.Clone())
 	})
 
-	t.Run("nil slices stay nil", func(t *testing.T) {
+	t.Run("nil fields stay nil", func(t *testing.T) {
 		t.Parallel()
 		clone := Step{Name: "empty"}.Clone()
 		assert.Nil(t, clone.Run)
@@ -87,6 +87,7 @@ func TestStepClone(t *testing.T) {
 		assert.Nil(t, clone.Caches)
 		assert.Nil(t, clone.Exports)
 		assert.Nil(t, clone.Artifacts)
+		assert.Nil(t, clone.Retry)
 	})
 
 	tests := []struct {

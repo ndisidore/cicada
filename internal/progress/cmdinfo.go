@@ -8,7 +8,7 @@ import "strings"
 // preserving the full command for debug logging.
 type CmdInfo struct {
 	UserCmd string // original user command as written in the pipeline
-	FullCmd string // full shell command including preamble, retry env, timeout wrapping
+	FullCmd string // full shell command including preamble and retry env prefix
 }
 
 // ExitInfo extracts the exit info suffix from a BuildKit process error string.

@@ -366,7 +366,7 @@ func buildJob(
 
 		result, err := buildStepOps(st, step, 0, shared)
 		if err != nil {
-			return jobResult{}, err
+			return jobResult{}, fmt.Errorf("building step %q ops: %w", step.Name, err)
 		}
 		st = result.state
 		if result.timeouts != nil {

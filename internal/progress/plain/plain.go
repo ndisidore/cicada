@@ -253,9 +253,7 @@ func logVertex(in logVertexInput) {
 		} else {
 			exitInfo := progress.ExitInfo(in.v.Error)
 			attrs := append(base, slog.String("event", "vertex.error"), slog.String("error", exitInfo))
-			if ci, ok := in.cmdInfos[in.cleanName]; ok && ci.FullCmd != "" {
-				attrs = append(attrs, slog.String("full_cmd", ci.FullCmd))
-			}
+			attrs = appendDebugCmdAttr(in.ctx, in.log, attrs, in.cmdInfos, in.cleanName)
 			//nolint:sloglint // dynamic msg encodes user-facing formatted output
 			in.log.LogAttrs(in.ctx, slog.LevelError, fmt.Sprintf("[%s] FAIL %s: %s", in.jobName, in.cleanName, exitInfo), attrs...)
 		}
@@ -284,6 +282,19 @@ func logVertex(in logVertexInput) {
 		in.seen[in.v.Digest] = _stateStarted
 	default:
 	}
+}
+
+// appendDebugCmdAttr appends the full_cmd slog attribute when debug logging
+// is enabled and CmdInfo exists for the vertex. The full command is only
+// useful for debugging and may contain internal preamble, so it is gated
+// behind LevelDebug.
+func appendDebugCmdAttr(ctx context.Context, log *slog.Logger, attrs []slog.Attr, cmdInfos map[string]progress.CmdInfo, vertexName string) []slog.Attr {
+	if log.Enabled(ctx, slog.LevelDebug) {
+		if ci, ok := cmdInfos[vertexName]; ok && ci.FullCmd != "" {
+			attrs = append(attrs, slog.String("full_cmd", ci.FullCmd))
+		}
+	}
+	return attrs
 }
 
 // logPendingTimeouts emits timeout warnings for vertices that never
