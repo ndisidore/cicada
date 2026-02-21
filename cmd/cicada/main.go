@@ -22,6 +22,7 @@ import (
 	"github.com/ndisidore/cicada/internal/builder"
 	"github.com/ndisidore/cicada/internal/cache"
 	"github.com/ndisidore/cicada/internal/daemon"
+	"github.com/ndisidore/cicada/internal/filesync"
 	"github.com/ndisidore/cicada/internal/imagestore"
 	"github.com/ndisidore/cicada/internal/progress"
 	"github.com/ndisidore/cicada/internal/progress/plain"
@@ -224,6 +225,10 @@ func main() {
 					&cli.StringSliceFlag{
 						Name:  "with-docker-export",
 						Usage: "load published images into local Docker daemon (job names, or '*' for all)",
+					},
+					&cli.BoolFlag{
+						Name:  "no-sync-cache",
+						Usage: "disable content-hash file sync cache",
 					},
 				),
 				Action: a.runAction,
@@ -590,7 +595,7 @@ func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipe
 		}
 	}
 
-	contextFS, err := fsutil.NewFS(params.cwd)
+	baseFS, err := fsutil.NewFS(params.cwd)
 	if err != nil {
 		return fmt.Errorf("opening context directory %s: %w", params.cwd, err)
 	}
@@ -606,6 +611,20 @@ func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipe
 		return fmt.Errorf("starting display: %w", err)
 	}
 	defer func() { shutdownErr = errors.Join(shutdownErr, display.Shutdown()) }()
+
+	contextFS := baseFS
+	if !cmd.Bool("no-sync-cache") {
+		cachePath, cacheErr := filesync.CachePath(params.cwd)
+		if cacheErr != nil {
+			slogctx.FromContext(ctx).LogAttrs(ctx, slog.LevelDebug,
+				"resolving sync cache dir", slog.String("error", cacheErr.Error()))
+		} else {
+			contextFS = filesync.New(baseFS, filesync.Options{
+				Cache:  filesync.NewHashCache(cachePath),
+				Sender: display,
+			})
+		}
+	}
 
 	for _, name := range params.skippedJobs {
 		display.Send(progress.JobSkippedMsg{Job: name})

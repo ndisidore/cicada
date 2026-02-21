@@ -195,12 +195,13 @@ func (js *jobState) appendLogs(logs []*client.VertexLog) {
 
 // multiModel is the bubbletea model for rendering multi-job pipeline progress.
 type multiModel struct {
-	jobs   map[string]*jobState
-	order  []string
-	width  int
-	boring bool
-	done   bool
-	frame  int // spinner frame counter
+	jobs    map[string]*jobState
+	order   []string
+	width   int
+	boring  bool
+	done    bool
+	frame   int // spinner frame counter
+	syncMsg *progress.SyncMsg
 }
 
 // tickMsg drives the spinner animation (TUI-internal lifecycle).
@@ -285,6 +286,8 @@ func (m *multiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				st.status = statusTimeout
 			}
 		}
+	case progress.SyncMsg:
+		m.syncMsg = &msg
 	case progress.JobDoneMsg:
 		if js, ok := m.jobs[msg.Job]; ok {
 			js.done = true
@@ -358,6 +361,11 @@ func (m *multiModel) View() string {
 	if m.boring {
 		icons = _boringIcons
 		spinnerFrames = _boringSpinnerFrames[:]
+	}
+
+	if m.syncMsg != nil {
+		_, _ = fmt.Fprintf(&b, "%s  files=%d hashed=%d cached=%d\n",
+			_logStyle.Render("sync:"), m.syncMsg.FilesWalked, m.syncMsg.FilesHashed, m.syncMsg.CacheHits)
 	}
 
 	rc := renderCtx{

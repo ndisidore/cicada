@@ -80,6 +80,13 @@ type LogMsg struct {
 	Message string
 }
 
+// SyncMsg reports file-sync statistics after context Walk completes.
+type SyncMsg struct {
+	FilesWalked int64
+	FilesHashed int64
+	CacheHits   int64
+}
+
 func (JobAddedMsg) progressMsg()           {}
 func (JobStatusMsg) progressMsg()          {}
 func (JobDoneMsg) progressMsg()            {}
@@ -91,3 +98,4 @@ func (StepAllowedFailureMsg) progressMsg() {}
 func (JobTimeoutMsg) progressMsg()         {}
 func (ErrorMsg) progressMsg()              {}
 func (LogMsg) progressMsg()                {}
+func (SyncMsg) progressMsg()               {}

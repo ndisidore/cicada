@@ -192,6 +192,14 @@ func (p *Display) consume() {
 			//nolint:sloglint // dynamic msg from LogMsg payload
 			log.LogAttrs(p.ctx, msg.Level, msg.Message, attrs...)
 
+		case progress.SyncMsg:
+			log.LogAttrs(p.ctx, slog.LevelInfo, "context synced",
+				slog.Int64("files", msg.FilesWalked),
+				slog.Int64("hashed", msg.FilesHashed),
+				slog.Int64("cached", msg.CacheHits),
+				slog.String("event", "sync.complete"),
+			)
+
 		case progress.ErrorMsg:
 			humanMsg := "unknown error"
 			if msg.Err != nil {
