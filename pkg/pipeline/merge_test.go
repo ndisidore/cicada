@@ -5,6 +5,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	pm "github.com/ndisidore/cicada/pkg/pipeline/pipelinemodel"
 )
 
 func TestMergeJobs(t *testing.T) {
@@ -12,54 +14,54 @@ func TestMergeJobs(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		groups  []JobGroup
-		want    []Job
+		groups  []pm.JobGroup
+		want    []pm.Job
 		wantErr error
 	}{
 		{
 			name: "no conflicts",
-			groups: []JobGroup{
-				{Jobs: []Job{{Name: "a"}}, Origin: "a.kdl"},
-				{Jobs: []Job{{Name: "b"}}, Origin: "b.kdl"},
+			groups: []pm.JobGroup{
+				{Jobs: []pm.Job{{Name: "a"}}, Origin: "a.kdl"},
+				{Jobs: []pm.Job{{Name: "b"}}, Origin: "b.kdl"},
 			},
-			want: []Job{{Name: "a"}, {Name: "b"}},
+			want: []pm.Job{{Name: "a"}, {Name: "b"}},
 		},
 		{
 			name: "error on duplicate",
-			groups: []JobGroup{
-				{Jobs: []Job{{Name: "a"}}, Origin: "a.kdl"},
-				{Jobs: []Job{{Name: "a"}}, Origin: "b.kdl", OnConflict: ConflictError},
+			groups: []pm.JobGroup{
+				{Jobs: []pm.Job{{Name: "a"}}, Origin: "a.kdl"},
+				{Jobs: []pm.Job{{Name: "a"}}, Origin: "b.kdl", OnConflict: pm.ConflictError},
 			},
-			wantErr: ErrDuplicateJob,
+			wantErr: pm.ErrDuplicateJob,
 		},
 		{
 			name: "skip on duplicate",
-			groups: []JobGroup{
-				{Jobs: []Job{{Name: "a", Image: "first"}}, Origin: "a.kdl"},
-				{Jobs: []Job{{Name: "a", Image: "second"}}, Origin: "b.kdl", OnConflict: ConflictSkip},
+			groups: []pm.JobGroup{
+				{Jobs: []pm.Job{{Name: "a", Image: "first"}}, Origin: "a.kdl"},
+				{Jobs: []pm.Job{{Name: "a", Image: "second"}}, Origin: "b.kdl", OnConflict: pm.ConflictSkip},
 			},
-			want: []Job{{Name: "a", Image: "first"}},
+			want: []pm.Job{{Name: "a", Image: "first"}},
 		},
 		{
 			name: "multiple groups with mixed strategies",
-			groups: []JobGroup{
-				{Jobs: []Job{{Name: "a"}, {Name: "b"}}, Origin: "inline"},
-				{Jobs: []Job{{Name: "c"}, {Name: "a"}}, Origin: "inc.kdl", OnConflict: ConflictSkip},
+			groups: []pm.JobGroup{
+				{Jobs: []pm.Job{{Name: "a"}, {Name: "b"}}, Origin: "inline"},
+				{Jobs: []pm.Job{{Name: "c"}, {Name: "a"}}, Origin: "inc.kdl", OnConflict: pm.ConflictSkip},
 			},
-			want: []Job{{Name: "a"}, {Name: "b"}, {Name: "c"}},
+			want: []pm.Job{{Name: "a"}, {Name: "b"}, {Name: "c"}},
 		},
 		{
 			name:   "empty groups",
-			groups: []JobGroup{},
-			want:   []Job{},
+			groups: []pm.JobGroup{},
+			want:   []pm.Job{},
 		},
 		{
 			name: "ordering preserved across groups",
-			groups: []JobGroup{
-				{Jobs: []Job{{Name: "c"}, {Name: "a"}}, Origin: "first"},
-				{Jobs: []Job{{Name: "b"}, {Name: "d"}}, Origin: "second"},
+			groups: []pm.JobGroup{
+				{Jobs: []pm.Job{{Name: "c"}, {Name: "a"}}, Origin: "first"},
+				{Jobs: []pm.Job{{Name: "b"}, {Name: "d"}}, Origin: "second"},
 			},
-			want: []Job{{Name: "c"}, {Name: "a"}, {Name: "b"}, {Name: "d"}},
+			want: []pm.Job{{Name: "c"}, {Name: "a"}, {Name: "b"}, {Name: "d"}},
 		},
 	}
 
@@ -82,17 +84,17 @@ func TestTerminalJobs(t *testing.T) {
 
 	tests := []struct {
 		name string
-		jobs []Job
+		jobs []pm.Job
 		want []string
 	}{
 		{
 			name: "single job",
-			jobs: []Job{{Name: "a"}},
+			jobs: []pm.Job{{Name: "a"}},
 			want: []string{"a"},
 		},
 		{
 			name: "chain returns last",
-			jobs: []Job{
+			jobs: []pm.Job{
 				{Name: "a"},
 				{Name: "b", DependsOn: []string{"a"}},
 				{Name: "c", DependsOn: []string{"b"}},
@@ -101,7 +103,7 @@ func TestTerminalJobs(t *testing.T) {
 		},
 		{
 			name: "diamond DAG returns single terminal",
-			jobs: []Job{
+			jobs: []pm.Job{
 				{Name: "a"},
 				{Name: "b", DependsOn: []string{"a"}},
 				{Name: "c", DependsOn: []string{"a"}},
@@ -111,7 +113,7 @@ func TestTerminalJobs(t *testing.T) {
 		},
 		{
 			name: "independent jobs are all terminal",
-			jobs: []Job{
+			jobs: []pm.Job{
 				{Name: "a"},
 				{Name: "b"},
 				{Name: "c"},
@@ -120,7 +122,7 @@ func TestTerminalJobs(t *testing.T) {
 		},
 		{
 			name: "multiple terminals in partial DAG",
-			jobs: []Job{
+			jobs: []pm.Job{
 				{Name: "a"},
 				{Name: "b", DependsOn: []string{"a"}},
 				{Name: "c", DependsOn: []string{"a"}},
@@ -143,32 +145,32 @@ func TestExpandAliases(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		jobs    []Job
+		jobs    []pm.Job
 		aliases map[string][]string
-		want    []Job
+		want    []pm.Job
 		wantErr error
 	}{
 		{
 			name: "single alias to single job",
-			jobs: []Job{
+			jobs: []pm.Job{
 				{Name: "lint-step"},
 				{Name: "build", DependsOn: []string{"lint"}},
 			},
 			aliases: map[string][]string{"lint": {"lint-step"}},
-			want: []Job{
+			want: []pm.Job{
 				{Name: "lint-step"},
 				{Name: "build", DependsOn: []string{"lint-step"}},
 			},
 		},
 		{
 			name: "alias to multiple terminal jobs",
-			jobs: []Job{
+			jobs: []pm.Job{
 				{Name: "unit-test"},
 				{Name: "integration-test"},
 				{Name: "build", DependsOn: []string{"tests"}},
 			},
 			aliases: map[string][]string{"tests": {"integration-test", "unit-test"}},
-			want: []Job{
+			want: []pm.Job{
 				{Name: "unit-test"},
 				{Name: "integration-test"},
 				{Name: "build", DependsOn: []string{"integration-test", "unit-test"}},
@@ -176,34 +178,34 @@ func TestExpandAliases(t *testing.T) {
 		},
 		{
 			name: "no aliases passthrough",
-			jobs: []Job{
+			jobs: []pm.Job{
 				{Name: "a"},
 				{Name: "b", DependsOn: []string{"a"}},
 			},
 			aliases: map[string][]string{},
-			want: []Job{
+			want: []pm.Job{
 				{Name: "a"},
 				{Name: "b", DependsOn: []string{"a"}},
 			},
 		},
 		{
 			name: "alias collides with job name",
-			jobs: []Job{
+			jobs: []pm.Job{
 				{Name: "lint"},
 				{Name: "build", DependsOn: []string{"lint"}},
 			},
 			aliases: map[string][]string{"lint": {"lint-step"}},
-			wantErr: ErrAliasCollision,
+			wantErr: pm.ErrAliasCollision,
 		},
 		{
 			name: "mixed alias and direct deps",
-			jobs: []Job{
+			jobs: []pm.Job{
 				{Name: "lint-step"},
 				{Name: "unit-test"},
 				{Name: "build", DependsOn: []string{"lint", "unit-test"}},
 			},
 			aliases: map[string][]string{"lint": {"lint-step"}},
-			want: []Job{
+			want: []pm.Job{
 				{Name: "lint-step"},
 				{Name: "unit-test"},
 				{Name: "build", DependsOn: []string{"lint-step", "unit-test"}},

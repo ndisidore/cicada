@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ndisidore/cicada/pkg/conditional"
+	pm "github.com/ndisidore/cicada/pkg/pipeline/pipelinemodel"
 )
 
 func TestMatrixCombinations(t *testing.T) {
@@ -15,14 +16,14 @@ func TestMatrixCombinations(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		m       Matrix
+		m       pm.Matrix
 		want    []map[string]string
 		wantErr error
 	}{
 		{
 			name: "single dimension",
-			m: Matrix{
-				Dimensions: []Dimension{
+			m: pm.Matrix{
+				Dimensions: []pm.Dimension{
 					{Name: "os", Values: []string{"linux", "darwin"}},
 				},
 			},
@@ -33,8 +34,8 @@ func TestMatrixCombinations(t *testing.T) {
 		},
 		{
 			name: "multi dimension cartesian product",
-			m: Matrix{
-				Dimensions: []Dimension{
+			m: pm.Matrix{
+				Dimensions: []pm.Dimension{
 					{Name: "os", Values: []string{"linux", "darwin"}},
 					{Name: "arch", Values: []string{"amd64", "arm64"}},
 				},
@@ -48,8 +49,8 @@ func TestMatrixCombinations(t *testing.T) {
 		},
 		{
 			name: "three dimensions",
-			m: Matrix{
-				Dimensions: []Dimension{
+			m: pm.Matrix{
+				Dimensions: []pm.Dimension{
 					{Name: "os", Values: []string{"linux"}},
 					{Name: "go", Values: []string{"1.21", "1.22"}},
 					{Name: "db", Values: []string{"pg", "mysql"}},
@@ -64,13 +65,13 @@ func TestMatrixCombinations(t *testing.T) {
 		},
 		{
 			name: "empty matrix",
-			m:    Matrix{},
+			m:    pm.Matrix{},
 			want: []map[string]string{},
 		},
 		{
 			name: "single value dimension",
-			m: Matrix{
-				Dimensions: []Dimension{
+			m: pm.Matrix{
+				Dimensions: []pm.Dimension{
 					{Name: "os", Values: []string{"linux"}},
 				},
 			},
@@ -99,13 +100,13 @@ func TestCollectImages(t *testing.T) {
 
 	tests := []struct {
 		name string
-		p    Pipeline
+		p    pm.Pipeline
 		want []string
 	}{
 		{
 			name: "unique images",
-			p: Pipeline{
-				Jobs: []Job{
+			p: pm.Pipeline{
+				Jobs: []pm.Job{
 					{Image: "alpine:latest"},
 					{Image: "golang:1.23"},
 					{Image: "rust:1.76"},
@@ -115,8 +116,8 @@ func TestCollectImages(t *testing.T) {
 		},
 		{
 			name: "deduplicates",
-			p: Pipeline{
-				Jobs: []Job{
+			p: pm.Pipeline{
+				Jobs: []pm.Job{
 					{Image: "alpine:latest"},
 					{Image: "alpine:latest"},
 					{Image: "golang:1.23"},
@@ -126,13 +127,13 @@ func TestCollectImages(t *testing.T) {
 		},
 		{
 			name: "empty pipeline",
-			p:    Pipeline{},
+			p:    pm.Pipeline{},
 			want: nil,
 		},
 		{
 			name: "single job",
-			p: Pipeline{
-				Jobs: []Job{
+			p: pm.Pipeline{
+				Jobs: []pm.Job{
 					{Image: "ubuntu:22.04"},
 				},
 			},
@@ -140,8 +141,8 @@ func TestCollectImages(t *testing.T) {
 		},
 		{
 			name: "skips empty image refs",
-			p: Pipeline{
-				Jobs: []Job{
+			p: pm.Pipeline{
+				Jobs: []pm.Job{
 					{Image: "alpine:latest"},
 					{Image: ""},
 					{Image: "golang:1.23"},
@@ -165,30 +166,30 @@ func TestValidateEnvVars(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		env     []EnvVar
+		env     []pm.EnvVar
 		wantErr error
 	}{
 		{
 			name: "valid env vars pass",
-			env: []EnvVar{
+			env: []pm.EnvVar{
 				{Key: "FOO", Value: "bar"},
 				{Key: "BAZ", Value: "qux"},
 			},
 		},
 		{
 			name: "empty env key returns ErrEmptyEnvKey",
-			env: []EnvVar{
+			env: []pm.EnvVar{
 				{Key: "", Value: "bar"},
 			},
-			wantErr: ErrEmptyEnvKey,
+			wantErr: pm.ErrEmptyEnvKey,
 		},
 		{
 			name: "duplicate env key returns ErrDuplicateEnvKey",
-			env: []EnvVar{
+			env: []pm.EnvVar{
 				{Key: "FOO", Value: "bar"},
 				{Key: "FOO", Value: "baz"},
 			},
-			wantErr: ErrDuplicateEnvKey,
+			wantErr: pm.ErrDuplicateEnvKey,
 		},
 	}
 
@@ -197,20 +198,20 @@ func TestValidateEnvVars(t *testing.T) {
 			t.Parallel()
 
 			// Arrange
-			p := Pipeline{
+			p := pm.Pipeline{
 				Name: "test-pipeline",
-				Jobs: []Job{
+				Jobs: []pm.Job{
 					{
 						Name:  "build",
 						Image: "golang:1.23",
 						Env:   tt.env,
-						Steps: []Step{{Name: "build", Run: []string{"go build ./..."}}},
+						Steps: []pm.Step{{Name: "build", Run: []string{"go build ./..."}}},
 					},
 				},
 			}
 
 			// Act
-			_, err := p.Validate()
+			_, err := Validate(&p)
 
 			// Assert
 			if tt.wantErr != nil {
@@ -227,28 +228,28 @@ func TestValidatePipelineEnv(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		env     []EnvVar
+		env     []pm.EnvVar
 		wantErr error
 	}{
 		{
 			name: "valid pipeline env vars pass",
-			env: []EnvVar{
+			env: []pm.EnvVar{
 				{Key: "CI", Value: "true"},
 				{Key: "REGION", Value: "us-east-1"},
 			},
 		},
 		{
 			name:    "empty pipeline env key returns ErrEmptyEnvKey",
-			env:     []EnvVar{{Key: "", Value: "bar"}},
-			wantErr: ErrEmptyEnvKey,
+			env:     []pm.EnvVar{{Key: "", Value: "bar"}},
+			wantErr: pm.ErrEmptyEnvKey,
 		},
 		{
 			name: "duplicate pipeline env key returns ErrDuplicateEnvKey",
-			env: []EnvVar{
+			env: []pm.EnvVar{
 				{Key: "CI", Value: "true"},
 				{Key: "CI", Value: "false"},
 			},
-			wantErr: ErrDuplicateEnvKey,
+			wantErr: pm.ErrDuplicateEnvKey,
 		},
 	}
 
@@ -256,19 +257,19 @@ func TestValidatePipelineEnv(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			p := Pipeline{
+			p := pm.Pipeline{
 				Name: "test-pipeline",
 				Env:  tt.env,
-				Jobs: []Job{
+				Jobs: []pm.Job{
 					{
 						Name:  "build",
 						Image: "alpine:latest",
-						Steps: []Step{{Name: "build", Run: []string{"echo hi"}}},
+						Steps: []pm.Step{{Name: "build", Run: []string{"echo hi"}}},
 					},
 				},
 			}
 
-			_, err := p.Validate()
+			_, err := Validate(&p)
 
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
@@ -284,63 +285,63 @@ func TestValidateExports(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		exports []Export
+		exports []pm.Export
 		wantErr error
 	}{
 		{
 			name: "valid file export passes",
-			exports: []Export{
+			exports: []pm.Export{
 				{Path: "/output/build.tar", Local: "./build.tar"},
 			},
 		},
 		{
 			name: "valid directory export with trailing slash passes",
-			exports: []Export{
+			exports: []pm.Export{
 				{Path: "/output/dist/", Local: "./dist"},
 			},
 		},
 		{
 			name: "empty export path returns ErrEmptyExportPath",
-			exports: []Export{
+			exports: []pm.Export{
 				{Path: ""},
 			},
-			wantErr: ErrEmptyExportPath,
+			wantErr: pm.ErrEmptyExportPath,
 		},
 		{
 			name: "relative export path returns ErrRelativeExport",
-			exports: []Export{
+			exports: []pm.Export{
 				{Path: "output/build.tar"},
 			},
-			wantErr: ErrRelativeExport,
+			wantErr: pm.ErrRelativeExport,
 		},
 		{
 			name: "root export path returns ErrRootExport",
-			exports: []Export{
+			exports: []pm.Export{
 				{Path: "/"},
 			},
-			wantErr: ErrRootExport,
+			wantErr: pm.ErrRootExport,
 		},
 		{
 			name: "root with multiple slashes returns ErrRootExport",
-			exports: []Export{
+			exports: []pm.Export{
 				{Path: "///"},
 			},
-			wantErr: ErrRootExport,
+			wantErr: pm.ErrRootExport,
 		},
 		{
 			name: "empty export local returns ErrEmptyExportLocal",
-			exports: []Export{
+			exports: []pm.Export{
 				{Path: "/output/build.tar", Local: ""},
 			},
-			wantErr: ErrEmptyExportLocal,
+			wantErr: pm.ErrEmptyExportLocal,
 		},
 		{
 			name: "duplicate export path returns ErrDuplicateExport",
-			exports: []Export{
+			exports: []pm.Export{
 				{Path: "/output/build.tar", Local: "./build.tar"},
 				{Path: "/output/build.tar", Local: "./build2.tar"},
 			},
-			wantErr: ErrDuplicateExport,
+			wantErr: pm.ErrDuplicateExport,
 		},
 	}
 
@@ -349,20 +350,20 @@ func TestValidateExports(t *testing.T) {
 			t.Parallel()
 
 			// Arrange
-			p := Pipeline{
+			p := pm.Pipeline{
 				Name: "test-pipeline",
-				Jobs: []Job{
+				Jobs: []pm.Job{
 					{
 						Name:    "build",
 						Image:   "golang:1.23",
 						Exports: tt.exports,
-						Steps:   []Step{{Name: "build", Run: []string{"go build ./..."}}},
+						Steps:   []pm.Step{{Name: "build", Run: []string{"go build ./..."}}},
 					},
 				},
 			}
 
 			// Act
-			_, err := p.Validate()
+			_, err := Validate(&p)
 
 			// Assert
 			if tt.wantErr != nil {
@@ -379,207 +380,207 @@ func TestValidateArtifacts(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		jobs    []Job
+		jobs    []pm.Job
 		wantErr error
 	}{
 		{
 			name: "valid artifact passes",
-			jobs: []Job{
+			jobs: []pm.Job{
 				{
 					Name:  "compile",
 					Image: "golang:1.23",
-					Steps: []Step{{Name: "compile", Run: []string{"go build -o /out/app ./..."}}},
+					Steps: []pm.Step{{Name: "compile", Run: []string{"go build -o /out/app ./..."}}},
 				},
 				{
 					Name:      "deploy",
 					Image:     "alpine:latest",
 					DependsOn: []string{"compile"},
-					Artifacts: []Artifact{
+					Artifacts: []pm.Artifact{
 						{From: "compile", Source: "/out/app", Target: "/app/bin"},
 					},
-					Steps: []Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
+					Steps: []pm.Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
 				},
 			},
 		},
 		{
 			name: "empty artifact From returns ErrEmptyArtifactFrom",
-			jobs: []Job{
+			jobs: []pm.Job{
 				{
 					Name:  "compile",
 					Image: "golang:1.23",
-					Steps: []Step{{Name: "compile", Run: []string{"go build ./..."}}},
+					Steps: []pm.Step{{Name: "compile", Run: []string{"go build ./..."}}},
 				},
 				{
 					Name:      "deploy",
 					Image:     "alpine:latest",
 					DependsOn: []string{"compile"},
-					Artifacts: []Artifact{
+					Artifacts: []pm.Artifact{
 						{From: "", Source: "/out/app", Target: "/app/bin"},
 					},
-					Steps: []Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
+					Steps: []pm.Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
 				},
 			},
-			wantErr: ErrEmptyArtifactFrom,
+			wantErr: pm.ErrEmptyArtifactFrom,
 		},
 		{
 			name: "empty artifact Source returns ErrEmptyArtifactSource",
-			jobs: []Job{
+			jobs: []pm.Job{
 				{
 					Name:  "compile",
 					Image: "golang:1.23",
-					Steps: []Step{{Name: "compile", Run: []string{"go build ./..."}}},
+					Steps: []pm.Step{{Name: "compile", Run: []string{"go build ./..."}}},
 				},
 				{
 					Name:      "deploy",
 					Image:     "alpine:latest",
 					DependsOn: []string{"compile"},
-					Artifacts: []Artifact{
+					Artifacts: []pm.Artifact{
 						{From: "compile", Source: "", Target: "/app/bin"},
 					},
-					Steps: []Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
+					Steps: []pm.Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
 				},
 			},
-			wantErr: ErrEmptyArtifactSource,
+			wantErr: pm.ErrEmptyArtifactSource,
 		},
 		{
 			name: "empty artifact Target returns ErrEmptyArtifactTarget",
-			jobs: []Job{
+			jobs: []pm.Job{
 				{
 					Name:  "compile",
 					Image: "golang:1.23",
-					Steps: []Step{{Name: "compile", Run: []string{"go build ./..."}}},
+					Steps: []pm.Step{{Name: "compile", Run: []string{"go build ./..."}}},
 				},
 				{
 					Name:      "deploy",
 					Image:     "alpine:latest",
 					DependsOn: []string{"compile"},
-					Artifacts: []Artifact{
+					Artifacts: []pm.Artifact{
 						{From: "compile", Source: "/out/app", Target: ""},
 					},
-					Steps: []Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
+					Steps: []pm.Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
 				},
 			},
-			wantErr: ErrEmptyArtifactTarget,
+			wantErr: pm.ErrEmptyArtifactTarget,
 		},
 		{
 			name: "artifact From not in DependsOn returns ErrArtifactNoDep",
-			jobs: []Job{
+			jobs: []pm.Job{
 				{
 					Name:  "compile",
 					Image: "golang:1.23",
-					Steps: []Step{{Name: "compile", Run: []string{"go build ./..."}}},
+					Steps: []pm.Step{{Name: "compile", Run: []string{"go build ./..."}}},
 				},
 				{
 					Name:  "deploy",
 					Image: "alpine:latest",
-					Artifacts: []Artifact{
+					Artifacts: []pm.Artifact{
 						{From: "compile", Source: "/out/app", Target: "/app/bin"},
 					},
-					Steps: []Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
+					Steps: []pm.Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
 				},
 			},
-			wantErr: ErrArtifactNoDep,
+			wantErr: pm.ErrArtifactNoDep,
 		},
 		{
 			name: "relative artifact source returns ErrRelativeArtifactSource",
-			jobs: []Job{
+			jobs: []pm.Job{
 				{
 					Name:  "compile",
 					Image: "golang:1.23",
-					Steps: []Step{{Name: "compile", Run: []string{"go build ./..."}}},
+					Steps: []pm.Step{{Name: "compile", Run: []string{"go build ./..."}}},
 				},
 				{
 					Name:      "deploy",
 					Image:     "alpine:latest",
 					DependsOn: []string{"compile"},
-					Artifacts: []Artifact{
+					Artifacts: []pm.Artifact{
 						{From: "compile", Source: "out/app", Target: "/app/bin"},
 					},
-					Steps: []Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
+					Steps: []pm.Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
 				},
 			},
-			wantErr: ErrRelativeArtifactSource,
+			wantErr: pm.ErrRelativeArtifactSource,
 		},
 		{
 			name: "relative artifact target returns ErrRelativeArtifact",
-			jobs: []Job{
+			jobs: []pm.Job{
 				{
 					Name:  "compile",
 					Image: "golang:1.23",
-					Steps: []Step{{Name: "compile", Run: []string{"go build ./..."}}},
+					Steps: []pm.Step{{Name: "compile", Run: []string{"go build ./..."}}},
 				},
 				{
 					Name:      "deploy",
 					Image:     "alpine:latest",
 					DependsOn: []string{"compile"},
-					Artifacts: []Artifact{
+					Artifacts: []pm.Artifact{
 						{From: "compile", Source: "/out/app", Target: "app/bin"},
 					},
-					Steps: []Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
+					Steps: []pm.Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
 				},
 			},
-			wantErr: ErrRelativeArtifact,
+			wantErr: pm.ErrRelativeArtifact,
 		},
 		{
 			name: "root artifact target returns ErrRootArtifact",
-			jobs: []Job{
+			jobs: []pm.Job{
 				{
 					Name:  "compile",
 					Image: "golang:1.23",
-					Steps: []Step{{Name: "compile", Run: []string{"go build ./..."}}},
+					Steps: []pm.Step{{Name: "compile", Run: []string{"go build ./..."}}},
 				},
 				{
 					Name:      "deploy",
 					Image:     "alpine:latest",
 					DependsOn: []string{"compile"},
-					Artifacts: []Artifact{
+					Artifacts: []pm.Artifact{
 						{From: "compile", Source: "/out/app", Target: "/"},
 					},
-					Steps: []Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
+					Steps: []pm.Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
 				},
 			},
-			wantErr: ErrRootArtifact,
+			wantErr: pm.ErrRootArtifact,
 		},
 		{
 			name: "root with slashes artifact target returns ErrRootArtifact",
-			jobs: []Job{
+			jobs: []pm.Job{
 				{
 					Name:  "compile",
 					Image: "golang:1.23",
-					Steps: []Step{{Name: "compile", Run: []string{"go build ./..."}}},
+					Steps: []pm.Step{{Name: "compile", Run: []string{"go build ./..."}}},
 				},
 				{
 					Name:      "deploy",
 					Image:     "alpine:latest",
 					DependsOn: []string{"compile"},
-					Artifacts: []Artifact{
+					Artifacts: []pm.Artifact{
 						{From: "compile", Source: "/out/app", Target: "///"},
 					},
-					Steps: []Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
+					Steps: []pm.Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
 				},
 			},
-			wantErr: ErrRootArtifact,
+			wantErr: pm.ErrRootArtifact,
 		},
 		{
 			name: "duplicate artifact target returns ErrDuplicateArtifact",
-			jobs: []Job{
+			jobs: []pm.Job{
 				{
 					Name:  "compile",
 					Image: "golang:1.23",
-					Steps: []Step{{Name: "compile", Run: []string{"go build ./..."}}},
+					Steps: []pm.Step{{Name: "compile", Run: []string{"go build ./..."}}},
 				},
 				{
 					Name:      "deploy",
 					Image:     "alpine:latest",
 					DependsOn: []string{"compile"},
-					Artifacts: []Artifact{
+					Artifacts: []pm.Artifact{
 						{From: "compile", Source: "/out/app", Target: "/app/bin"},
 						{From: "compile", Source: "/out/lib", Target: "/app/bin"},
 					},
-					Steps: []Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
+					Steps: []pm.Step{{Name: "deploy", Run: []string{"./deploy.sh"}}},
 				},
 			},
-			wantErr: ErrDuplicateArtifact,
+			wantErr: pm.ErrDuplicateArtifact,
 		},
 	}
 
@@ -588,13 +589,13 @@ func TestValidateArtifacts(t *testing.T) {
 			t.Parallel()
 
 			// Arrange
-			p := Pipeline{
+			p := pm.Pipeline{
 				Name: "test-pipeline",
 				Jobs: tt.jobs,
 			}
 
 			// Act
-			_, err := p.Validate()
+			_, err := Validate(&p)
 
 			// Assert
 			if tt.wantErr != nil {
@@ -611,61 +612,61 @@ func TestValidateStepRun(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		jobs    []Job
+		jobs    []pm.Job
 		wantErr error
 	}{
 		{
 			name: "step with nil Run rejected",
-			jobs: []Job{{
+			jobs: []pm.Job{{
 				Name:  "build",
 				Image: "alpine",
-				Steps: []Step{
+				Steps: []pm.Step{
 					{Name: "setup", Run: nil},
 					{Name: "compile", Run: []string{"go build"}},
 				},
 			}},
-			wantErr: ErrMissingRun,
+			wantErr: pm.ErrMissingRun,
 		},
 		{
 			name: "step with empty Run slice rejected",
-			jobs: []Job{{
+			jobs: []pm.Job{{
 				Name:  "build",
 				Image: "alpine",
-				Steps: []Step{
+				Steps: []pm.Step{
 					{Name: "setup", Run: []string{}},
 					{Name: "compile", Run: []string{"go build"}},
 				},
 			}},
-			wantErr: ErrMissingRun,
+			wantErr: pm.ErrMissingRun,
 		},
 		{
 			name: "step with empty-string run command rejected",
-			jobs: []Job{{
+			jobs: []pm.Job{{
 				Name:  "build",
 				Image: "alpine",
-				Steps: []Step{
+				Steps: []pm.Step{
 					{Name: "setup", Run: []string{""}},
 				},
 			}},
-			wantErr: ErrEmptyRunCommand,
+			wantErr: pm.ErrEmptyRunCommand,
 		},
 		{
 			name: "step with whitespace-only run command rejected",
-			jobs: []Job{{
+			jobs: []pm.Job{{
 				Name:  "build",
 				Image: "alpine",
-				Steps: []Step{
+				Steps: []pm.Step{
 					{Name: "setup", Run: []string{"  "}},
 				},
 			}},
-			wantErr: ErrEmptyRunCommand,
+			wantErr: pm.ErrEmptyRunCommand,
 		},
 		{
 			name: "all steps with valid Run passes",
-			jobs: []Job{{
+			jobs: []pm.Job{{
 				Name:  "build",
 				Image: "alpine",
-				Steps: []Step{
+				Steps: []pm.Step{
 					{Name: "setup", Run: []string{"apk add git"}},
 					{Name: "compile", Run: []string{"go build"}},
 				},
@@ -676,8 +677,8 @@ func TestValidateStepRun(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			p := Pipeline{Name: "test", Jobs: tt.jobs}
-			_, err := p.Validate()
+			p := pm.Pipeline{Name: "test", Jobs: tt.jobs}
+			_, err := Validate(&p)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
 				return
@@ -693,15 +694,15 @@ func TestApplyDefaults(t *testing.T) {
 	t.Run("matrix pointer is not aliased", func(t *testing.T) {
 		t.Parallel()
 
-		input := []Job{{
+		input := []pm.Job{{
 			Name:  "test",
 			Image: "alpine",
-			Steps: []Step{{Name: "test", Run: []string{"echo hi"}}},
-			Matrix: &Matrix{Dimensions: []Dimension{
+			Steps: []pm.Step{{Name: "test", Run: []string{"echo hi"}}},
+			Matrix: &pm.Matrix{Dimensions: []pm.Dimension{
 				{Name: "go", Values: []string{"1.22", "1.23"}},
 			}},
 		}}
-		defaults := &Defaults{Image: "golang:1.23"}
+		defaults := &pm.Defaults{Image: "golang:1.23"}
 
 		result := ApplyDefaults(input, defaults)
 		require.NotNil(t, result[0].Matrix)
@@ -716,12 +717,12 @@ func TestApplyDefaults(t *testing.T) {
 	t.Run("nil matrix preserved", func(t *testing.T) {
 		t.Parallel()
 
-		input := []Job{{
+		input := []pm.Job{{
 			Name:  "test",
 			Image: "alpine",
-			Steps: []Step{{Name: "test", Run: []string{"echo hi"}}},
+			Steps: []pm.Step{{Name: "test", Run: []string{"echo hi"}}},
 		}}
-		defaults := &Defaults{Image: "golang:1.23"}
+		defaults := &pm.Defaults{Image: "golang:1.23"}
 
 		result := ApplyDefaults(input, defaults)
 		assert.Nil(t, result[0].Matrix)
@@ -730,12 +731,12 @@ func TestApplyDefaults(t *testing.T) {
 	t.Run("nil defaults deep-clones jobs", func(t *testing.T) {
 		t.Parallel()
 
-		input := []Job{{
+		input := []pm.Job{{
 			Name:      "test",
 			Image:     "alpine",
 			DependsOn: []string{"build"},
-			Steps:     []Step{{Name: "test", Run: []string{"echo hi"}}},
-			Matrix: &Matrix{Dimensions: []Dimension{
+			Steps:     []pm.Step{{Name: "test", Run: []string{"echo hi"}}},
+			Matrix: &pm.Matrix{Dimensions: []pm.Dimension{
 				{Name: "go", Values: []string{"1.22"}},
 			}},
 		}}
@@ -763,18 +764,18 @@ func TestApplyDefaults(t *testing.T) {
 	t.Run("env merge job wins on conflict", func(t *testing.T) {
 		t.Parallel()
 
-		input := []Job{{
+		input := []pm.Job{{
 			Name:  "test",
 			Image: "alpine",
-			Steps: []Step{{Name: "test", Run: []string{"echo hi"}}},
-			Env: []EnvVar{
+			Steps: []pm.Step{{Name: "test", Run: []string{"echo hi"}}},
+			Env: []pm.EnvVar{
 				{Key: "SHARED", Value: "from-job"},
 				{Key: "JOB_ONLY", Value: "yes"},
 			},
 		}}
-		defaults := &Defaults{
+		defaults := &pm.Defaults{
 			Image: "alpine",
-			Env: []EnvVar{
+			Env: []pm.EnvVar{
 				{Key: "SHARED", Value: "from-defaults"},
 				{Key: "DEFAULT_ONLY", Value: "yes"},
 			},
@@ -782,7 +783,7 @@ func TestApplyDefaults(t *testing.T) {
 
 		result := ApplyDefaults(input, defaults)
 		require.Len(t, result, 1)
-		assert.Equal(t, []EnvVar{
+		assert.Equal(t, []pm.EnvVar{
 			{Key: "DEFAULT_ONLY", Value: "yes"},
 			{Key: "SHARED", Value: "from-job"},
 			{Key: "JOB_ONLY", Value: "yes"},
@@ -795,7 +796,7 @@ func TestValidatePublish(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		publish *Publish
+		publish *pm.Publish
 		wantErr error
 	}{
 		{
@@ -804,21 +805,21 @@ func TestValidatePublish(t *testing.T) {
 		},
 		{
 			name:    "valid publish passes",
-			publish: &Publish{Image: "ghcr.io/user/app:latest", Push: true},
+			publish: &pm.Publish{Image: "ghcr.io/user/app:latest", Push: true},
 		},
 		{
 			name:    "valid publish with insecure passes",
-			publish: &Publish{Image: "localhost:5000/app:dev", Push: true, Insecure: true},
+			publish: &pm.Publish{Image: "localhost:5000/app:dev", Push: true, Insecure: true},
 		},
 		{
 			name:    "empty image returns ErrEmptyPublishImage",
-			publish: &Publish{Image: "", Push: true},
-			wantErr: ErrEmptyPublishImage,
+			publish: &pm.Publish{Image: "", Push: true},
+			wantErr: pm.ErrEmptyPublishImage,
 		},
 		{
 			name:    "whitespace-only image returns ErrEmptyPublishImage",
-			publish: &Publish{Image: "   ", Push: true},
-			wantErr: ErrEmptyPublishImage,
+			publish: &pm.Publish{Image: "   ", Push: true},
+			wantErr: pm.ErrEmptyPublishImage,
 		},
 	}
 
@@ -826,19 +827,19 @@ func TestValidatePublish(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			p := Pipeline{
+			p := pm.Pipeline{
 				Name: "test-pipeline",
-				Jobs: []Job{
+				Jobs: []pm.Job{
 					{
 						Name:    "build",
 						Image:   "golang:1.23",
 						Publish: tt.publish,
-						Steps:   []Step{{Name: "build", Run: []string{"go build ./..."}}},
+						Steps:   []pm.Step{{Name: "build", Run: []string{"go build ./..."}}},
 					},
 				},
 			}
 
-			_, err := p.Validate()
+			_, err := Validate(&p)
 
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
@@ -852,46 +853,46 @@ func TestValidatePublish(t *testing.T) {
 func TestValidateWhenCondition(t *testing.T) {
 	t.Parallel()
 
-	validStep := Step{Name: "s1", Run: []string{"echo ok"}}
+	validStep := pm.Step{Name: "s1", Run: []string{"echo ok"}}
 
 	tests := []struct {
 		name    string
-		jobs    []Job
+		jobs    []pm.Job
 		wantErr error
 	}{
 		{
 			name: "valid job when passes",
-			jobs: []Job{{
+			jobs: []pm.Job{{
 				Name:  "deploy",
 				Image: "alpine",
 				When:  &conditional.When{Expression: `branch == "main"`},
-				Steps: []Step{validStep},
+				Steps: []pm.Step{validStep},
 			}},
 		},
 		{
 			name: "nil when passes",
-			jobs: []Job{{
+			jobs: []pm.Job{{
 				Name:  "build",
 				Image: "alpine",
-				Steps: []Step{validStep},
+				Steps: []pm.Step{validStep},
 			}},
 		},
 		{
 			name: "invalid job when expression rejected",
-			jobs: []Job{{
+			jobs: []pm.Job{{
 				Name:  "deploy",
 				Image: "alpine",
 				When:  &conditional.When{Expression: `invalid!!!`},
-				Steps: []Step{validStep},
+				Steps: []pm.Step{validStep},
 			}},
-			wantErr: ErrInvalidCondition,
+			wantErr: pm.ErrInvalidCondition,
 		},
 		{
 			name: "valid step when passes",
-			jobs: []Job{{
+			jobs: []pm.Job{{
 				Name:  "build",
 				Image: "alpine",
-				Steps: []Step{{
+				Steps: []pm.Step{{
 					Name: "conditional",
 					Run:  []string{"echo ok"},
 					When: &conditional.When{Expression: `env("CI") == "true"`},
@@ -900,37 +901,37 @@ func TestValidateWhenCondition(t *testing.T) {
 		},
 		{
 			name: "invalid step when expression rejected",
-			jobs: []Job{{
+			jobs: []pm.Job{{
 				Name:  "build",
 				Image: "alpine",
-				Steps: []Step{{
+				Steps: []pm.Step{{
 					Name: "bad",
 					Run:  []string{"echo"},
 					When: &conditional.When{Expression: `invalid!!!`},
 				}},
 			}},
-			wantErr: ErrInvalidCondition,
+			wantErr: pm.ErrInvalidCondition,
 		},
 		{
 			name: "step when with output() rejected",
-			jobs: []Job{{
+			jobs: []pm.Job{{
 				Name:  "build",
 				Image: "alpine",
-				Steps: []Step{{
+				Steps: []pm.Step{{
 					Name: "deferred",
 					Run:  []string{"echo"},
 					When: &conditional.When{Expression: `output("check", "ready") == "yes"`},
 				}},
 			}},
-			wantErr: ErrDeferredStepWhen,
+			wantErr: pm.ErrDeferredStepWhen,
 		},
 		{
 			name: "job when with output() allowed",
-			jobs: []Job{{
+			jobs: []pm.Job{{
 				Name:  "deploy",
 				Image: "alpine",
 				When:  &conditional.When{Expression: `output("check", "ready") == "yes"`, Deferred: true},
-				Steps: []Step{validStep},
+				Steps: []pm.Step{validStep},
 			}},
 		},
 	}
@@ -938,8 +939,8 @@ func TestValidateWhenCondition(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			p := Pipeline{Name: "test", Jobs: tt.jobs}
-			_, err := p.Validate()
+			p := pm.Pipeline{Name: "test", Jobs: tt.jobs}
+			_, err := Validate(&p)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
 				return
@@ -954,12 +955,12 @@ func TestValidateRetry(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		retry   *Retry
+		retry   *pm.Retry
 		wantErr error
 	}{
 		{
 			name:  "valid retry",
-			retry: &Retry{Attempts: 3, Delay: 5 * time.Second, Backoff: BackoffExponential},
+			retry: &pm.Retry{Attempts: 3, Delay: 5 * time.Second, Backoff: pm.BackoffExponential},
 		},
 		{
 			name:  "nil retry is valid",
@@ -967,45 +968,45 @@ func TestValidateRetry(t *testing.T) {
 		},
 		{
 			name:    "zero attempts",
-			retry:   &Retry{Attempts: 0, Backoff: BackoffNone},
-			wantErr: ErrInvalidRetryAttempts,
+			retry:   &pm.Retry{Attempts: 0, Backoff: pm.BackoffNone},
+			wantErr: pm.ErrInvalidRetryAttempts,
 		},
 		{
 			name:    "negative attempts",
-			retry:   &Retry{Attempts: -1, Backoff: BackoffNone},
-			wantErr: ErrInvalidRetryAttempts,
+			retry:   &pm.Retry{Attempts: -1, Backoff: pm.BackoffNone},
+			wantErr: pm.ErrInvalidRetryAttempts,
 		},
 		{
 			name:    "invalid backoff strategy",
-			retry:   &Retry{Attempts: 1, Backoff: "quadratic"},
-			wantErr: ErrInvalidBackoff,
+			retry:   &pm.Retry{Attempts: 1, Backoff: "quadratic"},
+			wantErr: pm.ErrInvalidBackoff,
 		},
 		{
 			name:    "negative delay",
-			retry:   &Retry{Attempts: 1, Delay: -time.Second, Backoff: BackoffNone},
-			wantErr: ErrNegativeDelay,
+			retry:   &pm.Retry{Attempts: 1, Delay: -time.Second, Backoff: pm.BackoffNone},
+			wantErr: pm.ErrNegativeDelay,
 		},
 		{
 			name:  "linear backoff valid",
-			retry: &Retry{Attempts: 2, Delay: time.Second, Backoff: BackoffLinear},
+			retry: &pm.Retry{Attempts: 2, Delay: time.Second, Backoff: pm.BackoffLinear},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			p := Pipeline{
+			p := pm.Pipeline{
 				Name: "test",
-				Jobs: []Job{
+				Jobs: []pm.Job{
 					{
 						Name:  "build",
 						Image: "alpine:latest",
-						Steps: []Step{{Name: "build", Run: []string{"echo hi"}}},
+						Steps: []pm.Step{{Name: "build", Run: []string{"echo hi"}}},
 						Retry: tt.retry,
 					},
 				},
 			}
-			_, err := p.Validate()
+			_, err := Validate(&p)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
 				return
@@ -1020,45 +1021,45 @@ func TestValidateStepRetry(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		retry   *Retry
+		retry   *pm.Retry
 		wantErr error
 	}{
 		{name: "nil step retry valid", retry: nil},
 		{
 			name:  "valid step retry",
-			retry: &Retry{Attempts: 2, Delay: time.Second, Backoff: BackoffLinear},
+			retry: &pm.Retry{Attempts: 2, Delay: time.Second, Backoff: pm.BackoffLinear},
 		},
 		{
 			name:    "step retry zero attempts",
-			retry:   &Retry{Attempts: 0, Backoff: BackoffNone},
-			wantErr: ErrInvalidRetryAttempts,
+			retry:   &pm.Retry{Attempts: 0, Backoff: pm.BackoffNone},
+			wantErr: pm.ErrInvalidRetryAttempts,
 		},
 		{
 			name:    "step retry invalid backoff",
-			retry:   &Retry{Attempts: 1, Backoff: "bad"},
-			wantErr: ErrInvalidBackoff,
+			retry:   &pm.Retry{Attempts: 1, Backoff: "bad"},
+			wantErr: pm.ErrInvalidBackoff,
 		},
 		{
 			name:    "step retry negative delay",
-			retry:   &Retry{Attempts: 1, Delay: -time.Second, Backoff: BackoffNone},
-			wantErr: ErrNegativeDelay,
+			retry:   &pm.Retry{Attempts: 1, Delay: -time.Second, Backoff: pm.BackoffNone},
+			wantErr: pm.ErrNegativeDelay,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			p := Pipeline{
+			p := pm.Pipeline{
 				Name: "test",
-				Jobs: []Job{
+				Jobs: []pm.Job{
 					{
 						Name:  "build",
 						Image: "alpine:latest",
-						Steps: []Step{{Name: "s", Run: []string{"echo"}, Retry: tt.retry}},
+						Steps: []pm.Step{{Name: "s", Run: []string{"echo"}, Retry: tt.retry}},
 					},
 				},
 			}
-			_, err := p.Validate()
+			_, err := Validate(&p)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
 				return
@@ -1087,25 +1088,25 @@ func TestValidateTimeout(t *testing.T) {
 		{
 			name:    "negative timeout",
 			timeout: -1 * time.Second,
-			wantErr: ErrNegativeTimeout,
+			wantErr: pm.ErrNegativeTimeout,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			p := Pipeline{
+			p := pm.Pipeline{
 				Name: "test",
-				Jobs: []Job{
+				Jobs: []pm.Job{
 					{
 						Name:    "build",
 						Image:   "alpine:latest",
-						Steps:   []Step{{Name: "build", Run: []string{"echo hi"}}},
+						Steps:   []pm.Step{{Name: "build", Run: []string{"echo hi"}}},
 						Timeout: tt.timeout,
 					},
 				},
 			}
-			_, err := p.Validate()
+			_, err := Validate(&p)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
 				return
@@ -1118,13 +1119,13 @@ func TestValidateTimeout(t *testing.T) {
 func TestValidateStepTimeout(t *testing.T) {
 	t.Parallel()
 
-	p := Pipeline{
+	p := pm.Pipeline{
 		Name: "test",
-		Jobs: []Job{
+		Jobs: []pm.Job{
 			{
 				Name:  "build",
 				Image: "alpine:latest",
-				Steps: []Step{{
+				Steps: []pm.Step{{
 					Name:    "build",
 					Run:     []string{"echo hi"},
 					Timeout: -5 * time.Second,
@@ -1132,15 +1133,15 @@ func TestValidateStepTimeout(t *testing.T) {
 			},
 		},
 	}
-	_, err := p.Validate()
-	require.ErrorIs(t, err, ErrNegativeTimeout)
+	_, err := Validate(&p)
+	require.ErrorIs(t, err, pm.ErrNegativeTimeout)
 }
 
 func TestApplyDefaultsShell(t *testing.T) {
 	t.Parallel()
 
-	defaults := &Defaults{Shell: []string{"/bin/bash", "-c"}}
-	jobs := []Job{
+	defaults := &pm.Defaults{Shell: []string{"/bin/bash", "-c"}}
+	jobs := []pm.Job{
 		{Name: "no-shell", Image: "alpine:latest"},
 		{Name: "has-shell", Image: "alpine:latest", Shell: []string{"/bin/zsh", "-c"}},
 	}

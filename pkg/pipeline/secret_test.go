@@ -5,6 +5,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	pm "github.com/ndisidore/cicada/pkg/pipeline/pipelinemodel"
 )
 
 func TestValidateSecretDecls(t *testing.T) {
@@ -12,7 +14,7 @@ func TestValidateSecretDecls(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		decls   []SecretDecl
+		decls   []pm.SecretDecl
 		wantErr error
 	}{
 		{
@@ -21,160 +23,160 @@ func TestValidateSecretDecls(t *testing.T) {
 		},
 		{
 			name:  "empty decls passes",
-			decls: []SecretDecl{},
+			decls: []pm.SecretDecl{},
 		},
 		{
 			name: "valid hostEnv source passes",
-			decls: []SecretDecl{
-				{Name: "GH_TOKEN", Source: SecretSourceHostEnv},
+			decls: []pm.SecretDecl{
+				{Name: "GH_TOKEN", Source: pm.SecretSourceHostEnv},
 			},
 		},
 		{
 			name: "valid file source passes",
-			decls: []SecretDecl{
-				{Name: "tls-cert", Source: SecretSourceFile, Path: "/etc/ssl/cert.pem"},
+			decls: []pm.SecretDecl{
+				{Name: "tls-cert", Source: pm.SecretSourceFile, Path: "/etc/ssl/cert.pem"},
 			},
 		},
 		{
 			name: "valid cmd source passes",
-			decls: []SecretDecl{
-				{Name: "vault-secret", Source: SecretSourceCmd, Cmd: "vault kv get secret/app"},
+			decls: []pm.SecretDecl{
+				{Name: "vault-secret", Source: pm.SecretSourceCmd, Cmd: "vault kv get secret/app"},
 			},
 		},
 		{
 			name: "multiple valid decls pass",
-			decls: []SecretDecl{
-				{Name: "token", Source: SecretSourceHostEnv},
-				{Name: "cert", Source: SecretSourceFile, Path: "/etc/cert.pem"},
-				{Name: "vault", Source: SecretSourceCmd, Cmd: "vault read"},
+			decls: []pm.SecretDecl{
+				{Name: "token", Source: pm.SecretSourceHostEnv},
+				{Name: "cert", Source: pm.SecretSourceFile, Path: "/etc/cert.pem"},
+				{Name: "vault", Source: pm.SecretSourceCmd, Cmd: "vault read"},
 			},
 		},
 		{
 			name: "empty name returns ErrEmptySecretName",
-			decls: []SecretDecl{
-				{Name: "", Source: SecretSourceHostEnv},
+			decls: []pm.SecretDecl{
+				{Name: "", Source: pm.SecretSourceHostEnv},
 			},
-			wantErr: ErrEmptySecretName,
+			wantErr: pm.ErrEmptySecretName,
 		},
 		{
 			name: "duplicate name returns ErrDuplicateSecret",
-			decls: []SecretDecl{
-				{Name: "token", Source: SecretSourceHostEnv},
-				{Name: "token", Source: SecretSourceFile, Path: "/tmp/token"},
+			decls: []pm.SecretDecl{
+				{Name: "token", Source: pm.SecretSourceHostEnv},
+				{Name: "token", Source: pm.SecretSourceFile, Path: "/tmp/token"},
 			},
-			wantErr: ErrDuplicateSecret,
+			wantErr: pm.ErrDuplicateSecret,
 		},
 		{
 			name: "invalid source returns ErrInvalidSecretSource",
-			decls: []SecretDecl{
-				{Name: "bad", Source: SecretSource("vault")},
+			decls: []pm.SecretDecl{
+				{Name: "bad", Source: pm.SecretSource("vault")},
 			},
-			wantErr: ErrInvalidSecretSource,
+			wantErr: pm.ErrInvalidSecretSource,
 		},
 		{
 			name: "empty source returns ErrInvalidSecretSource",
-			decls: []SecretDecl{
+			decls: []pm.SecretDecl{
 				{Name: "bad", Source: ""},
 			},
-			wantErr: ErrInvalidSecretSource,
+			wantErr: pm.ErrInvalidSecretSource,
 		},
 		{
 			name: "file source missing path returns ErrMissingSecretPath",
-			decls: []SecretDecl{
-				{Name: "cert", Source: SecretSourceFile, Path: ""},
+			decls: []pm.SecretDecl{
+				{Name: "cert", Source: pm.SecretSourceFile, Path: ""},
 			},
-			wantErr: ErrMissingSecretPath,
+			wantErr: pm.ErrMissingSecretPath,
 		},
 		{
 			name: "file source whitespace-only path returns ErrMissingSecretPath",
-			decls: []SecretDecl{
-				{Name: "cert", Source: SecretSourceFile, Path: "   "},
+			decls: []pm.SecretDecl{
+				{Name: "cert", Source: pm.SecretSourceFile, Path: "   "},
 			},
-			wantErr: ErrMissingSecretPath,
+			wantErr: pm.ErrMissingSecretPath,
 		},
 		{
 			name: "cmd source missing cmd returns ErrMissingSecretCmd",
-			decls: []SecretDecl{
-				{Name: "vault", Source: SecretSourceCmd, Cmd: ""},
+			decls: []pm.SecretDecl{
+				{Name: "vault", Source: pm.SecretSourceCmd, Cmd: ""},
 			},
-			wantErr: ErrMissingSecretCmd,
+			wantErr: pm.ErrMissingSecretCmd,
 		},
 		{
 			name: "cmd source whitespace-only cmd returns ErrMissingSecretCmd",
-			decls: []SecretDecl{
-				{Name: "vault", Source: SecretSourceCmd, Cmd: "   "},
+			decls: []pm.SecretDecl{
+				{Name: "vault", Source: pm.SecretSourceCmd, Cmd: "   "},
 			},
-			wantErr: ErrMissingSecretCmd,
+			wantErr: pm.ErrMissingSecretCmd,
 		},
 		{
 			name: "var with file source returns ErrSecretVarWithNonHostEnv",
-			decls: []SecretDecl{
-				{Name: "cert", Source: SecretSourceFile, Path: "/etc/cert.pem", Var: "CERT_VAR"},
+			decls: []pm.SecretDecl{
+				{Name: "cert", Source: pm.SecretSourceFile, Path: "/etc/cert.pem", Var: "CERT_VAR"},
 			},
-			wantErr: ErrSecretVarWithNonHostEnv,
+			wantErr: pm.ErrSecretVarWithNonHostEnv,
 		},
 		{
 			name: "var with cmd source returns ErrSecretVarWithNonHostEnv",
-			decls: []SecretDecl{
-				{Name: "vault", Source: SecretSourceCmd, Cmd: "vault read", Var: "VAULT_VAR"},
+			decls: []pm.SecretDecl{
+				{Name: "vault", Source: pm.SecretSourceCmd, Cmd: "vault read", Var: "VAULT_VAR"},
 			},
-			wantErr: ErrSecretVarWithNonHostEnv,
+			wantErr: pm.ErrSecretVarWithNonHostEnv,
 		},
 		{
 			name: "path with hostEnv source returns ErrSecretPathWithNonFile",
-			decls: []SecretDecl{
-				{Name: "token", Source: SecretSourceHostEnv, Path: "/etc/secret"},
+			decls: []pm.SecretDecl{
+				{Name: "token", Source: pm.SecretSourceHostEnv, Path: "/etc/secret"},
 			},
-			wantErr: ErrSecretPathWithNonFile,
+			wantErr: pm.ErrSecretPathWithNonFile,
 		},
 		{
 			name: "path with cmd source returns ErrSecretPathWithNonFile",
-			decls: []SecretDecl{
-				{Name: "vault", Source: SecretSourceCmd, Cmd: "vault read", Path: "/stray"},
+			decls: []pm.SecretDecl{
+				{Name: "vault", Source: pm.SecretSourceCmd, Cmd: "vault read", Path: "/stray"},
 			},
-			wantErr: ErrSecretPathWithNonFile,
+			wantErr: pm.ErrSecretPathWithNonFile,
 		},
 		{
 			name: "cmd with hostEnv source returns ErrSecretCmdWithNonCmd",
-			decls: []SecretDecl{
-				{Name: "token", Source: SecretSourceHostEnv, Cmd: "echo stray"},
+			decls: []pm.SecretDecl{
+				{Name: "token", Source: pm.SecretSourceHostEnv, Cmd: "echo stray"},
 			},
-			wantErr: ErrSecretCmdWithNonCmd,
+			wantErr: pm.ErrSecretCmdWithNonCmd,
 		},
 		{
 			name: "cmd with file source returns ErrSecretCmdWithNonCmd",
-			decls: []SecretDecl{
-				{Name: "cert", Source: SecretSourceFile, Path: "/etc/cert.pem", Cmd: "stray"},
+			decls: []pm.SecretDecl{
+				{Name: "cert", Source: pm.SecretSourceFile, Path: "/etc/cert.pem", Cmd: "stray"},
 			},
-			wantErr: ErrSecretCmdWithNonCmd,
+			wantErr: pm.ErrSecretCmdWithNonCmd,
 		},
 		{
 			name: "hostEnv with invalid Name and no Var returns ErrInvalidSecretHostEnvName",
-			decls: []SecretDecl{
-				{Name: "gh-token", Source: SecretSourceHostEnv},
+			decls: []pm.SecretDecl{
+				{Name: "gh-token", Source: pm.SecretSourceHostEnv},
 			},
-			wantErr: ErrInvalidSecretHostEnvName,
+			wantErr: pm.ErrInvalidSecretHostEnvName,
 		},
 		{
 			name: "hostEnv with valid Var overrides invalid Name",
-			decls: []SecretDecl{
-				{Name: "gh-token", Source: SecretSourceHostEnv, Var: "GITHUB_TOKEN"},
+			decls: []pm.SecretDecl{
+				{Name: "gh-token", Source: pm.SecretSourceHostEnv, Var: "GITHUB_TOKEN"},
 			},
 		},
 		{
 			name: "hostEnv with invalid Var returns ErrInvalidSecretHostEnvName",
-			decls: []SecretDecl{
-				{Name: "token", Source: SecretSourceHostEnv, Var: "invalid-var"},
+			decls: []pm.SecretDecl{
+				{Name: "token", Source: pm.SecretSourceHostEnv, Var: "invalid-var"},
 			},
-			wantErr: ErrInvalidSecretHostEnvName,
+			wantErr: pm.ErrInvalidSecretHostEnvName,
 		},
 		{
 			name: "first error wins for name before source",
-			decls: []SecretDecl{
-				{Name: "good", Source: SecretSourceHostEnv},
-				{Name: "", Source: SecretSource("bogus")},
+			decls: []pm.SecretDecl{
+				{Name: "good", Source: pm.SecretSourceHostEnv},
+				{Name: "", Source: pm.SecretSource("bogus")},
 			},
-			wantErr: ErrEmptySecretName,
+			wantErr: pm.ErrEmptySecretName,
 		},
 	}
 
@@ -207,7 +209,7 @@ func TestValidateSecretRefs(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		refs     []SecretRef
+		refs     []pm.SecretRef
 		declared map[string]struct{}
 		wantErr  error
 	}{
@@ -218,26 +220,26 @@ func TestValidateSecretRefs(t *testing.T) {
 		},
 		{
 			name:     "empty refs passes",
-			refs:     []SecretRef{},
+			refs:     []pm.SecretRef{},
 			declared: declared,
 		},
 		{
 			name: "valid env ref passes",
-			refs: []SecretRef{
+			refs: []pm.SecretRef{
 				{Name: "token", Env: "GITHUB_TOKEN"},
 			},
 			declared: declared,
 		},
 		{
 			name: "valid mount ref passes",
-			refs: []SecretRef{
+			refs: []pm.SecretRef{
 				{Name: "cert", Mount: "/run/secrets/cert.pem"},
 			},
 			declared: declared,
 		},
 		{
 			name: "multiple valid refs pass",
-			refs: []SecretRef{
+			refs: []pm.SecretRef{
 				{Name: "token", Env: "GH_TOKEN"},
 				{Name: "cert", Mount: "/run/secrets/cert"},
 			},
@@ -245,109 +247,109 @@ func TestValidateSecretRefs(t *testing.T) {
 		},
 		{
 			name: "empty ref name returns ErrEmptySecretName",
-			refs: []SecretRef{
+			refs: []pm.SecretRef{
 				{Name: "", Env: "FOO"},
 			},
 			declared: declared,
-			wantErr:  ErrEmptySecretName,
+			wantErr:  pm.ErrEmptySecretName,
 		},
 		{
 			name: "undeclared secret returns ErrUnknownSecret",
-			refs: []SecretRef{
+			refs: []pm.SecretRef{
 				{Name: "nonexistent", Env: "SECRET"},
 			},
 			declared: declared,
-			wantErr:  ErrUnknownSecret,
+			wantErr:  pm.ErrUnknownSecret,
 		},
 		{
 			name: "duplicate ref returns ErrDuplicateSecretRef",
-			refs: []SecretRef{
+			refs: []pm.SecretRef{
 				{Name: "token", Env: "TOKEN_A"},
 				{Name: "token", Env: "TOKEN_B"},
 			},
 			declared: declared,
-			wantErr:  ErrDuplicateSecretRef,
+			wantErr:  pm.ErrDuplicateSecretRef,
 		},
 		{
 			name: "no env or mount returns ErrSecretRefNoTarget",
-			refs: []SecretRef{
+			refs: []pm.SecretRef{
 				{Name: "token"},
 			},
 			declared: declared,
-			wantErr:  ErrSecretRefNoTarget,
+			wantErr:  pm.ErrSecretRefNoTarget,
 		},
 		{
 			name: "both env and mount returns ErrSecretRefBothTarget",
-			refs: []SecretRef{
+			refs: []pm.SecretRef{
 				{Name: "token", Env: "TOKEN", Mount: "/run/secrets/token"},
 			},
 			declared: declared,
-			wantErr:  ErrSecretRefBothTarget,
+			wantErr:  pm.ErrSecretRefBothTarget,
 		},
 		{
 			name: "relative mount path returns ErrRelativeSecretMount",
-			refs: []SecretRef{
+			refs: []pm.SecretRef{
 				{Name: "token", Mount: "run/secrets/token"},
 			},
 			declared: declared,
-			wantErr:  ErrRelativeSecretMount,
+			wantErr:  pm.ErrRelativeSecretMount,
 		},
 		{
 			name: "invalid env name returns ErrInvalidSecretEnvName",
-			refs: []SecretRef{
+			refs: []pm.SecretRef{
 				{Name: "token", Env: "1INVALID"},
 			},
 			declared: declared,
-			wantErr:  ErrInvalidSecretEnvName,
+			wantErr:  pm.ErrInvalidSecretEnvName,
 		},
 		{
 			name: "env name with hyphens returns ErrInvalidSecretEnvName",
-			refs: []SecretRef{
+			refs: []pm.SecretRef{
 				{Name: "token", Env: "MY-TOKEN"},
 			},
 			declared: declared,
-			wantErr:  ErrInvalidSecretEnvName,
+			wantErr:  pm.ErrInvalidSecretEnvName,
 		},
 		{
 			name: "env name with dots returns ErrInvalidSecretEnvName",
-			refs: []SecretRef{
+			refs: []pm.SecretRef{
 				{Name: "token", Env: "my.token"},
 			},
 			declared: declared,
-			wantErr:  ErrInvalidSecretEnvName,
+			wantErr:  pm.ErrInvalidSecretEnvName,
 		},
 		{
 			name: "underscore-prefixed env name passes",
-			refs: []SecretRef{
+			refs: []pm.SecretRef{
 				{Name: "token", Env: "_TOKEN_123"},
 			},
 			declared: declared,
 		},
 		{
 			name: "duplicate env target returns ErrDuplicateSecretEnvName",
-			refs: []SecretRef{
+			refs: []pm.SecretRef{
 				{Name: "token", Env: "API_KEY"},
 				{Name: "cert", Env: "API_KEY"},
 			},
 			declared: declared,
-			wantErr:  ErrDuplicateSecretEnvName,
+			wantErr:  pm.ErrDuplicateSecretEnvName,
 		},
 		{
 			name: "duplicate mount target returns ErrDuplicateSecretMount",
-			refs: []SecretRef{
+			refs: []pm.SecretRef{
 				{Name: "token", Mount: "/run/secrets/key"},
 				{Name: "cert", Mount: "/run/secrets/key"},
 			},
 			declared: declared,
-			wantErr:  ErrDuplicateSecretMount,
+			wantErr:  pm.ErrDuplicateSecretMount,
 		},
 		{
 			name: "empty declared set rejects all refs",
-			refs: []SecretRef{
+			refs: []pm.SecretRef{
 				{Name: "token", Env: "TOKEN"},
 			},
 			declared: map[string]struct{}{},
-			wantErr:  ErrUnknownSecret,
+			wantErr:  pm.ErrUnknownSecret,
 		},
 	}
 
@@ -374,23 +376,23 @@ func TestValidateSecretInheritance(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		jobRefs  []SecretRef
-		stepRefs []SecretRef
+		jobRefs  []pm.SecretRef
+		stepRefs []pm.SecretRef
 		wantErr  error
 	}{
 		{
 			name:     "no overlap passes",
-			jobRefs:  []SecretRef{{Name: "token", Env: "TOKEN"}},
-			stepRefs: []SecretRef{{Name: "cert", Mount: "/run/secrets/cert"}},
+			jobRefs:  []pm.SecretRef{{Name: "token", Env: "TOKEN"}},
+			stepRefs: []pm.SecretRef{{Name: "cert", Mount: "/run/secrets/cert"}},
 		},
 		{
 			name:     "nil job refs passes",
 			jobRefs:  nil,
-			stepRefs: []SecretRef{{Name: "token", Env: "TOKEN"}},
+			stepRefs: []pm.SecretRef{{Name: "token", Env: "TOKEN"}},
 		},
 		{
 			name:     "nil step refs passes",
-			jobRefs:  []SecretRef{{Name: "token", Env: "TOKEN"}},
+			jobRefs:  []pm.SecretRef{{Name: "token", Env: "TOKEN"}},
 			stepRefs: nil,
 		},
 		{
@@ -400,25 +402,25 @@ func TestValidateSecretInheritance(t *testing.T) {
 		},
 		{
 			name:     "both empty passes",
-			jobRefs:  []SecretRef{},
-			stepRefs: []SecretRef{},
+			jobRefs:  []pm.SecretRef{},
+			stepRefs: []pm.SecretRef{},
 		},
 		{
 			name:     "step overriding job secret returns ErrSecretOverride",
-			jobRefs:  []SecretRef{{Name: "token", Env: "TOKEN"}},
-			stepRefs: []SecretRef{{Name: "token", Mount: "/run/secrets/token"}},
-			wantErr:  ErrSecretOverride,
+			jobRefs:  []pm.SecretRef{{Name: "token", Env: "TOKEN"}},
+			stepRefs: []pm.SecretRef{{Name: "token", Mount: "/run/secrets/token"}},
+			wantErr:  pm.ErrSecretOverride,
 		},
 		{
 			name: "step overriding one of multiple job secrets returns ErrSecretOverride",
-			jobRefs: []SecretRef{
+			jobRefs: []pm.SecretRef{
 				{Name: "token", Env: "TOKEN"},
 				{Name: "cert", Mount: "/run/secrets/cert"},
 			},
-			stepRefs: []SecretRef{
+			stepRefs: []pm.SecretRef{
 				{Name: "cert", Env: "CERT_CONTENT"},
 			},
-			wantErr: ErrSecretOverride,
+			wantErr: pm.ErrSecretOverride,
 		},
 	}
 
@@ -446,10 +448,10 @@ func TestSecretDeclSet(t *testing.T) {
 	t.Run("builds lookup set from decls", func(t *testing.T) {
 		t.Parallel()
 
-		decls := []SecretDecl{
-			{Name: "token", Source: SecretSourceHostEnv},
-			{Name: "cert", Source: SecretSourceFile, Path: "/etc/cert.pem"},
-			{Name: "vault", Source: SecretSourceCmd, Cmd: "vault read"},
+		decls := []pm.SecretDecl{
+			{Name: "token", Source: pm.SecretSourceHostEnv},
+			{Name: "cert", Source: pm.SecretSourceFile, Path: "/etc/cert.pem"},
+			{Name: "vault", Source: pm.SecretSourceCmd, Cmd: "vault read"},
 		}
 
 		got := secretDeclSet(decls)
@@ -471,7 +473,7 @@ func TestSecretDeclSet(t *testing.T) {
 	t.Run("empty decls returns empty set", func(t *testing.T) {
 		t.Parallel()
 
-		got := secretDeclSet([]SecretDecl{})
+		got := secretDeclSet([]pm.SecretDecl{})
 
 		assert.Empty(t, got)
 	})
@@ -479,11 +481,11 @@ func TestSecretDeclSet(t *testing.T) {
 
 // validJob returns a minimal valid job for use in pipeline validation tests.
 // Callers override fields as needed to test specific secret behaviors.
-func validJob(name string) Job {
-	return Job{
+func validJob(name string) pm.Job {
+	return pm.Job{
 		Name:  name,
 		Image: "alpine:latest",
-		Steps: []Step{{Name: "run", Run: []string{"echo ok"}}},
+		Steps: []pm.Step{{Name: "run", Run: []string{"echo ok"}}},
 	}
 }
 
@@ -495,23 +497,23 @@ func TestPipelineValidateSecrets(t *testing.T) {
 
 		// Arrange
 		j := validJob("deploy")
-		j.Secrets = []SecretRef{
+		j.Secrets = []pm.SecretRef{
 			{Name: "gh-token", Env: "GITHUB_TOKEN"},
 			{Name: "tls-cert", Mount: "/run/secrets/cert.pem"},
 		}
 
-		p := Pipeline{
+		p := pm.Pipeline{
 			Name: "test",
-			Secrets: []SecretDecl{
-				{Name: "gh-token", Source: SecretSourceHostEnv, Var: "GH_TOKEN"},
-				{Name: "tls-cert", Source: SecretSourceFile, Path: "/etc/ssl/cert.pem"},
-				{Name: "db-pass", Source: SecretSourceCmd, Cmd: "vault kv get db/pass"},
+			Secrets: []pm.SecretDecl{
+				{Name: "gh-token", Source: pm.SecretSourceHostEnv, Var: "GH_TOKEN"},
+				{Name: "tls-cert", Source: pm.SecretSourceFile, Path: "/etc/ssl/cert.pem"},
+				{Name: "db-pass", Source: pm.SecretSourceCmd, Cmd: "vault kv get db/pass"},
 			},
-			Jobs: []Job{j},
+			Jobs: []pm.Job{j},
 		}
 
 		// Act
-		order, err := p.Validate()
+		order, err := Validate(&p)
 
 		// Assert
 		require.NoError(t, err)
@@ -523,26 +525,26 @@ func TestPipelineValidateSecrets(t *testing.T) {
 
 		// Arrange
 		j := validJob("deploy")
-		j.Secrets = []SecretRef{
+		j.Secrets = []pm.SecretRef{
 			{Name: "gh-token", Env: "GITHUB_TOKEN"},
 		}
-		j.Steps = []Step{{
+		j.Steps = []pm.Step{{
 			Name:    "push",
 			Run:     []string{"deploy.sh"},
-			Secrets: []SecretRef{{Name: "tls-cert", Mount: "/run/secrets/cert"}},
+			Secrets: []pm.SecretRef{{Name: "tls-cert", Mount: "/run/secrets/cert"}},
 		}}
 
-		p := Pipeline{
+		p := pm.Pipeline{
 			Name: "test",
-			Secrets: []SecretDecl{
-				{Name: "gh-token", Source: SecretSourceHostEnv, Var: "GH_TOKEN"},
-				{Name: "tls-cert", Source: SecretSourceFile, Path: "/etc/cert.pem"},
+			Secrets: []pm.SecretDecl{
+				{Name: "gh-token", Source: pm.SecretSourceHostEnv, Var: "GH_TOKEN"},
+				{Name: "tls-cert", Source: pm.SecretSourceFile, Path: "/etc/cert.pem"},
 			},
-			Jobs: []Job{j},
+			Jobs: []pm.Job{j},
 		}
 
 		// Act
-		order, err := p.Validate()
+		order, err := Validate(&p)
 
 		// Assert
 		require.NoError(t, err)
@@ -554,23 +556,23 @@ func TestPipelineValidateSecrets(t *testing.T) {
 
 		// Arrange
 		j := validJob("deploy")
-		j.Secrets = []SecretRef{
+		j.Secrets = []pm.SecretRef{
 			{Name: "nonexistent", Env: "SECRET"},
 		}
 
-		p := Pipeline{
+		p := pm.Pipeline{
 			Name: "test",
-			Secrets: []SecretDecl{
-				{Name: "gh-token", Source: SecretSourceHostEnv, Var: "GH_TOKEN"},
+			Secrets: []pm.SecretDecl{
+				{Name: "gh-token", Source: pm.SecretSourceHostEnv, Var: "GH_TOKEN"},
 			},
-			Jobs: []Job{j},
+			Jobs: []pm.Job{j},
 		}
 
 		// Act
-		_, err := p.Validate()
+		_, err := Validate(&p)
 
 		// Assert
-		require.ErrorIs(t, err, ErrUnknownSecret)
+		require.ErrorIs(t, err, pm.ErrUnknownSecret)
 	})
 
 	t.Run("unknown secret ref in step fails", func(t *testing.T) {
@@ -578,25 +580,25 @@ func TestPipelineValidateSecrets(t *testing.T) {
 
 		// Arrange
 		j := validJob("deploy")
-		j.Steps = []Step{{
+		j.Steps = []pm.Step{{
 			Name:    "push",
 			Run:     []string{"deploy.sh"},
-			Secrets: []SecretRef{{Name: "missing", Env: "SECRET"}},
+			Secrets: []pm.SecretRef{{Name: "missing", Env: "SECRET"}},
 		}}
 
-		p := Pipeline{
+		p := pm.Pipeline{
 			Name: "test",
-			Secrets: []SecretDecl{
-				{Name: "gh-token", Source: SecretSourceHostEnv, Var: "GH_TOKEN"},
+			Secrets: []pm.SecretDecl{
+				{Name: "gh-token", Source: pm.SecretSourceHostEnv, Var: "GH_TOKEN"},
 			},
-			Jobs: []Job{j},
+			Jobs: []pm.Job{j},
 		}
 
 		// Act
-		_, err := p.Validate()
+		_, err := Validate(&p)
 
 		// Assert
-		require.ErrorIs(t, err, ErrUnknownSecret)
+		require.ErrorIs(t, err, pm.ErrUnknownSecret)
 	})
 
 	t.Run("step overriding job secret fails", func(t *testing.T) {
@@ -604,28 +606,28 @@ func TestPipelineValidateSecrets(t *testing.T) {
 
 		// Arrange
 		j := validJob("deploy")
-		j.Secrets = []SecretRef{
+		j.Secrets = []pm.SecretRef{
 			{Name: "gh-token", Env: "GITHUB_TOKEN"},
 		}
-		j.Steps = []Step{{
+		j.Steps = []pm.Step{{
 			Name:    "push",
 			Run:     []string{"deploy.sh"},
-			Secrets: []SecretRef{{Name: "gh-token", Mount: "/run/secrets/token"}},
+			Secrets: []pm.SecretRef{{Name: "gh-token", Mount: "/run/secrets/token"}},
 		}}
 
-		p := Pipeline{
+		p := pm.Pipeline{
 			Name: "test",
-			Secrets: []SecretDecl{
-				{Name: "gh-token", Source: SecretSourceHostEnv, Var: "GH_TOKEN"},
+			Secrets: []pm.SecretDecl{
+				{Name: "gh-token", Source: pm.SecretSourceHostEnv, Var: "GH_TOKEN"},
 			},
-			Jobs: []Job{j},
+			Jobs: []pm.Job{j},
 		}
 
 		// Act
-		_, err := p.Validate()
+		_, err := Validate(&p)
 
 		// Assert
-		require.ErrorIs(t, err, ErrSecretOverride)
+		require.ErrorIs(t, err, pm.ErrSecretOverride)
 	})
 
 	t.Run("invalid pipeline-level secret decl fails", func(t *testing.T) {
@@ -633,19 +635,19 @@ func TestPipelineValidateSecrets(t *testing.T) {
 
 		// Arrange
 		j := validJob("build")
-		p := Pipeline{
+		p := pm.Pipeline{
 			Name: "test",
-			Secrets: []SecretDecl{
-				{Name: "", Source: SecretSourceHostEnv},
+			Secrets: []pm.SecretDecl{
+				{Name: "", Source: pm.SecretSourceHostEnv},
 			},
-			Jobs: []Job{j},
+			Jobs: []pm.Job{j},
 		}
 
 		// Act
-		_, err := p.Validate()
+		_, err := Validate(&p)
 
 		// Assert
-		require.ErrorIs(t, err, ErrEmptySecretName)
+		require.ErrorIs(t, err, pm.ErrEmptySecretName)
 	})
 
 	t.Run("duplicate secret ref in job fails", func(t *testing.T) {
@@ -653,24 +655,24 @@ func TestPipelineValidateSecrets(t *testing.T) {
 
 		// Arrange
 		j := validJob("deploy")
-		j.Secrets = []SecretRef{
+		j.Secrets = []pm.SecretRef{
 			{Name: "token", Env: "TOKEN_A"},
 			{Name: "token", Env: "TOKEN_B"},
 		}
 
-		p := Pipeline{
+		p := pm.Pipeline{
 			Name: "test",
-			Secrets: []SecretDecl{
-				{Name: "token", Source: SecretSourceHostEnv},
+			Secrets: []pm.SecretDecl{
+				{Name: "token", Source: pm.SecretSourceHostEnv},
 			},
-			Jobs: []Job{j},
+			Jobs: []pm.Job{j},
 		}
 
 		// Act
-		_, err := p.Validate()
+		_, err := Validate(&p)
 
 		// Assert
-		require.ErrorIs(t, err, ErrDuplicateSecretRef)
+		require.ErrorIs(t, err, pm.ErrDuplicateSecretRef)
 	})
 
 	t.Run("secret ref with no target in job fails", func(t *testing.T) {
@@ -678,23 +680,23 @@ func TestPipelineValidateSecrets(t *testing.T) {
 
 		// Arrange
 		j := validJob("deploy")
-		j.Secrets = []SecretRef{
+		j.Secrets = []pm.SecretRef{
 			{Name: "token"},
 		}
 
-		p := Pipeline{
+		p := pm.Pipeline{
 			Name: "test",
-			Secrets: []SecretDecl{
-				{Name: "token", Source: SecretSourceHostEnv},
+			Secrets: []pm.SecretDecl{
+				{Name: "token", Source: pm.SecretSourceHostEnv},
 			},
-			Jobs: []Job{j},
+			Jobs: []pm.Job{j},
 		}
 
 		// Act
-		_, err := p.Validate()
+		_, err := Validate(&p)
 
 		// Assert
-		require.ErrorIs(t, err, ErrSecretRefNoTarget)
+		require.ErrorIs(t, err, pm.ErrSecretRefNoTarget)
 	})
 
 	t.Run("secret ref with both targets in job fails", func(t *testing.T) {
@@ -702,23 +704,23 @@ func TestPipelineValidateSecrets(t *testing.T) {
 
 		// Arrange
 		j := validJob("deploy")
-		j.Secrets = []SecretRef{
+		j.Secrets = []pm.SecretRef{
 			{Name: "token", Env: "TOKEN", Mount: "/run/secrets/token"},
 		}
 
-		p := Pipeline{
+		p := pm.Pipeline{
 			Name: "test",
-			Secrets: []SecretDecl{
-				{Name: "token", Source: SecretSourceHostEnv},
+			Secrets: []pm.SecretDecl{
+				{Name: "token", Source: pm.SecretSourceHostEnv},
 			},
-			Jobs: []Job{j},
+			Jobs: []pm.Job{j},
 		}
 
 		// Act
-		_, err := p.Validate()
+		_, err := Validate(&p)
 
 		// Assert
-		require.ErrorIs(t, err, ErrSecretRefBothTarget)
+		require.ErrorIs(t, err, pm.ErrSecretRefBothTarget)
 	})
 
 	t.Run("relative mount path in job fails", func(t *testing.T) {
@@ -726,23 +728,23 @@ func TestPipelineValidateSecrets(t *testing.T) {
 
 		// Arrange
 		j := validJob("deploy")
-		j.Secrets = []SecretRef{
+		j.Secrets = []pm.SecretRef{
 			{Name: "token", Mount: "relative/path"},
 		}
 
-		p := Pipeline{
+		p := pm.Pipeline{
 			Name: "test",
-			Secrets: []SecretDecl{
-				{Name: "token", Source: SecretSourceHostEnv},
+			Secrets: []pm.SecretDecl{
+				{Name: "token", Source: pm.SecretSourceHostEnv},
 			},
-			Jobs: []Job{j},
+			Jobs: []pm.Job{j},
 		}
 
 		// Act
-		_, err := p.Validate()
+		_, err := Validate(&p)
 
 		// Assert
-		require.ErrorIs(t, err, ErrRelativeSecretMount)
+		require.ErrorIs(t, err, pm.ErrRelativeSecretMount)
 	})
 
 	t.Run("invalid env name in job secret ref fails", func(t *testing.T) {
@@ -750,23 +752,23 @@ func TestPipelineValidateSecrets(t *testing.T) {
 
 		// Arrange
 		j := validJob("deploy")
-		j.Secrets = []SecretRef{
+		j.Secrets = []pm.SecretRef{
 			{Name: "token", Env: "1INVALID"},
 		}
 
-		p := Pipeline{
+		p := pm.Pipeline{
 			Name: "test",
-			Secrets: []SecretDecl{
-				{Name: "token", Source: SecretSourceHostEnv, Var: "VALID_VAR"},
+			Secrets: []pm.SecretDecl{
+				{Name: "token", Source: pm.SecretSourceHostEnv, Var: "VALID_VAR"},
 			},
-			Jobs: []Job{j},
+			Jobs: []pm.Job{j},
 		}
 
 		// Act
-		_, err := p.Validate()
+		_, err := Validate(&p)
 
 		// Assert
-		require.ErrorIs(t, err, ErrInvalidSecretEnvName)
+		require.ErrorIs(t, err, pm.ErrInvalidSecretEnvName)
 	})
 
 	t.Run("step env colliding with job env target fails", func(t *testing.T) {
@@ -774,29 +776,29 @@ func TestPipelineValidateSecrets(t *testing.T) {
 
 		// Arrange
 		j := validJob("deploy")
-		j.Secrets = []SecretRef{
+		j.Secrets = []pm.SecretRef{
 			{Name: "token_a", Env: "TOKEN"},
 		}
-		j.Steps = []Step{{
+		j.Steps = []pm.Step{{
 			Name:    "push",
 			Run:     []string{"deploy.sh"},
-			Secrets: []SecretRef{{Name: "token_b", Env: "TOKEN"}},
+			Secrets: []pm.SecretRef{{Name: "token_b", Env: "TOKEN"}},
 		}}
 
-		p := Pipeline{
+		p := pm.Pipeline{
 			Name: "test",
-			Secrets: []SecretDecl{
-				{Name: "token_a", Source: SecretSourceHostEnv},
-				{Name: "token_b", Source: SecretSourceHostEnv},
+			Secrets: []pm.SecretDecl{
+				{Name: "token_a", Source: pm.SecretSourceHostEnv},
+				{Name: "token_b", Source: pm.SecretSourceHostEnv},
 			},
-			Jobs: []Job{j},
+			Jobs: []pm.Job{j},
 		}
 
 		// Act
-		_, err := p.Validate()
+		_, err := Validate(&p)
 
 		// Assert
-		require.ErrorIs(t, err, ErrDuplicateSecretEnvName)
+		require.ErrorIs(t, err, pm.ErrDuplicateSecretEnvName)
 	})
 
 	t.Run("step mount colliding with job mount target fails", func(t *testing.T) {
@@ -804,42 +806,42 @@ func TestPipelineValidateSecrets(t *testing.T) {
 
 		// Arrange
 		j := validJob("deploy")
-		j.Secrets = []SecretRef{
+		j.Secrets = []pm.SecretRef{
 			{Name: "cert_a", Mount: "/run/secrets/cert"},
 		}
-		j.Steps = []Step{{
+		j.Steps = []pm.Step{{
 			Name:    "push",
 			Run:     []string{"deploy.sh"},
-			Secrets: []SecretRef{{Name: "cert_b", Mount: "/run/secrets/cert"}},
+			Secrets: []pm.SecretRef{{Name: "cert_b", Mount: "/run/secrets/cert"}},
 		}}
 
-		p := Pipeline{
+		p := pm.Pipeline{
 			Name: "test",
-			Secrets: []SecretDecl{
-				{Name: "cert_a", Source: SecretSourceFile, Path: "/etc/cert_a.pem"},
-				{Name: "cert_b", Source: SecretSourceFile, Path: "/etc/cert_b.pem"},
+			Secrets: []pm.SecretDecl{
+				{Name: "cert_a", Source: pm.SecretSourceFile, Path: "/etc/cert_a.pem"},
+				{Name: "cert_b", Source: pm.SecretSourceFile, Path: "/etc/cert_b.pem"},
 			},
-			Jobs: []Job{j},
+			Jobs: []pm.Job{j},
 		}
 
 		// Act
-		_, err := p.Validate()
+		_, err := Validate(&p)
 
 		// Assert
-		require.ErrorIs(t, err, ErrDuplicateSecretMount)
+		require.ErrorIs(t, err, pm.ErrDuplicateSecretMount)
 	})
 
 	t.Run("pipeline with no secrets and no refs passes", func(t *testing.T) {
 		t.Parallel()
 
 		// Arrange
-		p := Pipeline{
+		p := pm.Pipeline{
 			Name: "test",
-			Jobs: []Job{validJob("build")},
+			Jobs: []pm.Job{validJob("build")},
 		}
 
 		// Act
-		order, err := p.Validate()
+		order, err := Validate(&p)
 
 		// Assert
 		require.NoError(t, err)

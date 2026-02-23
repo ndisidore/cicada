@@ -11,7 +11,7 @@ import (
 	"github.com/moby/buildkit/client/llb"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/ndisidore/cicada/internal/progress"
+	"github.com/ndisidore/cicada/internal/progress/progressmodel"
 )
 
 // Solver abstracts the BuildKit Solve RPC for testability.
@@ -29,7 +29,7 @@ type Solver interface {
 
 // PullImages pulls all images into the BuildKit cache concurrently by solving
 // minimal LLB definitions.
-func PullImages(ctx context.Context, c Solver, images []string, sender progress.Sender) error {
+func PullImages(ctx context.Context, c Solver, images []string, sender progressmodel.Sender) error {
 	g, gctx := errgroup.WithContext(ctx)
 	for _, ref := range images {
 		g.Go(func() error {
@@ -42,7 +42,7 @@ func PullImages(ctx context.Context, c Solver, images []string, sender progress.
 	return g.Wait()
 }
 
-func pullImage(ctx context.Context, c Solver, ref string, sender progress.Sender) error {
+func pullImage(ctx context.Context, c Solver, ref string, sender progressmodel.Sender) error {
 	st := llb.Image(ref)
 	def, err := st.Marshal(ctx)
 	if err != nil {
@@ -52,10 +52,10 @@ func pullImage(ctx context.Context, c Solver, ref string, sender progress.Sender
 	ch := make(chan *client.SolveStatus)
 	displayName := "pull " + ref
 
-	sender.Send(progress.JobAddedMsg{Job: displayName})
+	sender.Send(progressmodel.JobAddedMsg{Job: displayName})
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		defer func() { sender.Send(progress.JobDoneMsg{Job: displayName}) }()
+		defer func() { sender.Send(progressmodel.JobDoneMsg{Job: displayName}) }()
 		for {
 			select {
 			case <-ctx.Done():
@@ -67,7 +67,7 @@ func pullImage(ctx context.Context, c Solver, ref string, sender progress.Sender
 				if !ok {
 					return
 				}
-				sender.Send(progress.JobStatusMsg{Job: displayName, Status: status})
+				sender.Send(progressmodel.JobStatusMsg{Job: displayName, Status: status})
 			}
 		}
 	})

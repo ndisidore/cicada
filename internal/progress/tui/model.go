@@ -11,7 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/ndisidore/cicada/internal/progress"
+	"github.com/ndisidore/cicada/internal/progress/progressmodel"
 )
 
 // stepStatus represents the current state of a pipeline vertex.
@@ -77,17 +77,17 @@ type jobState struct {
 	order             []digest.Digest
 	logs              []string
 	done              bool
-	skipped           bool                        // true if job was skipped by a when condition
-	skippedSteps      []string                    // step names skipped by static when conditions
-	started           *time.Time                  // earliest vertex start
-	ended             *time.Time                  // latest vertex completion
-	retryAttempt      int                         // current retry attempt (0 = no retry)
-	maxAttempts       int                         // total max attempts
-	timedOut          bool                        // whether the job timed out
-	timeout           time.Duration               // the configured timeout
-	stepTimeouts      map[string]time.Duration    // vertex name -> configured step timeout
-	cmdInfos          map[string]progress.CmdInfo // vertex name -> command metadata
-	allowedFailureSet map[string]struct{}         // step name prefixes whose failures are allowed
+	skipped           bool                             // true if job was skipped by a when condition
+	skippedSteps      []string                         // step names skipped by static when conditions
+	started           *time.Time                       // earliest vertex start
+	ended             *time.Time                       // latest vertex completion
+	retryAttempt      int                              // current retry attempt (0 = no retry)
+	maxAttempts       int                              // total max attempts
+	timedOut          bool                             // whether the job timed out
+	timeout           time.Duration                    // the configured timeout
+	stepTimeouts      map[string]time.Duration         // vertex name -> configured step timeout
+	cmdInfos          map[string]progressmodel.CmdInfo // vertex name -> command metadata
+	allowedFailureSet map[string]struct{}              // step name prefixes whose failures are allowed
 }
 
 // jobDuration returns the wall-clock duration for a completed job. For
@@ -140,7 +140,7 @@ func (js *jobState) applyVertex(v *client.Vertex) {
 
 	switch {
 	case v.Error != "":
-		if progress.IsTimeoutExitCode(v.Error, st.configuredTimeout) {
+		if progressmodel.IsTimeoutExitCode(v.Error, st.configuredTimeout) {
 			st.status = statusTimeout
 		} else {
 			st.status = statusError
@@ -201,7 +201,7 @@ type multiModel struct {
 	boring  bool
 	done    bool
 	frame   int // spinner frame counter
-	syncMsg *progress.SyncMsg
+	syncMsg *progressmodel.SyncMsg
 }
 
 // tickMsg drives the spinner animation (TUI-internal lifecycle).
@@ -229,39 +229,39 @@ func (m *multiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
-	case progress.JobAddedMsg:
+	case progressmodel.JobAddedMsg:
 		js := m.getOrCreateJob(msg.Job)
 		if msg.StepTimeouts != nil {
 			js.stepTimeouts = msg.StepTimeouts
 		}
 		js.cmdInfos = msg.CmdInfos
-	case progress.JobSkippedMsg:
+	case progressmodel.JobSkippedMsg:
 		js := m.getOrCreateJob(msg.Job)
 		if !js.done {
 			js.done = true
 			js.skipped = true
 		}
-	case progress.StepSkippedMsg:
+	case progressmodel.StepSkippedMsg:
 		// StepSkippedMsg is sent after solveJob returns, which sends
 		// JobAddedMsg first, so the job is guaranteed to exist.
 		if js, ok := m.jobs[msg.Job]; ok {
 			js.skippedSteps = append(js.skippedSteps, msg.Step)
 		}
-	case progress.JobStatusMsg:
+	case progressmodel.JobStatusMsg:
 		// JobAddedMsg is always sent before the goroutine that produces
 		// JobStatusMsg, so the job is guaranteed to exist here.
 		if js, ok := m.jobs[msg.Job]; ok {
 			js.applyStatus(msg.Status)
 		}
-	case progress.JobRetryMsg:
+	case progressmodel.JobRetryMsg:
 		js := m.getOrCreateJob(msg.Job)
 		js.retryAttempt = msg.Attempt
 		js.maxAttempts = msg.MaxAttempts
-	case progress.StepRetryMsg:
+	case progressmodel.StepRetryMsg:
 		if js, ok := m.jobs[msg.Job]; ok {
 			js.addLog(fmt.Sprintf("step %q: retrying (attempt %d/%d)", msg.Step, msg.Attempt, msg.MaxAttempts))
 		}
-	case progress.StepAllowedFailureMsg:
+	case progressmodel.StepAllowedFailureMsg:
 		if js, ok := m.jobs[msg.Job]; ok {
 			js.addLog(fmt.Sprintf("step %q: failed (allowed)", msg.Step))
 			prefix := msg.Job + "/" + msg.Step + "/"
@@ -276,7 +276,7 @@ func (m *multiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-	case progress.JobTimeoutMsg:
+	case progressmodel.JobTimeoutMsg:
 		js := m.getOrCreateJob(msg.Job)
 		js.timedOut = true
 		js.timeout = msg.Timeout
@@ -286,9 +286,9 @@ func (m *multiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				st.status = statusTimeout
 			}
 		}
-	case progress.SyncMsg:
+	case progressmodel.SyncMsg:
 		m.syncMsg = &msg
-	case progress.JobDoneMsg:
+	case progressmodel.JobDoneMsg:
 		if js, ok := m.jobs[msg.Job]; ok {
 			js.done = true
 		}

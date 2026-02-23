@@ -6,15 +6,15 @@ import (
 	"context"
 	"sync"
 
-	"github.com/ndisidore/cicada/internal/progress"
+	"github.com/ndisidore/cicada/internal/progress/progressmodel"
 )
 
 // Compile-time interface check.
-var _ progress.Display = (*Display)(nil)
+var _ progressmodel.Display = (*Display)(nil)
 
 // Display drains messages silently; all progress is suppressed.
 type Display struct {
-	ch           chan progress.Msg
+	ch           chan progressmodel.Msg
 	wg           sync.WaitGroup
 	once         sync.Once
 	shutdownOnce sync.Once
@@ -22,7 +22,7 @@ type Display struct {
 
 // New returns a new quiet Display.
 func New() *Display {
-	return &Display{ch: make(chan progress.Msg, 64)}
+	return &Display{ch: make(chan progressmodel.Msg, 64)}
 }
 
 // Start spawns a goroutine to drain the message channel. Idempotent.
@@ -38,7 +38,7 @@ func (q *Display) Start(_ context.Context) error {
 }
 
 // Send delivers a progress message to the display. Safe for concurrent use.
-func (q *Display) Send(msg progress.Msg) {
+func (q *Display) Send(msg progressmodel.Msg) {
 	q.ch <- msg
 }
 

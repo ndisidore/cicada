@@ -9,17 +9,17 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/ndisidore/cicada/internal/progress"
+	"github.com/ndisidore/cicada/internal/progress/progressmodel"
 )
 
 // Compile-time interface check.
-var _ progress.Display = (*Display)(nil)
+var _ progressmodel.Display = (*Display)(nil)
 
 // Display renders progress using a bubbletea interactive terminal display.
 type Display struct {
 	boring       bool
 	p            *tea.Program
-	ch           chan progress.Msg
+	ch           chan progressmodel.Msg
 	wg           sync.WaitGroup
 	once         sync.Once
 	shutdownOnce sync.Once
@@ -29,12 +29,12 @@ type Display struct {
 
 // New returns a Display configured with the given boring mode.
 func New(boring bool) *Display {
-	return &Display{boring: boring, ch: make(chan progress.Msg, 64)}
+	return &Display{boring: boring, ch: make(chan progressmodel.Msg, 64)}
 }
 
 // NewTest returns a Display with extra tea.ProgramOptions for headless testing.
 func NewTest(boring bool, opts []tea.ProgramOption) *Display {
-	return &Display{boring: boring, opts: opts, ch: make(chan progress.Msg, 64)}
+	return &Display{boring: boring, opts: opts, ch: make(chan progressmodel.Msg, 64)}
 }
 
 // Start launches the bubbletea program, creates the message channel, and
@@ -68,7 +68,7 @@ func (t *Display) Start(ctx context.Context) error {
 }
 
 // Send delivers a progress message to the display. Safe for concurrent use.
-func (t *Display) Send(msg progress.Msg) {
+func (t *Display) Send(msg progressmodel.Msg) {
 	t.ch <- msg
 }
 

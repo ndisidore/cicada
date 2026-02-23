@@ -12,9 +12,9 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/ndisidore/cicada/internal/builder"
-	"github.com/ndisidore/cicada/internal/runner"
+	"github.com/ndisidore/cicada/internal/runner/runnermodel"
 	"github.com/ndisidore/cicada/pkg/conditional"
-	"github.com/ndisidore/cicada/pkg/pipeline"
+	"github.com/ndisidore/cicada/pkg/pipeline/pipelinemodel"
 )
 
 func mustNewWhen(tb testing.TB, expr string) *conditional.When {
@@ -291,8 +291,8 @@ func TestBuildRunnerJobs(t *testing.T) {
 	tests := []struct {
 		name         string
 		result       builder.Result
-		pipeline     pipeline.Pipeline
-		want         []runner.Job
+		pipeline     pipelinemodel.Pipeline
+		want         []runnermodel.Job
 		wantSentinel error
 	}{
 		{
@@ -301,13 +301,13 @@ func TestBuildRunnerJobs(t *testing.T) {
 				Definitions: []*llb.Definition{def, def},
 				JobNames:    []string{"a", "b"},
 			},
-			pipeline: pipeline.Pipeline{
-				Jobs: []pipeline.Job{
+			pipeline: pipelinemodel.Pipeline{
+				Jobs: []pipelinemodel.Job{
 					{Name: "a"},
 					{Name: "b", DependsOn: []string{"a"}},
 				},
 			},
-			want: []runner.Job{
+			want: []runnermodel.Job{
 				{Name: "a", Definition: def},
 				{Name: "b", Definition: def, DependsOn: []string{"a"}},
 			},
@@ -318,13 +318,13 @@ func TestBuildRunnerJobs(t *testing.T) {
 				Definitions: []*llb.Definition{def, def},
 				JobNames:    []string{"b", "a"},
 			},
-			pipeline: pipeline.Pipeline{
-				Jobs: []pipeline.Job{
+			pipeline: pipelinemodel.Pipeline{
+				Jobs: []pipelinemodel.Job{
 					{Name: "a"},
 					{Name: "b", DependsOn: []string{"a"}},
 				},
 			},
-			want: []runner.Job{
+			want: []runnermodel.Job{
 				{Name: "b", Definition: def, DependsOn: []string{"a"}},
 				{Name: "a", Definition: def},
 			},
@@ -335,7 +335,7 @@ func TestBuildRunnerJobs(t *testing.T) {
 				Definitions: []*llb.Definition{def},
 				JobNames:    []string{"a", "b"},
 			},
-			pipeline:     pipeline.Pipeline{},
+			pipeline:     pipelinemodel.Pipeline{},
 			wantSentinel: errResultMismatch,
 		},
 		{
@@ -344,8 +344,8 @@ func TestBuildRunnerJobs(t *testing.T) {
 				Definitions: []*llb.Definition{def},
 				JobNames:    []string{"unknown"},
 			},
-			pipeline: pipeline.Pipeline{
-				Jobs: []pipeline.Job{
+			pipeline: pipelinemodel.Pipeline{
+				Jobs: []pipelinemodel.Job{
 					{Name: "a"},
 				},
 			},
@@ -357,19 +357,19 @@ func TestBuildRunnerJobs(t *testing.T) {
 				Definitions: []*llb.Definition{def, def},
 				JobNames:    []string{"build", "deploy"},
 			},
-			pipeline: pipeline.Pipeline{
-				Env: []pipeline.EnvVar{{Key: "STAGE", Value: "dev"}},
-				Jobs: []pipeline.Job{
+			pipeline: pipelinemodel.Pipeline{
+				Env: []pipelinemodel.EnvVar{{Key: "STAGE", Value: "dev"}},
+				Jobs: []pipelinemodel.Job{
 					{Name: "build"},
 					{
 						Name:      "deploy",
 						DependsOn: []string{"build"},
-						Env:       []pipeline.EnvVar{{Key: "STAGE", Value: "prod"}},
+						Env:       []pipelinemodel.EnvVar{{Key: "STAGE", Value: "prod"}},
 						When:      mustNewWhen(t, `output("build", "ok") == "true"`),
 					},
 				},
 			},
-			want: []runner.Job{
+			want: []runnermodel.Job{
 				{Name: "build", Definition: def},
 				{
 					Name: "deploy", Definition: def,
@@ -385,8 +385,8 @@ func TestBuildRunnerJobs(t *testing.T) {
 				Definitions: []*llb.Definition{def, def},
 				JobNames:    []string{"build", "deploy[os=linux]"},
 			},
-			pipeline: pipeline.Pipeline{
-				Jobs: []pipeline.Job{
+			pipeline: pipelinemodel.Pipeline{
+				Jobs: []pipelinemodel.Job{
 					{Name: "build"},
 					{
 						Name:         "deploy[os=linux]",
@@ -396,7 +396,7 @@ func TestBuildRunnerJobs(t *testing.T) {
 					},
 				},
 			},
-			want: []runner.Job{
+			want: []runnermodel.Job{
 				{Name: "build", Definition: def},
 				{
 					Name: "deploy[os=linux]", Definition: def,

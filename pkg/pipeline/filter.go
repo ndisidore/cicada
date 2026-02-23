@@ -1,27 +1,11 @@
 package pipeline
 
 import (
-	"errors"
 	"fmt"
 	"slices"
-)
 
-// Sentinel errors for job filtering.
-var (
-	ErrUnknownStartAt       = errors.New("start-at job not found")
-	ErrUnknownStopAfter     = errors.New("stop-after job not found")
-	ErrUnknownStartAtStep   = errors.New("start-at step not found in job")
-	ErrUnknownStopAfterStep = errors.New("stop-after step not found in job")
-	ErrEmptyStepWindow      = errors.New("step window is empty (start-at step comes after stop-after step)")
-	ErrEmptyFilterResult    = errors.New("filter produces no jobs")
-	ErrOrphanedStep         = errors.New("step specified without job")
+	pm "github.com/ndisidore/cicada/pkg/pipeline/pipelinemodel"
 )
-
-// FilterOpts configures partial pipeline execution.
-type FilterOpts struct {
-	StartAt   string // run from this job (or job:step) forward
-	StopAfter string // run up to and including this job (or job:step)
-}
 
 // filterTarget holds a parsed filter flag value split into job and optional step.
 type filterTarget struct {
@@ -63,9 +47,9 @@ type jobAdj struct {
 
 // buildJobAdj builds adjacency maps and validates that StartAt / StopAfter
 // refer to existing jobs (and steps, when specified).
-func buildJobAdj(jobs []Job, startAt, stopAfter filterTarget) (jobAdj, error) {
+func buildJobAdj(jobs []pm.Job, startAt, stopAfter filterTarget) (jobAdj, error) {
 	nameSet := make(map[string]struct{}, len(jobs))
-	jobByName := make(map[string]*Job, len(jobs))
+	jobByName := make(map[string]*pm.Job, len(jobs))
 	adj := jobAdj{
 		dependents:   make(map[string][]string, len(jobs)),
 		dependencies: make(map[string][]string, len(jobs)),
@@ -79,20 +63,20 @@ func buildJobAdj(jobs []Job, startAt, stopAfter filterTarget) (jobAdj, error) {
 			adj.dependents[dep] = append(adj.dependents[dep], name)
 		}
 	}
-	if err := validateTarget(startAt, nameSet, jobByName, ErrUnknownStartAt, ErrUnknownStartAtStep); err != nil {
+	if err := validateTarget(startAt, nameSet, jobByName, pm.ErrUnknownStartAt, pm.ErrUnknownStartAtStep); err != nil {
 		return jobAdj{}, err
 	}
-	if err := validateTarget(stopAfter, nameSet, jobByName, ErrUnknownStopAfter, ErrUnknownStopAfterStep); err != nil {
+	if err := validateTarget(stopAfter, nameSet, jobByName, pm.ErrUnknownStopAfter, pm.ErrUnknownStopAfterStep); err != nil {
 		return jobAdj{}, err
 	}
 	return adj, nil
 }
 
 // validateTarget checks that a filter target references an existing job and step.
-func validateTarget(t filterTarget, nameSet map[string]struct{}, jobByName map[string]*Job, errJob, errStep error) error {
+func validateTarget(t filterTarget, nameSet map[string]struct{}, jobByName map[string]*pm.Job, errJob, errStep error) error {
 	if t.Job == "" {
 		if t.Step != "" {
-			return fmt.Errorf("step %q: %w", t.Step, ErrOrphanedStep)
+			return fmt.Errorf("step %q: %w", t.Step, pm.ErrOrphanedStep)
 		}
 		return nil
 	}
@@ -106,13 +90,13 @@ func validateTarget(t filterTarget, nameSet map[string]struct{}, jobByName map[s
 }
 
 // jobHasStep reports whether j contains a step with the given name.
-func jobHasStep(j *Job, step string) bool {
-	return slices.ContainsFunc(j.Steps, func(s Step) bool { return s.Name == step })
+func jobHasStep(j *pm.Job, step string) bool {
+	return slices.ContainsFunc(j.Steps, func(s pm.Step) bool { return s.Name == step })
 }
 
 // stepIndex returns the index of the named step, or -1 if not found.
-func stepIndex(steps []Step, name string) int {
-	return slices.IndexFunc(steps, func(s Step) bool { return s.Name == name })
+func stepIndex(steps []pm.Step, name string) int {
+	return slices.IndexFunc(steps, func(s pm.Step) bool { return s.Name == name })
 }
 
 // FilterJobs selects a subgraph of jobs based on start-at / stop-after
@@ -124,7 +108,7 @@ func stepIndex(steps []Step, name string) int {
 //   - stop-after job:step truncates steps after the named step.
 //   - start-at job:step strips exports from steps before the named step.
 //   - Both on the same job create a step window; error if window is empty.
-func FilterJobs(jobs []Job, opts FilterOpts) ([]Job, error) {
+func FilterJobs(jobs []pm.Job, opts pm.FilterOpts) ([]pm.Job, error) {
 	if opts.StartAt == "" && opts.StopAfter == "" {
 		return jobs, nil
 	}
@@ -153,7 +137,7 @@ func FilterJobs(jobs []Job, opts FilterOpts) ([]Job, error) {
 	if len(executionWindow) == 0 {
 		return nil, fmt.Errorf(
 			"start-at=%q stop-after=%q: %w",
-			opts.StartAt, opts.StopAfter, ErrEmptyFilterResult,
+			opts.StartAt, opts.StopAfter, pm.ErrEmptyFilterResult,
 		)
 	}
 
@@ -168,7 +152,7 @@ func FilterJobs(jobs []Job, opts FilterOpts) ([]Job, error) {
 
 	// Filter jobs preserving original order; clone to avoid aliasing the
 	// input. Strip exports from dep-only jobs.
-	filtered := make([]Job, 0, len(fullSet))
+	filtered := make([]pm.Job, 0, len(fullSet))
 	for i := range jobs {
 		if _, ok := fullSet[jobs[i].Name]; !ok {
 			continue
@@ -203,7 +187,7 @@ type stepTrimOpts struct {
 // stop-after truncates steps after the named step; start-at strips exports from
 // earlier steps. When both target the same job, error if start comes after stop.
 // Callers must ensure jobs[i].Steps are pre-cloned (FilterJobs does this).
-func applyStepTrimming(jobs []Job, startAt, stopAfter filterTarget) error {
+func applyStepTrimming(jobs []pm.Job, startAt, stopAfter filterTarget) error {
 	if startAt.Step == "" && stopAfter.Step == "" {
 		return nil
 	}
@@ -216,7 +200,7 @@ func applyStepTrimming(jobs []Job, startAt, stopAfter filterTarget) error {
 		if trim.StartIdx >= 0 && trim.StopIdx >= 0 && trim.StartIdx > trim.StopIdx {
 			return fmt.Errorf(
 				"job %q: start-at step %q (index %d) comes after stop-after step %q (index %d): %w",
-				jobs[i].Name, startAt.Step, trim.StartIdx, stopAfter.Step, trim.StopIdx, ErrEmptyStepWindow,
+				jobs[i].Name, startAt.Step, trim.StartIdx, stopAfter.Step, trim.StopIdx, pm.ErrEmptyStepWindow,
 			)
 		}
 		if trim.StopIdx >= 0 {
@@ -230,7 +214,7 @@ func applyStepTrimming(jobs []Job, startAt, stopAfter filterTarget) error {
 }
 
 // resolveStepTrim computes which step indices to trim for a given job.
-func resolveStepTrim(jobName string, steps []Step, startAt, stopAfter filterTarget) stepTrimOpts {
+func resolveStepTrim(jobName string, steps []pm.Step, startAt, stopAfter filterTarget) stepTrimOpts {
 	opts := stepTrimOpts{StartIdx: -1, StopIdx: -1}
 	if startAt.Step != "" && jobName == startAt.Job {
 		opts.StartIdx = stepIndex(steps, startAt.Step)
@@ -242,7 +226,7 @@ func resolveStepTrim(jobName string, steps []Step, startAt, stopAfter filterTarg
 }
 
 // stripStepExports nils out Exports on all given steps.
-func stripStepExports(steps []Step) {
+func stripStepExports(steps []pm.Step) {
 	for i := range steps {
 		steps[i].Exports = nil
 	}

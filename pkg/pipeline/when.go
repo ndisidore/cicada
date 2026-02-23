@@ -2,28 +2,14 @@ package pipeline
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
 
 	"github.com/ndisidore/cicada/pkg/conditional"
+	pm "github.com/ndisidore/cicada/pkg/pipeline/pipelinemodel"
 	"github.com/ndisidore/cicada/pkg/slogctx"
 )
-
-// Sentinel errors for condition evaluation.
-var (
-	ErrJobCondition  = errors.New("job condition not satisfiable")
-	ErrStepCondition = errors.New("step condition not satisfiable")
-)
-
-// ConditionResult holds the pipeline after static condition evaluation
-// along with the names of jobs and steps that were skipped.
-type ConditionResult struct {
-	Pipeline     Pipeline
-	Skipped      []string            // job names skipped by static conditions
-	SkippedSteps map[string][]string // job name -> step names skipped by static conditions
-}
 
 // EvaluateConditions evaluates static when conditions on a pipeline, removing
 // jobs and steps whose conditions evaluate to false. Deferred conditions
@@ -32,13 +18,13 @@ type ConditionResult struct {
 // map of skipped steps per job.
 //
 //revive:disable-next-line:cognitive-complexity,cyclomatic,function-length EvaluateConditions is a linear pipeline of filter operations; splitting it hurts readability.
-func EvaluateConditions(ctx context.Context, p Pipeline, wctx conditional.Context) (ConditionResult, error) {
+func EvaluateConditions(ctx context.Context, p pm.Pipeline, wctx conditional.Context) (pm.ConditionResult, error) {
 	result := p.Clone()
 	var skippedNames []string
 	logger := slogctx.FromContext(ctx)
 
 	// Phase 1: Evaluate job-level non-deferred conditions.
-	var kept []Job
+	var kept []pm.Job
 	skipped := make(map[string]struct{})
 	for i := range result.Jobs {
 		job := &result.Jobs[i]
@@ -48,7 +34,7 @@ func EvaluateConditions(ctx context.Context, p Pipeline, wctx conditional.Contex
 			jobCtx.Matrix = job.MatrixValues
 			ok, err := job.When.Evaluate(jobCtx)
 			if err != nil {
-				return ConditionResult{}, fmt.Errorf("job %q: %w: %w", job.Name, ErrJobCondition, err)
+				return pm.ConditionResult{}, fmt.Errorf("job %q: %w: %w", job.Name, pm.ErrJobCondition, err)
 			}
 			if !ok {
 				skipped[job.Name] = struct{}{}
@@ -70,7 +56,7 @@ func EvaluateConditions(ctx context.Context, p Pipeline, wctx conditional.Contex
 	var emptyJobs []string
 	for i := range result.Jobs {
 		job := &result.Jobs[i]
-		var keptSteps []Step
+		var keptSteps []pm.Step
 		for si := range job.Steps {
 			step := &job.Steps[si]
 			if step.When != nil && !step.When.Deferred {
@@ -79,7 +65,7 @@ func EvaluateConditions(ctx context.Context, p Pipeline, wctx conditional.Contex
 				stepCtx.Matrix = job.MatrixValues
 				ok, err := step.When.Evaluate(stepCtx)
 				if err != nil {
-					return ConditionResult{}, fmt.Errorf("job %q step %q: %w: %w", job.Name, step.Name, ErrStepCondition, err)
+					return pm.ConditionResult{}, fmt.Errorf("job %q step %q: %w: %w", job.Name, step.Name, pm.ErrStepCondition, err)
 				}
 				if !ok {
 					skippedSteps[job.Name] = append(skippedSteps[job.Name], step.Name)
@@ -103,7 +89,7 @@ func EvaluateConditions(ctx context.Context, p Pipeline, wctx conditional.Contex
 		for _, name := range emptyJobs {
 			emptySet[name] = struct{}{}
 		}
-		var finalJobs []Job
+		var finalJobs []pm.Job
 		for i := range result.Jobs {
 			if _, isEmpty := emptySet[result.Jobs[i].Name]; !isEmpty {
 				finalJobs = append(finalJobs, result.Jobs[i])
@@ -117,11 +103,11 @@ func EvaluateConditions(ctx context.Context, p Pipeline, wctx conditional.Contex
 	}
 
 	result.TopoOrder = nil
-	return ConditionResult{Pipeline: result, Skipped: skippedNames, SkippedSteps: skippedSteps}, nil
+	return pm.ConditionResult{Pipeline: result, Skipped: skippedNames, SkippedSteps: skippedSteps}, nil
 }
 
 // cleanJobRefs removes references to skipped jobs from DependsOn and Artifacts.
-func cleanJobRefs(logger *slog.Logger, job *Job, skipped map[string]struct{}) {
+func cleanJobRefs(logger *slog.Logger, job *pm.Job, skipped map[string]struct{}) {
 	job.DependsOn = slices.DeleteFunc(job.DependsOn, func(dep string) bool {
 		_, skip := skipped[dep]
 		if skip {
@@ -132,7 +118,7 @@ func cleanJobRefs(logger *slog.Logger, job *Job, skipped map[string]struct{}) {
 		}
 		return skip
 	})
-	job.Artifacts = slices.DeleteFunc(job.Artifacts, func(a Artifact) bool {
+	job.Artifacts = slices.DeleteFunc(job.Artifacts, func(a pm.Artifact) bool {
 		_, skip := skipped[a.From]
 		if skip {
 			logger.Warn("dropping artifact from skipped job",
@@ -143,7 +129,7 @@ func cleanJobRefs(logger *slog.Logger, job *Job, skipped map[string]struct{}) {
 		return skip
 	})
 	for si := range job.Steps {
-		job.Steps[si].Artifacts = slices.DeleteFunc(job.Steps[si].Artifacts, func(a Artifact) bool {
+		job.Steps[si].Artifacts = slices.DeleteFunc(job.Steps[si].Artifacts, func(a pm.Artifact) bool {
 			_, skip := skipped[a.From]
 			if skip {
 				logger.Warn("dropping step artifact from skipped job",

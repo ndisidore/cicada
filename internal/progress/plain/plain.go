@@ -13,18 +13,18 @@ import (
 	"github.com/moby/buildkit/client"
 	"github.com/opencontainers/go-digest"
 
-	"github.com/ndisidore/cicada/internal/progress"
+	"github.com/ndisidore/cicada/internal/progress/progressmodel"
 	"github.com/ndisidore/cicada/pkg/slogctx"
 )
 
 // Compile-time interface check.
-var _ progress.Display = (*Display)(nil)
+var _ progressmodel.Display = (*Display)(nil)
 
 // Display consumes progress messages and emits them as slog messages.
 // The slog handler (pretty/json/text) decides how to render.
 type Display struct {
 	ctx          context.Context
-	ch           chan progress.Msg
+	ch           chan progressmodel.Msg
 	wg           sync.WaitGroup
 	once         sync.Once
 	shutdownOnce sync.Once
@@ -32,7 +32,7 @@ type Display struct {
 
 // New returns a new plain Display.
 func New() *Display {
-	return &Display{ch: make(chan progress.Msg, 64)}
+	return &Display{ch: make(chan progressmodel.Msg, 64)}
 }
 
 // Start spawns the consume goroutine. Idempotent.
@@ -45,7 +45,7 @@ func (p *Display) Start(ctx context.Context) error {
 }
 
 // Send delivers a progress message to the display. Safe for concurrent use.
-func (p *Display) Send(msg progress.Msg) {
+func (p *Display) Send(msg progressmodel.Msg) {
 	p.ch <- msg
 }
 
@@ -78,7 +78,7 @@ type jobTracker struct {
 	seen         map[digest.Digest]vertexState
 	pending      map[digest.Digest]timeoutVertex
 	stepTimeouts map[string]time.Duration
-	cmdInfos     map[string]progress.CmdInfo
+	cmdInfos     map[string]progressmodel.CmdInfo
 }
 
 //revive:disable-next-line:cognitive-complexity,cyclomatic,function-length consume is a linear message dispatch loop; splitting it hurts readability.
@@ -100,12 +100,12 @@ func (p *Display) consume() {
 
 	for msg := range p.ch {
 		switch msg := msg.(type) {
-		case progress.JobAddedMsg:
+		case progressmodel.JobAddedMsg:
 			jt := getJob(msg.Job)
 			jt.stepTimeouts = msg.StepTimeouts
 			jt.cmdInfos = msg.CmdInfos
 
-		case progress.JobStatusMsg:
+		case progressmodel.JobStatusMsg:
 			jt := getJob(msg.Job)
 			for _, v := range msg.Status.Vertexes {
 				cfgTimeout := jt.stepTimeouts[v.Name]
@@ -123,25 +123,25 @@ func (p *Display) consume() {
 			}
 			logLogs(p.ctx, log, msg.Job, msg.Status.Logs)
 
-		case progress.JobDoneMsg:
+		case progressmodel.JobDoneMsg:
 			if jt, ok := jobs[msg.Job]; ok {
 				logPendingTimeouts(p.ctx, log, msg.Job, jt.pending)
 			}
 
-		case progress.JobSkippedMsg:
+		case progressmodel.JobSkippedMsg:
 			log.LogAttrs(p.ctx, slog.LevelInfo, "job skipped",
 				slog.String("job", msg.Job),
 				slog.String("event", "job.skipped"),
 			)
 
-		case progress.StepSkippedMsg:
+		case progressmodel.StepSkippedMsg:
 			log.LogAttrs(p.ctx, slog.LevelInfo, "step skipped",
 				slog.String("job", msg.Job),
 				slog.String("step", msg.Step),
 				slog.String("event", "step.skipped"),
 			)
 
-		case progress.JobRetryMsg:
+		case progressmodel.JobRetryMsg:
 			attrs := []slog.Attr{
 				slog.String("job", msg.Job),
 				slog.Int("attempt", msg.Attempt),
@@ -153,7 +153,7 @@ func (p *Display) consume() {
 			attrs = append(attrs, slog.String("event", "job.retry"))
 			log.LogAttrs(p.ctx, slog.LevelWarn, "retrying job", attrs...)
 
-		case progress.StepRetryMsg:
+		case progressmodel.StepRetryMsg:
 			attrs := []slog.Attr{
 				slog.String("job", msg.Job),
 				slog.String("step", msg.Step),
@@ -166,7 +166,7 @@ func (p *Display) consume() {
 			attrs = append(attrs, slog.String("event", "step.retry"))
 			log.LogAttrs(p.ctx, slog.LevelWarn, "retrying step", attrs...)
 
-		case progress.StepAllowedFailureMsg:
+		case progressmodel.StepAllowedFailureMsg:
 			attrs := []slog.Attr{
 				slog.String("job", msg.Job),
 				slog.String("step", msg.Step),
@@ -177,14 +177,14 @@ func (p *Display) consume() {
 			attrs = append(attrs, slog.String("event", "step.allowed_failure"))
 			log.LogAttrs(p.ctx, slog.LevelWarn, "step failed (allowed)", attrs...)
 
-		case progress.JobTimeoutMsg:
+		case progressmodel.JobTimeoutMsg:
 			log.LogAttrs(p.ctx, slog.LevelWarn, "job timed out",
 				slog.String("job", msg.Job),
 				slog.Duration("timeout", msg.Timeout),
 				slog.String("event", "job.timeout"),
 			)
 
-		case progress.LogMsg:
+		case progressmodel.LogMsg:
 			attrs := []slog.Attr{slog.String("event", "log")}
 			if msg.Job != "" {
 				attrs = append(attrs, slog.String("job", msg.Job))
@@ -192,7 +192,7 @@ func (p *Display) consume() {
 			//nolint:sloglint // dynamic msg from LogMsg payload
 			log.LogAttrs(p.ctx, msg.Level, msg.Message, attrs...)
 
-		case progress.SyncMsg:
+		case progressmodel.SyncMsg:
 			log.LogAttrs(p.ctx, slog.LevelInfo, "context synced",
 				slog.Int64("files", msg.FilesWalked),
 				slog.Int64("hashed", msg.FilesHashed),
@@ -200,7 +200,7 @@ func (p *Display) consume() {
 				slog.String("event", "sync.complete"),
 			)
 
-		case progress.ErrorMsg:
+		case progressmodel.ErrorMsg:
 			humanMsg := "unknown error"
 			if msg.Err != nil {
 				humanMsg = msg.Err.Human
@@ -241,7 +241,7 @@ type logVertexInput struct {
 	seen       map[digest.Digest]vertexState
 	cleanName  string
 	cfgTimeout time.Duration
-	cmdInfos   map[string]progress.CmdInfo
+	cmdInfos   map[string]progressmodel.CmdInfo
 }
 
 func logVertex(in logVertexInput) {
@@ -254,12 +254,12 @@ func logVertex(in logVertexInput) {
 
 	switch {
 	case in.v.Error != "":
-		if progress.IsTimeoutExitCode(in.v.Error, in.cfgTimeout) {
+		if progressmodel.IsTimeoutExitCode(in.v.Error, in.cfgTimeout) {
 			attrs := append(base, slog.String("event", "vertex.timeout"), slog.Duration("timeout", in.cfgTimeout))
 			//nolint:sloglint // dynamic msg encodes user-facing formatted output
 			in.log.LogAttrs(in.ctx, slog.LevelWarn, fmt.Sprintf("[%s] TIMEOUT %s", in.jobName, in.cleanName), attrs...)
 		} else {
-			exitInfo := progress.ExitInfo(in.v.Error)
+			exitInfo := progressmodel.ExitInfo(in.v.Error)
 			attrs := append(base, slog.String("event", "vertex.error"), slog.String("error", exitInfo))
 			attrs = appendDebugCmdAttr(in.ctx, in.log, attrs, in.cmdInfos, in.cleanName)
 			//nolint:sloglint // dynamic msg encodes user-facing formatted output
@@ -296,7 +296,7 @@ func logVertex(in logVertexInput) {
 // is enabled and CmdInfo exists for the vertex. The full command is only
 // useful for debugging and may contain internal preamble, so it is gated
 // behind LevelDebug.
-func appendDebugCmdAttr(ctx context.Context, log *slog.Logger, attrs []slog.Attr, cmdInfos map[string]progress.CmdInfo, vertexName string) []slog.Attr {
+func appendDebugCmdAttr(ctx context.Context, log *slog.Logger, attrs []slog.Attr, cmdInfos map[string]progressmodel.CmdInfo, vertexName string) []slog.Attr {
 	if log.Enabled(ctx, slog.LevelDebug) {
 		if ci, ok := cmdInfos[vertexName]; ok && ci.FullCmd != "" {
 			attrs = append(attrs, slog.String("full_cmd", ci.FullCmd))

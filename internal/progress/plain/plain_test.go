@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ndisidore/cicada/internal/progress"
 	"github.com/ndisidore/cicada/internal/progress/plain"
+	"github.com/ndisidore/cicada/internal/progress/progressmodel"
 	"github.com/ndisidore/cicada/pkg/slogctx"
 )
 
@@ -121,11 +121,11 @@ func TestDisplayStatus(t *testing.T) {
 			p := plain.New()
 			require.NoError(t, p.Start(ctx))
 
-			p.Send(progress.JobAddedMsg{Job: "test-step"})
+			p.Send(progressmodel.JobAddedMsg{Job: "test-step"})
 			for _, s := range tt.statuses {
-				p.Send(progress.JobStatusMsg{Job: "test-step", Status: s})
+				p.Send(progressmodel.JobStatusMsg{Job: "test-step", Status: s})
 			}
-			p.Send(progress.JobDoneMsg{Job: "test-step"})
+			p.Send(progressmodel.JobDoneMsg{Job: "test-step"})
 			require.NoError(t, p.Shutdown())
 
 			output := buf.String()
@@ -154,7 +154,7 @@ func TestDisplaySkipStep(t *testing.T) {
 
 	p := plain.New()
 	require.NoError(t, p.Start(ctx))
-	p.Send(progress.StepSkippedMsg{Job: "deploy", Step: "notify"})
+	p.Send(progressmodel.StepSkippedMsg{Job: "deploy", Step: "notify"})
 	require.NoError(t, p.Shutdown())
 
 	output := buf.String()
@@ -173,7 +173,7 @@ func TestDisplaySkip(t *testing.T) {
 
 	p := plain.New()
 	require.NoError(t, p.Start(ctx))
-	p.Send(progress.JobSkippedMsg{Job: "deploy"})
+	p.Send(progressmodel.JobSkippedMsg{Job: "deploy"})
 	require.NoError(t, p.Shutdown())
 
 	output := buf.String()
