@@ -4,7 +4,7 @@ package parser
 import (
 	"fmt"
 
-	"github.com/sblinch/kdl-go/document"
+	kdl "github.com/calico32/kdl-go"
 
 	"github.com/ndisidore/cicada/pkg/pipeline/pipelinemodel"
 )
@@ -12,15 +12,15 @@ import (
 // parseDefaults parses a defaults KDL node into a pipelinemodel.Defaults.
 //
 //revive:disable-next-line:cognitive-complexity,cyclomatic parseDefaults is a flat switch dispatch over child node types; splitting it hurts readability.
-func parseDefaults(node *document.Node, filename string) (pipelinemodel.Defaults, error) {
-	if len(node.Arguments) > 0 {
+func parseDefaults(node *kdl.Node, filename string) (pipelinemodel.Defaults, error) {
+	if len(node.Arguments()) > 0 {
 		return pipelinemodel.Defaults{}, fmt.Errorf(
 			"%s: defaults takes no arguments: %w", filename, ErrExtraArgs,
 		)
 	}
 	var d pipelinemodel.Defaults
-	for _, child := range node.Children {
-		nt := NodeType(child.Name.ValueString())
+	for _, child := range childrenOf(node) {
+		nt := NodeType(child.Name())
 		switch nt {
 		case NodeTypeImage:
 			v, err := requireStringArg(child, filename, string(nt))

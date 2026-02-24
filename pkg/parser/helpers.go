@@ -7,17 +7,21 @@ import (
 	"path/filepath"
 	"strings"
 
-	kdl "github.com/sblinch/kdl-go"
-	"github.com/sblinch/kdl-go/document"
+	kdl "github.com/calico32/kdl-go"
 )
 
 // parseKDL wraps kdl.Parse with a filename context on errors.
-func parseKDL(r io.Reader, filename string) (*document.Document, error) {
+func parseKDL(r io.Reader, filename string) (*kdl.Document, error) {
 	doc, err := kdl.Parse(r)
 	if err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", filename, err)
 	}
 	return doc, nil
+}
+
+// childrenOf returns the child nodes of a KDL node.
+func childrenOf(node *kdl.Node) []*kdl.Node {
+	return node.Children().Nodes
 }
 
 // dirOf returns the directory portion of a file path, suitable for resolving
@@ -37,18 +41,47 @@ func nameFromFilename(filename string) string {
 	return strings.TrimSuffix(filepath.Base(filename), ".kdl")
 }
 
+// coerceValue extracts a typed Go value from a kdl.Value, returning ErrTypeMismatch
+// when the value's kind does not match T.
+func coerceValue[T any](v kdl.Value, ctx string) (T, error) {
+	var zero T
+	switch any(zero).(type) {
+	case string:
+		if v.Kind() != kdl.String {
+			return zero, fmt.Errorf("%s: not a %T: %w", ctx, zero, ErrTypeMismatch)
+		}
+		//revive:disable-next-line:unchecked-type-assertion T is constrained to string by the type-switch case guard.
+		return any(v.String()).(T), nil
+	case int:
+		if v.Kind() != kdl.Int {
+			return zero, fmt.Errorf("%s: not a %T: %w", ctx, zero, ErrTypeMismatch)
+		}
+		//revive:disable-next-line:unchecked-type-assertion T is constrained to int by the type-switch case guard.
+		return any(v.Int()).(T), nil
+	case bool:
+		if v.Kind() != kdl.Bool {
+			return zero, fmt.Errorf("%s: not a %T: %w", ctx, zero, ErrTypeMismatch)
+		}
+		//revive:disable-next-line:unchecked-type-assertion T is constrained to bool by the type-switch case guard.
+		return any(v.Bool()).(T), nil
+	default:
+		return zero, fmt.Errorf("%s: unsupported type %T: %w", ctx, zero, ErrTypeMismatch)
+	}
+}
+
 // stringArgs2 extracts exactly two string arguments from a node.
-func stringArgs2(node *document.Node, filename, field string) ([2]string, error) {
+func stringArgs2(node *kdl.Node, filename, field string) ([2]string, error) {
+	args := node.Arguments()
 	switch {
-	case len(node.Arguments) < 2:
+	case len(args) < 2:
 		return [2]string{}, fmt.Errorf(
 			"%s: %s requires exactly two arguments, got %d: %w",
-			filename, field, len(node.Arguments), ErrMissingField,
+			filename, field, len(args), ErrMissingField,
 		)
-	case len(node.Arguments) > 2:
+	case len(args) > 2:
 		return [2]string{}, fmt.Errorf(
 			"%s: %s requires exactly two arguments, got %d: %w",
-			filename, field, len(node.Arguments), ErrExtraArgs,
+			filename, field, len(args), ErrExtraArgs,
 		)
 	}
 	first, err := arg[string](node, 0)
@@ -67,7 +100,7 @@ func stringArgs2(node *document.Node, filename, field string) ([2]string, error)
 }
 
 // requireStringArg extracts the first string argument, wrapping errors with context.
-func requireStringArg(node *document.Node, filename, field string) (string, error) {
+func requireStringArg(node *kdl.Node, filename, field string) (string, error) {
 	v, err := arg[string](node, 0)
 	if err != nil {
 		return "", fmt.Errorf(
@@ -78,31 +111,24 @@ func requireStringArg(node *document.Node, filename, field string) (string, erro
 }
 
 // arg returns the typed value at the given argument index, or an error.
-func arg[T any](node *document.Node, idx int) (T, error) {
+func arg[T any](node *kdl.Node, idx int) (T, error) {
 	var zero T
-	if idx >= len(node.Arguments) {
+	args := node.Arguments()
+	if idx >= len(args) {
 		return zero, fmt.Errorf("argument %d: %w", idx, ErrMissingField)
 	}
-	v, ok := node.Arguments[idx].ResolvedValue().(T)
-	if !ok {
-		return zero, fmt.Errorf("argument %d: not a %T: %w", idx, zero, ErrTypeMismatch)
-	}
-	return v, nil
+	return coerceValue[T](args[idx], fmt.Sprintf("argument %d", idx))
 }
 
 // prop reads an optional typed property from a node.
 // Returns the zero value when the property is absent.
-func prop[T any](node *document.Node, key string) (T, error) {
+func prop[T any](node *kdl.Node, key string) (T, error) {
 	var zero T
-	v, ok := node.Properties[key]
+	v, ok := node.Properties()[key]
 	if !ok {
 		return zero, nil
 	}
-	t, ok := v.ResolvedValue().(T)
-	if !ok {
-		return zero, fmt.Errorf("property %q: not a %T: %w", key, zero, ErrTypeMismatch)
-	}
-	return t, nil
+	return coerceValue[T](v, fmt.Sprintf("property %q", key))
 }
 
 // setOnce assigns value to *dst if *dst is the zero value, or returns

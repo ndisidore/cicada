@@ -3,6 +3,7 @@ module github.com/ndisidore/cicada
 go 1.25.7
 
 require (
+	github.com/calico32/kdl-go v0.10.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/containerd/errdefs v1.0.0
@@ -12,7 +13,6 @@ require (
 	github.com/moby/buildkit v0.27.1
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
-	github.com/sblinch/kdl-go v0.0.0-20260121213736-8b7053306ca6 // no tagged release; revisit when v1.0.0 is available
 	github.com/stretchr/testify v1.11.1
 	github.com/tonistiigi/fsutil v0.0.0-20251211185533-a2aa163d723f
 	github.com/urfave/cli/v3 v3.6.2

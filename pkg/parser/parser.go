@@ -9,7 +9,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/sblinch/kdl-go/document"
+	kdl "github.com/calico32/kdl-go"
 
 	"github.com/ndisidore/cicada/pkg/pipeline"
 	"github.com/ndisidore/cicada/pkg/pipeline/pipelinemodel"
@@ -108,13 +108,13 @@ type pipelineAcc struct {
 //
 //revive:disable-next-line:cognitive-complexity,cyclomatic parsePipelineChild is a flat switch dispatch; splitting it hurts readability.
 func (p *Parser) parsePipelineChild(
-	child *document.Node,
+	child *kdl.Node,
 	filename string,
 	state *includeState,
 	gc *groupCollector,
 	acc *pipelineAcc,
 ) error {
-	switch nt := NodeType(child.Name.ValueString()); nt {
+	switch nt := NodeType(child.Name()); nt {
 	case NodeTypeStep:
 		// Bare step sugar: desugar into a single-step job.
 		job, err := parseBareStep(child, filename)
