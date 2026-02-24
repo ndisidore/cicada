@@ -126,20 +126,20 @@ func (c *HashCache) Save() error {
 
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
-		_ = os.Remove(tmpName)
+		_ = os.Remove(tmpName) //nolint:gosec // G703: path comes from os.CreateTemp, not user input
 		return fmt.Errorf("writing temp cache file: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		_ = os.Remove(tmpName)
+		_ = os.Remove(tmpName) //nolint:gosec // G703: path comes from os.CreateTemp, not user input
 		return fmt.Errorf("syncing temp cache file: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
+		_ = os.Remove(tmpName) //nolint:gosec // G703: path comes from os.CreateTemp, not user input
 		return fmt.Errorf("closing temp cache file: %w", err)
 	}
-	if err := os.Rename(tmpName, c.path); err != nil {
-		_ = os.Remove(tmpName)
+	if err := os.Rename(tmpName, c.path); err != nil { //nolint:gosec // G703: path comes from os.CreateTemp, not user input
+		_ = os.Remove(tmpName) //nolint:gosec // G703: path comes from os.CreateTemp, not user input
 		return fmt.Errorf("renaming cache file: %w", err)
 	}
 	return nil
