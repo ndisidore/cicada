@@ -13,24 +13,24 @@ import (
 	"github.com/tonistiigi/fsutil"
 	"github.com/tonistiigi/fsutil/types"
 
-	"github.com/ndisidore/cicada/internal/progress"
+	"github.com/ndisidore/cicada/internal/progress/progressmodel"
 )
 
 // captureSender captures the last SyncMsg sent.
 type captureSender struct {
 	mu  sync.Mutex
-	msg *progress.SyncMsg
+	msg *progressmodel.SyncMsg
 }
 
-func (s *captureSender) Send(m progress.Msg) {
-	if sm, ok := m.(progress.SyncMsg); ok {
+func (s *captureSender) Send(m progressmodel.Msg) {
+	if sm, ok := m.(progressmodel.SyncMsg); ok {
 		s.mu.Lock()
 		s.msg = &sm
 		s.mu.Unlock()
 	}
 }
 
-func (s *captureSender) get() *progress.SyncMsg {
+func (s *captureSender) get() *progressmodel.SyncMsg {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.msg

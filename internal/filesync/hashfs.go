@@ -11,7 +11,7 @@ import (
 	"github.com/tonistiigi/fsutil"
 	"github.com/tonistiigi/fsutil/types"
 
-	"github.com/ndisidore/cicada/internal/progress"
+	"github.com/ndisidore/cicada/internal/progress/progressmodel"
 	"github.com/ndisidore/cicada/pkg/slogctx"
 )
 
@@ -20,8 +20,8 @@ var _ fsutil.FS = (*hashFS)(nil)
 
 // Options configures the content-hash FS wrapper.
 type Options struct {
-	Cache  *HashCache      // persistent hash store; nil = no caching
-	Sender progress.Sender // receives SyncMsg after Walk; nil = no reporting
+	Cache  *HashCache           // persistent hash store; nil = no caching
+	Sender progressmodel.Sender // receives SyncMsg after Walk; nil = no reporting
 }
 
 // New wraps a base fsutil.FS with content-hash change detection and
@@ -38,7 +38,7 @@ func New(inner fsutil.FS, opts Options) fsutil.FS {
 type hashFS struct {
 	inner   fsutil.FS
 	cache   *HashCache
-	sender  progress.Sender
+	sender  progressmodel.Sender
 	metrics syncMetrics
 }
 
@@ -96,7 +96,7 @@ func (fs *hashFS) Walk(ctx context.Context, target string, fn gofs.WalkDirFunc) 
 	}
 
 	if fs.sender != nil && err == nil {
-		fs.sender.Send(progress.SyncMsg{
+		fs.sender.Send(progressmodel.SyncMsg{
 			FilesWalked: fs.metrics.filesWalked.Load(),
 			FilesHashed: fs.metrics.filesHashed.Load(),
 			CacheHits:   fs.metrics.cacheHits.Load(),

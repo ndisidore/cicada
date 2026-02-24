@@ -12,7 +12,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/ndisidore/cicada/pkg/pipeline"
+	"github.com/ndisidore/cicada/pkg/pipeline/pipelinemodel"
 )
 
 // _maxSecretFileSize caps file-sourced secrets to match BuildKit's
@@ -28,12 +28,12 @@ type ResolvedSecret struct {
 // Resolve resolves all secret declarations to concrete values. Host-side
 // resolution happens before BuildKit solve so secrets never leave the host
 // except through BuildKit's session gRPC.
-func Resolve(ctx context.Context, decls []pipeline.SecretDecl) ([]ResolvedSecret, error) {
+func Resolve(ctx context.Context, decls []pipelinemodel.SecretDecl) ([]ResolvedSecret, error) {
 	out := make([]ResolvedSecret, len(decls))
 	for i, d := range decls {
 		val, err := resolveOne(ctx, d)
 		if err != nil {
-			return nil, fmt.Errorf("secret %q: %w: %w", d.Name, pipeline.ErrSecretResolution, err)
+			return nil, fmt.Errorf("secret %q: %w: %w", d.Name, pipelinemodel.ErrSecretResolution, err)
 		}
 		out[i] = ResolvedSecret{Name: d.Name, Value: val}
 	}
@@ -63,20 +63,20 @@ func PlaintextValues(secrets []ResolvedSecret) map[string]string {
 	return m
 }
 
-func resolveOne(ctx context.Context, d pipeline.SecretDecl) ([]byte, error) {
+func resolveOne(ctx context.Context, d pipelinemodel.SecretDecl) ([]byte, error) {
 	switch d.Source {
-	case pipeline.SecretSourceHostEnv:
+	case pipelinemodel.SecretSourceHostEnv:
 		return resolveHostEnv(d)
-	case pipeline.SecretSourceFile:
+	case pipelinemodel.SecretSourceFile:
 		return resolveFile(d)
-	case pipeline.SecretSourceCmd:
+	case pipelinemodel.SecretSourceCmd:
 		return resolveCmd(ctx, d)
 	default:
 		return nil, fmt.Errorf("unknown source %q", d.Source)
 	}
 }
 
-func resolveHostEnv(d pipeline.SecretDecl) ([]byte, error) {
+func resolveHostEnv(d pipelinemodel.SecretDecl) ([]byte, error) {
 	envName := d.Var
 	if envName == "" {
 		envName = d.Name
@@ -88,7 +88,7 @@ func resolveHostEnv(d pipeline.SecretDecl) ([]byte, error) {
 	return []byte(val), nil
 }
 
-func resolveFile(d pipeline.SecretDecl) ([]byte, error) {
+func resolveFile(d pipelinemodel.SecretDecl) ([]byte, error) {
 	path := expandHome(d.Path)
 	f, err := os.Open(path)
 	if err != nil {
@@ -115,7 +115,7 @@ func resolveFile(d pipeline.SecretDecl) ([]byte, error) {
 	return data, nil
 }
 
-func resolveCmd(ctx context.Context, d pipeline.SecretDecl) ([]byte, error) {
+func resolveCmd(ctx context.Context, d pipelinemodel.SecretDecl) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "sh", "-c", d.Cmd) //nolint:gosec // G204: Cmd comes from user's pipeline definition, not external input.
 	out, err := cmd.Output()
 	if err != nil {

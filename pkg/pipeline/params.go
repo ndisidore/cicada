@@ -1,26 +1,30 @@
 package pipeline
 
-import "fmt"
+import (
+	"fmt"
+
+	pm "github.com/ndisidore/cicada/pkg/pipeline/pipelinemodel"
+)
 
 // ValidateParams checks that all required params are provided and no unknown
 // params are passed.
-func ValidateParams(defs []ParamDef, provided map[string]string) error {
+func ValidateParams(defs []pm.ParamDef, provided map[string]string) error {
 	known := make(map[string]struct{}, len(defs))
 	for i := range defs {
 		name := defs[i].Name
 		if _, ok := known[name]; ok {
-			return fmt.Errorf("param %q: %w", name, ErrDuplicateParam)
+			return fmt.Errorf("param %q: %w", name, pm.ErrDuplicateParam)
 		}
 		known[name] = struct{}{}
 		if defs[i].Required {
 			if _, ok := provided[name]; !ok {
-				return fmt.Errorf("param %q: %w", name, ErrMissingParam)
+				return fmt.Errorf("param %q: %w", name, pm.ErrMissingParam)
 			}
 		}
 	}
 	for k := range provided {
 		if _, ok := known[k]; !ok {
-			return fmt.Errorf("param %q: %w", k, ErrUnknownParam)
+			return fmt.Errorf("param %q: %w", k, pm.ErrUnknownParam)
 		}
 	}
 	return nil
@@ -28,9 +32,9 @@ func ValidateParams(defs []ParamDef, provided map[string]string) error {
 
 // ResolveParams merges provided values with defaults, returning the final
 // param map. Calls ValidateParams internally.
-func ResolveParams(defs []ParamDef, provided map[string]string) (map[string]string, error) {
+func ResolveParams(defs []pm.ParamDef, provided map[string]string) (map[string]string, error) {
 	if err := ValidateParams(defs, provided); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("resolve params: %w", err)
 	}
 	resolved := make(map[string]string, len(defs))
 	for i := range defs {
@@ -44,11 +48,11 @@ func ResolveParams(defs []ParamDef, provided map[string]string) (map[string]stri
 }
 
 // SubstituteParams replaces ${param.*} placeholders in all job and step fields.
-func SubstituteParams(jobs []Job, params map[string]string) []Job {
+func SubstituteParams(jobs []pm.Job, params map[string]string) []pm.Job {
 	if len(params) == 0 {
 		return jobs
 	}
-	return mapSlice(jobs, func(j Job) Job {
+	return mapSlice(jobs, func(j pm.Job) pm.Job {
 		return substituteJobVars(j, params, "param.")
 	})
 }
@@ -56,12 +60,12 @@ func SubstituteParams(jobs []Job, params map[string]string) []Job {
 // SubstituteSecretDeclParams replaces ${param.*} placeholders in secret
 // declaration fields (Var, Path, Cmd). Called at pipeline level during include
 // resolution.
-func SubstituteSecretDeclParams(decls []SecretDecl, params map[string]string) []SecretDecl {
+func SubstituteSecretDeclParams(decls []pm.SecretDecl, params map[string]string) []pm.SecretDecl {
 	if len(params) == 0 || len(decls) == 0 {
 		return decls
 	}
 	sub := func(v string) string { return substituteVars(v, params, "param.") }
-	out := make([]SecretDecl, len(decls))
+	out := make([]pm.SecretDecl, len(decls))
 	copy(out, decls)
 	substituteSecretDecls(out, sub)
 	return out
@@ -69,7 +73,7 @@ func SubstituteSecretDeclParams(decls []SecretDecl, params map[string]string) []
 
 // substituteJobVars applies ${prefix.key} substitution to all string fields
 // of a job and its steps. Returns a deep copy with substitutions applied.
-func substituteJobVars(j Job, combo map[string]string, prefix string) Job {
+func substituteJobVars(j pm.Job, combo map[string]string, prefix string) pm.Job {
 	sub := func(v string) string { return substituteVars(v, combo, prefix) }
 	c := j.Clone()
 	c.Image = sub(c.Image)
@@ -97,7 +101,7 @@ func substituteJobVars(j Job, combo map[string]string, prefix string) Job {
 
 // substituteStepFields applies in-place substitution to all string fields of
 // a step. The step's slice fields must already be cloned (via Job.Clone).
-func substituteStepFields(s *Step, sub func(string) string) {
+func substituteStepFields(s *pm.Step, sub func(string) string) {
 	for i := range s.Run {
 		s.Run[i] = sub(s.Run[i])
 	}
@@ -115,7 +119,7 @@ func substituteStepFields(s *Step, sub func(string) string) {
 }
 
 // substituteMatrixValues applies in-place substitution to all dimension values.
-func substituteMatrixValues(m *Matrix, sub func(string) string) {
+func substituteMatrixValues(m *pm.Matrix, sub func(string) string) {
 	if m == nil {
 		return
 	}
@@ -128,41 +132,41 @@ func substituteMatrixValues(m *Matrix, sub func(string) string) {
 
 // In-place substitution helpers for shared slice field types.
 
-func substituteMounts(mounts []Mount, sub func(string) string) {
+func substituteMounts(mounts []pm.Mount, sub func(string) string) {
 	for i := range mounts {
 		mounts[i].Source = sub(mounts[i].Source)
 		mounts[i].Target = sub(mounts[i].Target)
 	}
 }
 
-func substituteCaches(caches []Cache, sub func(string) string) {
+func substituteCaches(caches []pm.Cache, sub func(string) string) {
 	for i := range caches {
 		caches[i].ID = sub(caches[i].ID)
 		caches[i].Target = sub(caches[i].Target)
 	}
 }
 
-func substituteEnvValues(envs []EnvVar, sub func(string) string) {
+func substituteEnvValues(envs []pm.EnvVar, sub func(string) string) {
 	for i := range envs {
 		envs[i].Value = sub(envs[i].Value)
 	}
 }
 
-func substituteExports(exports []Export, sub func(string) string) {
+func substituteExports(exports []pm.Export, sub func(string) string) {
 	for i := range exports {
 		exports[i].Path = sub(exports[i].Path)
 		exports[i].Local = sub(exports[i].Local)
 	}
 }
 
-func substituteArtifacts(artifacts []Artifact, sub func(string) string) {
+func substituteArtifacts(artifacts []pm.Artifact, sub func(string) string) {
 	for i := range artifacts {
 		artifacts[i].Source = sub(artifacts[i].Source)
 		artifacts[i].Target = sub(artifacts[i].Target)
 	}
 }
 
-func substituteSecretDecls(decls []SecretDecl, sub func(string) string) {
+func substituteSecretDecls(decls []pm.SecretDecl, sub func(string) string) {
 	for i := range decls {
 		decls[i].Var = sub(decls[i].Var)
 		decls[i].Path = sub(decls[i].Path)
@@ -170,7 +174,7 @@ func substituteSecretDecls(decls []SecretDecl, sub func(string) string) {
 	}
 }
 
-func substituteSecretRefs(refs []SecretRef, sub func(string) string) {
+func substituteSecretRefs(refs []pm.SecretRef, sub func(string) string) {
 	for i := range refs {
 		refs[i].Env = sub(refs[i].Env)
 		refs[i].Mount = sub(refs[i].Mount)

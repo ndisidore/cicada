@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ndisidore/cicada/pkg/conditional"
+	pm "github.com/ndisidore/cicada/pkg/pipeline/pipelinemodel"
 )
 
 func TestEvaluateConditions(t *testing.T) {
@@ -26,20 +27,20 @@ func TestEvaluateConditions(t *testing.T) {
 
 	t.Run("job skip removes job and cleans refs", func(t *testing.T) {
 		t.Parallel()
-		p := Pipeline{
-			Jobs: []Job{
-				{Name: "build", Image: "alpine", Steps: []Step{{Name: "s1", Run: []string{"echo"}}}},
+		p := pm.Pipeline{
+			Jobs: []pm.Job{
+				{Name: "build", Image: "alpine", Steps: []pm.Step{{Name: "s1", Run: []string{"echo"}}}},
 				{
 					Name: "deploy", Image: "alpine",
 					When:      &conditional.When{Expression: `hostEnv("DEPLOY") == "true"`},
 					DependsOn: []string{"build"},
-					Steps:     []Step{{Name: "s1", Run: []string{"echo"}}},
+					Steps:     []pm.Step{{Name: "s1", Run: []string{"echo"}}},
 				},
 				{
 					Name: "notify", Image: "alpine",
 					DependsOn: []string{"deploy"},
-					Artifacts: []Artifact{{From: "deploy", Source: "/out", Target: "/in"}},
-					Steps:     []Step{{Name: "s1", Run: []string{"echo"}}},
+					Artifacts: []pm.Artifact{{From: "deploy", Source: "/out", Target: "/in"}},
+					Steps:     []pm.Step{{Name: "s1", Run: []string{"echo"}}},
 				},
 			},
 		}
@@ -56,11 +57,11 @@ func TestEvaluateConditions(t *testing.T) {
 
 	t.Run("step skip removes step", func(t *testing.T) {
 		t.Parallel()
-		p := Pipeline{
-			Jobs: []Job{
+		p := pm.Pipeline{
+			Jobs: []pm.Job{
 				{
 					Name: "test", Image: "alpine",
-					Steps: []Step{
+					Steps: []pm.Step{
 						{Name: "fast", Run: []string{"echo fast"}},
 						{
 							Name: "slow", Run: []string{"echo slow"},
@@ -82,11 +83,11 @@ func TestEvaluateConditions(t *testing.T) {
 
 	t.Run("all steps skipped removes job", func(t *testing.T) {
 		t.Parallel()
-		p := Pipeline{
-			Jobs: []Job{
+		p := pm.Pipeline{
+			Jobs: []pm.Job{
 				{
 					Name: "conditional", Image: "alpine",
-					Steps: []Step{
+					Steps: []pm.Step{
 						{
 							Name: "only-deploy", Run: []string{"echo"},
 							When: &conditional.When{Expression: `hostEnv("DEPLOY") == "true"`},
@@ -96,7 +97,7 @@ func TestEvaluateConditions(t *testing.T) {
 				{
 					Name: "downstream", Image: "alpine",
 					DependsOn: []string{"conditional"},
-					Steps:     []Step{{Name: "s1", Run: []string{"echo"}}},
+					Steps:     []pm.Step{{Name: "s1", Run: []string{"echo"}}},
 				},
 			},
 		}
@@ -112,14 +113,14 @@ func TestEvaluateConditions(t *testing.T) {
 
 	t.Run("deferred conditions are skipped", func(t *testing.T) {
 		t.Parallel()
-		p := Pipeline{
-			Jobs: []Job{
-				{Name: "check", Image: "alpine", Steps: []Step{{Name: "s1", Run: []string{"echo"}}}},
+		p := pm.Pipeline{
+			Jobs: []pm.Job{
+				{Name: "check", Image: "alpine", Steps: []pm.Step{{Name: "s1", Run: []string{"echo"}}}},
 				{
 					Name: "deploy", Image: "alpine",
 					When:      &conditional.When{Expression: `output("check", "ready") == "yes"`, Deferred: true},
 					DependsOn: []string{"check"},
-					Steps:     []Step{{Name: "s1", Run: []string{"echo"}}},
+					Steps:     []pm.Step{{Name: "s1", Run: []string{"echo"}}},
 				},
 			},
 		}
@@ -133,9 +134,9 @@ func TestEvaluateConditions(t *testing.T) {
 
 	t.Run("no when always runs", func(t *testing.T) {
 		t.Parallel()
-		p := Pipeline{
-			Jobs: []Job{
-				{Name: "always", Image: "alpine", Steps: []Step{{Name: "s1", Run: []string{"echo"}}}},
+		p := pm.Pipeline{
+			Jobs: []pm.Job{
+				{Name: "always", Image: "alpine", Steps: []pm.Step{{Name: "s1", Run: []string{"echo"}}}},
 			},
 		}
 
@@ -148,12 +149,12 @@ func TestEvaluateConditions(t *testing.T) {
 
 	t.Run("when evaluates to true keeps job", func(t *testing.T) {
 		t.Parallel()
-		p := Pipeline{
-			Jobs: []Job{
+		p := pm.Pipeline{
+			Jobs: []pm.Job{
 				{
 					Name: "build", Image: "alpine",
 					When:  &conditional.When{Expression: `branch == "main"`},
-					Steps: []Step{{Name: "s1", Run: []string{"echo"}}},
+					Steps: []pm.Step{{Name: "s1", Run: []string{"echo"}}},
 				},
 			},
 		}
@@ -167,8 +168,8 @@ func TestEvaluateConditions(t *testing.T) {
 
 	t.Run("clears TopoOrder", func(t *testing.T) {
 		t.Parallel()
-		p := Pipeline{
-			Jobs:      []Job{{Name: "a", Image: "alpine", Steps: []Step{{Name: "s", Run: []string{"echo"}}}}},
+		p := pm.Pipeline{
+			Jobs:      []pm.Job{{Name: "a", Image: "alpine", Steps: []pm.Step{{Name: "s", Run: []string{"echo"}}}}},
 			TopoOrder: []int{0},
 		}
 
@@ -179,20 +180,20 @@ func TestEvaluateConditions(t *testing.T) {
 
 	t.Run("step artifact from skipped job cleaned", func(t *testing.T) {
 		t.Parallel()
-		p := Pipeline{
-			Jobs: []Job{
+		p := pm.Pipeline{
+			Jobs: []pm.Job{
 				{
 					Name: "provider", Image: "alpine",
 					When:  &conditional.When{Expression: `hostEnv("DEPLOY") == "true"`},
-					Steps: []Step{{Name: "s1", Run: []string{"echo"}}},
+					Steps: []pm.Step{{Name: "s1", Run: []string{"echo"}}},
 				},
 				{
 					Name: "consumer", Image: "alpine",
 					DependsOn: []string{"provider"},
-					Steps: []Step{
+					Steps: []pm.Step{
 						{
 							Name: "s1", Run: []string{"echo"},
-							Artifacts: []Artifact{{From: "provider", Source: "/out", Target: "/in"}},
+							Artifacts: []pm.Artifact{{From: "provider", Source: "/out", Target: "/in"}},
 						},
 					},
 				},
@@ -208,35 +209,35 @@ func TestEvaluateConditions(t *testing.T) {
 
 	t.Run("invalid job condition returns ErrJobCondition", func(t *testing.T) {
 		t.Parallel()
-		p := Pipeline{
-			Jobs: []Job{
+		p := pm.Pipeline{
+			Jobs: []pm.Job{
 				{
 					Name: "bad", Image: "alpine",
 					When:  &conditional.When{Expression: `invalid!!!`},
-					Steps: []Step{{Name: "s1", Run: []string{"echo"}}},
+					Steps: []pm.Step{{Name: "s1", Run: []string{"echo"}}},
 				},
 			},
 		}
 
 		_, err := EvaluateConditions(ctx, p, wctx)
-		require.ErrorIs(t, err, ErrJobCondition)
+		require.ErrorIs(t, err, pm.ErrJobCondition)
 	})
 
 	t.Run("matrix condition skips non-matching variant", func(t *testing.T) {
 		t.Parallel()
-		p := Pipeline{
-			Jobs: []Job{
+		p := pm.Pipeline{
+			Jobs: []pm.Job{
 				{
 					Name: "deploy[os=linux]", Image: "alpine",
 					MatrixValues: map[string]string{"os": "linux"},
 					When:         &conditional.When{Expression: `matrix("os") == "darwin"`},
-					Steps:        []Step{{Name: "s1", Run: []string{"echo"}}},
+					Steps:        []pm.Step{{Name: "s1", Run: []string{"echo"}}},
 				},
 				{
 					Name: "deploy[os=darwin]", Image: "alpine",
 					MatrixValues: map[string]string{"os": "darwin"},
 					When:         &conditional.When{Expression: `matrix("os") == "darwin"`},
-					Steps:        []Step{{Name: "s1", Run: []string{"echo"}}},
+					Steps:        []pm.Step{{Name: "s1", Run: []string{"echo"}}},
 				},
 			},
 		}
@@ -250,12 +251,12 @@ func TestEvaluateConditions(t *testing.T) {
 
 	t.Run("matrix step condition uses job MatrixValues", func(t *testing.T) {
 		t.Parallel()
-		p := Pipeline{
-			Jobs: []Job{
+		p := pm.Pipeline{
+			Jobs: []pm.Job{
 				{
 					Name: "build[os=linux]", Image: "alpine",
 					MatrixValues: map[string]string{"os": "linux"},
-					Steps: []Step{
+					Steps: []pm.Step{
 						{Name: "compile", Run: []string{"echo compile"}},
 						{
 							Name: "sign", Run: []string{"echo sign"},
@@ -276,11 +277,11 @@ func TestEvaluateConditions(t *testing.T) {
 
 	t.Run("invalid step condition returns ErrStepCondition", func(t *testing.T) {
 		t.Parallel()
-		p := Pipeline{
-			Jobs: []Job{
+		p := pm.Pipeline{
+			Jobs: []pm.Job{
 				{
 					Name: "build", Image: "alpine",
-					Steps: []Step{{
+					Steps: []pm.Step{{
 						Name: "bad", Run: []string{"echo"},
 						When: &conditional.When{Expression: `invalid!!!`},
 					}},
@@ -289,18 +290,18 @@ func TestEvaluateConditions(t *testing.T) {
 		}
 
 		_, err := EvaluateConditions(ctx, p, wctx)
-		require.ErrorIs(t, err, ErrStepCondition)
+		require.ErrorIs(t, err, pm.ErrStepCondition)
 	})
 
 	t.Run("env reads pipeline-declared env at job level", func(t *testing.T) {
 		t.Parallel()
-		p := Pipeline{
-			Env: []EnvVar{{Key: "STAGE", Value: "prod"}},
-			Jobs: []Job{
+		p := pm.Pipeline{
+			Env: []pm.EnvVar{{Key: "STAGE", Value: "prod"}},
+			Jobs: []pm.Job{
 				{
 					Name: "deploy", Image: "alpine",
 					When:  &conditional.When{Expression: `env("STAGE") == "prod"`},
-					Steps: []Step{{Name: "s1", Run: []string{"echo"}}},
+					Steps: []pm.Step{{Name: "s1", Run: []string{"echo"}}},
 				},
 			},
 		}
@@ -313,14 +314,14 @@ func TestEvaluateConditions(t *testing.T) {
 
 	t.Run("env reads job-level env overriding pipeline env", func(t *testing.T) {
 		t.Parallel()
-		p := Pipeline{
-			Env: []EnvVar{{Key: "STAGE", Value: "dev"}},
-			Jobs: []Job{
+		p := pm.Pipeline{
+			Env: []pm.EnvVar{{Key: "STAGE", Value: "dev"}},
+			Jobs: []pm.Job{
 				{
 					Name: "deploy", Image: "alpine",
-					Env:   []EnvVar{{Key: "STAGE", Value: "prod"}},
+					Env:   []pm.EnvVar{{Key: "STAGE", Value: "prod"}},
 					When:  &conditional.When{Expression: `env("STAGE") == "prod"`},
-					Steps: []Step{{Name: "s1", Run: []string{"echo"}}},
+					Steps: []pm.Step{{Name: "s1", Run: []string{"echo"}}},
 				},
 			},
 		}
@@ -333,17 +334,17 @@ func TestEvaluateConditions(t *testing.T) {
 
 	t.Run("env reads step-level env overriding job env", func(t *testing.T) {
 		t.Parallel()
-		p := Pipeline{
-			Env: []EnvVar{{Key: "STAGE", Value: "dev"}},
-			Jobs: []Job{
+		p := pm.Pipeline{
+			Env: []pm.EnvVar{{Key: "STAGE", Value: "dev"}},
+			Jobs: []pm.Job{
 				{
 					Name: "test", Image: "alpine",
-					Env: []EnvVar{{Key: "STAGE", Value: "staging"}},
-					Steps: []Step{
+					Env: []pm.EnvVar{{Key: "STAGE", Value: "staging"}},
+					Steps: []pm.Step{
 						{Name: "keep", Run: []string{"echo"}},
 						{
 							Name: "skip", Run: []string{"echo"},
-							Env:  []EnvVar{{Key: "STAGE", Value: "prod"}},
+							Env:  []pm.EnvVar{{Key: "STAGE", Value: "prod"}},
 							When: &conditional.When{Expression: `env("STAGE") == "dev"`},
 						},
 					},

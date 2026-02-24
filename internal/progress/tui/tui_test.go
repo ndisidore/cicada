@@ -8,7 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ndisidore/cicada/internal/progress"
+	"github.com/ndisidore/cicada/internal/progress/progressmodel"
 	tuipkg "github.com/ndisidore/cicada/internal/progress/tui"
 )
 
@@ -56,8 +56,8 @@ func TestDisplay(t *testing.T) {
 			d := newTestDisplay()
 			require.NoError(t, d.Start(t.Context()))
 
-			d.Send(progress.JobAddedMsg{Job: "job-1"})
-			d.Send(progress.JobDoneMsg{Job: "job-1"})
+			d.Send(progressmodel.JobAddedMsg{Job: "job-1"})
+			d.Send(progressmodel.JobDoneMsg{Job: "job-1"})
 
 			requireShutdownReturns(t, d)
 		})
@@ -78,7 +78,7 @@ func TestDisplay(t *testing.T) {
 
 			d := newTestDisplay()
 			require.NoError(t, d.Start(t.Context()))
-			d.Send(progress.JobSkippedMsg{Job: "deploy"})
+			d.Send(progressmodel.JobSkippedMsg{Job: "deploy"})
 			requireShutdownReturns(t, d)
 		})
 
@@ -88,9 +88,9 @@ func TestDisplay(t *testing.T) {
 			d := newTestDisplay()
 			require.NoError(t, d.Start(t.Context()))
 
-			d.Send(progress.JobAddedMsg{Job: "build"})
-			d.Send(progress.StepSkippedMsg{Job: "build", Step: "notify"})
-			d.Send(progress.JobDoneMsg{Job: "build"})
+			d.Send(progressmodel.JobAddedMsg{Job: "build"})
+			d.Send(progressmodel.StepSkippedMsg{Job: "build", Step: "notify"})
+			d.Send(progressmodel.JobDoneMsg{Job: "build"})
 
 			requireShutdownReturns(t, d)
 		})

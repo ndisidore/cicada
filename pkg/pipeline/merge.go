@@ -1,25 +1,21 @@
 package pipeline
 
-import "fmt"
+import (
+	"fmt"
 
-// JobGroup represents a collection of jobs from a single source (inline or
-// included file) along with the conflict resolution strategy to apply.
-type JobGroup struct {
-	Jobs       []Job
-	Origin     string           // file path for error messages
-	OnConflict ConflictStrategy // how to handle name collisions with prior groups
-}
+	pm "github.com/ndisidore/cicada/pkg/pipeline/pipelinemodel"
+)
 
 // MergeJobs combines job groups in document order, applying per-group
 // conflict resolution. Jobs from earlier groups take precedence when
 // on-conflict is ConflictSkip.
-func MergeJobs(groups []JobGroup) ([]Job, error) {
+func MergeJobs(groups []pm.JobGroup) ([]pm.Job, error) {
 	var n int
 	for i := range groups {
 		n += len(groups[i].Jobs)
 	}
 
-	merged := make([]Job, 0, n)
+	merged := make([]pm.Job, 0, n)
 	seen := make(map[string]string, n) // job name -> origin
 
 	for i := range groups {
@@ -28,12 +24,12 @@ func MergeJobs(groups []JobGroup) ([]Job, error) {
 			name := g.Jobs[j].Name
 			if origin, exists := seen[name]; exists {
 				switch g.OnConflict {
-				case ConflictSkip:
+				case pm.ConflictSkip:
 					continue
 				default:
 					return nil, fmt.Errorf(
 						"job %q from %s conflicts with %s: %w",
-						name, g.Origin, origin, ErrDuplicateJob,
+						name, g.Origin, origin, pm.ErrDuplicateJob,
 					)
 				}
 			}
@@ -47,7 +43,7 @@ func MergeJobs(groups []JobGroup) ([]Job, error) {
 // TerminalJobs returns the names of jobs that have no dependents within the
 // slice. A terminal job is one whose name does not appear in any other job's
 // DependsOn list.
-func TerminalJobs(jobs []Job) []string {
+func TerminalJobs(jobs []pm.Job) []string {
 	depended := make(map[string]struct{})
 	for i := range jobs {
 		for _, dep := range jobs[i].DependsOn {
@@ -67,7 +63,7 @@ func TerminalJobs(jobs []Job) []string {
 // ExpandAliases replaces alias references in DependsOn fields with the alias's
 // terminal job names. It returns an error if an alias name collides with a
 // job name in the merged pipeline.
-func ExpandAliases(jobs []Job, aliases map[string][]string) ([]Job, error) {
+func ExpandAliases(jobs []pm.Job, aliases map[string][]string) ([]pm.Job, error) {
 	if len(aliases) == 0 {
 		return jobs, nil
 	}
@@ -84,12 +80,12 @@ func ExpandAliases(jobs []Job, aliases map[string][]string) ([]Job, error) {
 				continue // no-op alias, no collision
 			}
 			return nil, fmt.Errorf(
-				"alias %q: %w", alias, ErrAliasCollision,
+				"alias %q: %w", alias, pm.ErrAliasCollision,
 			)
 		}
 	}
 
-	result := make([]Job, len(jobs))
+	result := make([]pm.Job, len(jobs))
 	for i := range jobs {
 		c := jobs[i].Clone()
 		if len(jobs[i].DependsOn) > 0 {

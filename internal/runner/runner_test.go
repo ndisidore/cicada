@@ -23,13 +23,14 @@ import (
 	"golang.org/x/sync/semaphore"
 
 	"github.com/ndisidore/cicada/internal/cache"
-	"github.com/ndisidore/cicada/internal/progress"
+	"github.com/ndisidore/cicada/internal/progress/progressmodel"
+	rm "github.com/ndisidore/cicada/internal/runner/runnermodel"
 	"github.com/ndisidore/cicada/internal/runtime/runtimetest"
 	"github.com/ndisidore/cicada/pkg/conditional"
-	"github.com/ndisidore/cicada/pkg/pipeline"
+	"github.com/ndisidore/cicada/pkg/pipeline/pipelinemodel"
 )
 
-// fakeSolver implements the Solver interface for testing.
+// fakeSolver implements the rm.Solver interface for testing.
 type fakeSolver struct {
 	solveFn func(ctx context.Context, def *llb.Definition, opt client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error)
 	buildFn func(ctx context.Context, opt client.SolveOpt, product string, buildFunc gateway.BuildFunc, ch chan *client.SolveStatus) (*client.SolveResponse, error)
@@ -47,7 +48,7 @@ func (f *fakeSolver) Build(ctx context.Context, opt client.SolveOpt, product str
 	return &client.SolveResponse{}, nil
 }
 
-// MockCondition is a testify mock for the DeferredEvaluator interface.
+// MockCondition is a testify mock for the rm.DeferredEvaluator interface.
 type MockCondition struct {
 	mock.Mock
 }
@@ -68,13 +69,13 @@ func (f *fakeGatewayClient) Solve(ctx context.Context, req gateway.SolveRequest)
 	return f.solveFn(ctx, req)
 }
 
-// fakeSender implements progress.Sender for testing.
+// fakeSender implements progressmodel.Sender for testing.
 type fakeSender struct {
 	mu   sync.Mutex
-	msgs []progress.Msg
+	msgs []progressmodel.Msg
 }
 
-func (s *fakeSender) Send(msg progress.Msg) {
+func (s *fakeSender) Send(msg progressmodel.Msg) {
 	s.mu.Lock()
 	s.msgs = append(s.msgs, msg)
 	s.mu.Unlock()
@@ -86,7 +87,7 @@ func (s *fakeSender) jobAddedOrder() []string {
 	defer s.mu.Unlock()
 	var names []string
 	for _, m := range s.msgs {
-		if msg, ok := m.(progress.JobAddedMsg); ok {
+		if msg, ok := m.(progressmodel.JobAddedMsg); ok {
 			names = append(names, msg.Job)
 		}
 	}
@@ -98,7 +99,7 @@ func (s *fakeSender) hasJobAdded(job string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, m := range s.msgs {
-		if msg, ok := m.(progress.JobAddedMsg); ok && msg.Job == job {
+		if msg, ok := m.(progressmodel.JobAddedMsg); ok && msg.Job == job {
 			return true
 		}
 	}
@@ -128,29 +129,29 @@ func TestRun(t *testing.T) {
 	tests := []struct {
 		name         string
 		ctx          context.Context // if nil, t.Context() is used
-		input        RunInput
+		input        rm.RunInput
 		wantErr      string
 		wantSentinel error
 	}{
 		{
 			name: "single job solves successfully",
-			input: RunInput{
+			input: rm.RunInput{
 				Solver: &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 					close(ch)
 					return &client.SolveResponse{}, nil
 				}},
-				Jobs:   []Job{{Name: "build", Definition: def}},
+				Jobs:   []rm.Job{{Name: "build", Definition: def}},
 				Sender: &fakeSender{},
 			},
 		},
 		{
 			name: "multi-job execution",
-			input: RunInput{
+			input: rm.RunInput{
 				Solver: &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 					close(ch)
 					return &client.SolveResponse{}, nil
 				}},
-				Jobs: []Job{
+				Jobs: []rm.Job{
 					{Name: "first", Definition: def},
 					{Name: "second", Definition: def},
 					{Name: "third", Definition: def},
@@ -160,116 +161,116 @@ func TestRun(t *testing.T) {
 		},
 		{
 			name: "solve error wraps with job name",
-			input: RunInput{
+			input: rm.RunInput{
 				Solver: &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 					close(ch)
 					return nil, errors.New("connection refused")
 				}},
-				Jobs:   []Job{{Name: "deploy", Definition: def}},
+				Jobs:   []rm.Job{{Name: "deploy", Definition: def}},
 				Sender: &fakeSender{},
 			},
 			wantErr: `job "deploy"`,
 		},
 		{
 			name: "empty jobs is a no-op",
-			input: RunInput{
+			input: rm.RunInput{
 				Solver: &fakeSolver{},
-				Jobs:   []Job{},
+				Jobs:   []rm.Job{},
 				Sender: &fakeSender{},
 			},
 		},
 		{
 			name: "nil solver returns error",
-			input: RunInput{
+			input: rm.RunInput{
 				Solver: nil,
-				Jobs:   []Job{{Name: "x", Definition: def}},
+				Jobs:   []rm.Job{{Name: "x", Definition: def}},
 				Sender: &fakeSender{},
 			},
-			wantSentinel: ErrNilSolver,
+			wantSentinel: rm.ErrNilSolver,
 		},
 		{
 			name: "nil sender returns error",
-			input: RunInput{
+			input: rm.RunInput{
 				Solver: &fakeSolver{},
-				Jobs:   []Job{{Name: "x", Definition: def}},
+				Jobs:   []rm.Job{{Name: "x", Definition: def}},
 			},
-			wantSentinel: ErrNilSender,
+			wantSentinel: rm.ErrNilSender,
 		},
 		{
 			name: "nil runtime with export-docker returns error",
-			input: RunInput{
+			input: rm.RunInput{
 				Solver:  &fakeSolver{},
-				Jobs:    []Job{{Name: "x", Definition: def}},
+				Jobs:    []rm.Job{{Name: "x", Definition: def}},
 				Sender:  &fakeSender{},
 				Runtime: nil,
-				ImagePublishes: []ImagePublish{
+				ImagePublishes: []rm.ImagePublish{
 					{ExportDocker: true, Image: "test:latest"},
 				},
 			},
-			wantSentinel: ErrNilRuntime,
+			wantSentinel: rm.ErrNilRuntime,
 		},
 		{
 			name: "unknown dependency",
-			input: RunInput{
+			input: rm.RunInput{
 				Solver: &fakeSolver{},
-				Jobs:   []Job{{Name: "a", Definition: def, DependsOn: []string{"nonexistent"}}},
+				Jobs:   []rm.Job{{Name: "a", Definition: def, DependsOn: []string{"nonexistent"}}},
 				Sender: &fakeSender{},
 			},
-			wantSentinel: pipeline.ErrUnknownDep,
+			wantSentinel: pipelinemodel.ErrUnknownDep,
 		},
 		{
 			name: "duplicate job name",
-			input: RunInput{
+			input: rm.RunInput{
 				Solver: &fakeSolver{},
-				Jobs: []Job{
+				Jobs: []rm.Job{
 					{Name: "a", Definition: def},
 					{Name: "a", Definition: def},
 				},
 				Sender: &fakeSender{},
 			},
-			wantSentinel: pipeline.ErrDuplicateJob,
+			wantSentinel: pipelinemodel.ErrDuplicateJob,
 		},
 		{
 			name: "mutual cycle",
-			input: RunInput{
+			input: rm.RunInput{
 				Solver: &fakeSolver{},
-				Jobs: []Job{
+				Jobs: []rm.Job{
 					{Name: "a", Definition: def, DependsOn: []string{"b"}},
 					{Name: "b", Definition: def, DependsOn: []string{"a"}},
 				},
 				Sender: &fakeSender{},
 			},
-			wantSentinel: pipeline.ErrCycleDetected,
+			wantSentinel: pipelinemodel.ErrCycleDetected,
 		},
 		{
 			name: "self cycle",
-			input: RunInput{
+			input: rm.RunInput{
 				Solver: &fakeSolver{},
-				Jobs: []Job{
+				Jobs: []rm.Job{
 					{Name: "a", Definition: def, DependsOn: []string{"a"}},
 				},
 				Sender: &fakeSender{},
 			},
-			wantSentinel: pipeline.ErrCycleDetected,
+			wantSentinel: pipelinemodel.ErrCycleDetected,
 		},
 		{
 			name: "nil definition returns error",
-			input: RunInput{
+			input: rm.RunInput{
 				Solver: &fakeSolver{},
-				Jobs:   []Job{{Name: "bad", Definition: nil}},
+				Jobs:   []rm.Job{{Name: "bad", Definition: nil}},
 				Sender: &fakeSender{},
 			},
-			wantSentinel: ErrNilDefinition,
+			wantSentinel: rm.ErrNilDefinition,
 		},
 		{
 			name: "context cancellation propagates",
 			ctx:  cancelledCtx,
-			input: RunInput{
+			input: rm.RunInput{
 				Solver: &fakeSolver{solveFn: func(ctx context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
 					close(ch)
 					return nil, ctx.Err()
 				}},
-				Jobs:   []Job{{Name: "cancelled", Definition: def}},
+				Jobs:   []rm.Job{{Name: "cancelled", Definition: def}},
 				Sender: &fakeSender{},
 			},
 			wantSentinel: context.Canceled,
@@ -314,9 +315,9 @@ func TestRun_ordering(t *testing.T) {
 		sender := &fakeSender{}
 
 		// Chain a -> b -> c so they must run in order.
-		err := Run(t.Context(), RunInput{
+		err := Run(t.Context(), rm.RunInput{
 			Solver: solver,
-			Jobs: []Job{
+			Jobs: []rm.Job{
 				{Name: "a", Definition: def},
 				{Name: "b", Definition: def, DependsOn: []string{"a"}},
 				{Name: "c", Definition: def, DependsOn: []string{"b"}},
@@ -345,9 +346,9 @@ func TestRun_ordering(t *testing.T) {
 		sender := &fakeSender{}
 
 		// Diamond: a -> {b, c} -> d
-		err := Run(t.Context(), RunInput{
+		err := Run(t.Context(), rm.RunInput{
 			Solver: solver,
-			Jobs: []Job{
+			Jobs: []rm.Job{
 				{Name: "a", Definition: def},
 				{Name: "b", Definition: def, DependsOn: []string{"a"}},
 				{Name: "c", Definition: def, DependsOn: []string{"a"}},
@@ -395,9 +396,9 @@ func TestRun_parallelism(t *testing.T) {
 				return &client.SolveResponse{}, nil
 			}}
 
-			err = Run(t.Context(), RunInput{
+			err = Run(t.Context(), rm.RunInput{
 				Solver: solver,
-				Jobs: []Job{
+				Jobs: []rm.Job{
 					{Name: "a", Definition: def},
 					{Name: "b", Definition: def},
 					{Name: "c", Definition: def},
@@ -431,9 +432,9 @@ func TestRun_parallelism(t *testing.T) {
 				return &client.SolveResponse{}, nil
 			}}
 
-			err = Run(t.Context(), RunInput{
+			err = Run(t.Context(), rm.RunInput{
 				Solver: solver,
-				Jobs: []Job{
+				Jobs: []rm.Job{
 					{Name: "a", Definition: def},
 					{Name: "b", Definition: def},
 					{Name: "c", Definition: def},
@@ -477,9 +478,9 @@ func TestRun_errorPropagation(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 
-		err = Run(t.Context(), RunInput{
+		err = Run(t.Context(), rm.RunInput{
 			Solver: solver,
-			Jobs: []Job{
+			Jobs: []rm.Job{
 				{Name: "a", Definition: defA},
 				{Name: "b", Definition: defB, DependsOn: []string{"a"}},
 				{Name: "c", Definition: defC, DependsOn: []string{"b"}},
@@ -501,9 +502,9 @@ func TestRun_errorPropagation(t *testing.T) {
 		sender := &fakeSender{}
 
 		// Chain a -> b -> c. Job "a" fails; "c" should never be solved.
-		err := Run(t.Context(), RunInput{
+		err := Run(t.Context(), rm.RunInput{
 			Solver: solver,
-			Jobs: []Job{
+			Jobs: []rm.Job{
 				{Name: "a", Definition: def},
 				{Name: "b", Definition: def, DependsOn: []string{"a"}},
 				{Name: "c", Definition: def, DependsOn: []string{"b"}},
@@ -528,9 +529,9 @@ func TestRun_errorPropagation(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		defer cancel()
 
-		err := Run(ctx, RunInput{
+		err := Run(ctx, rm.RunInput{
 			Solver: solver,
-			Jobs: []Job{
+			Jobs: []rm.Job{
 				{Name: "a", Definition: def},
 				{Name: "b", Definition: def, DependsOn: []string{"a"}},
 			},
@@ -550,9 +551,9 @@ func TestRun_errorPropagation(t *testing.T) {
 		}}
 		sender := &fakeSender{}
 
-		err := Run(t.Context(), RunInput{
+		err := Run(t.Context(), rm.RunInput{
 			Solver: solver,
-			Jobs: []Job{
+			Jobs: []rm.Job{
 				{Name: "a", Definition: def},
 				{Name: "b", Definition: def, DependsOn: []string{"a"}},
 			},
@@ -581,9 +582,9 @@ func TestRun_display(t *testing.T) {
 		}}
 		sender := &fakeSender{}
 
-		err := Run(t.Context(), RunInput{
+		err := Run(t.Context(), rm.RunInput{
 			Solver: solver,
-			Jobs:   []Job{{Name: "status-test", Definition: def}},
+			Jobs:   []rm.Job{{Name: "status-test", Definition: def}},
 			Sender: sender,
 		})
 		require.NoError(t, err)
@@ -592,7 +593,7 @@ func TestRun_display(t *testing.T) {
 		var statusCount int
 		sender.mu.Lock()
 		for _, m := range sender.msgs {
-			if _, ok := m.(progress.JobStatusMsg); ok {
+			if _, ok := m.(progressmodel.JobStatusMsg); ok {
 				statusCount++
 			}
 		}
@@ -618,9 +619,9 @@ func TestRun_semAcquireFailurePropagates(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	err = Run(ctx, RunInput{
+	err = Run(ctx, rm.RunInput{
 		Solver: solver,
-		Jobs: []Job{
+		Jobs: []rm.Job{
 			{Name: "a", Definition: def},
 			{Name: "b", Definition: def, DependsOn: []string{"a"}},
 		},
@@ -639,7 +640,7 @@ func TestRun_exports(t *testing.T) {
 
 	tests := []struct {
 		name          string
-		exports       []Export
+		exports       []rm.Export
 		solver        *fakeSolver
 		sender        *fakeSender
 		wantErr       string
@@ -649,7 +650,7 @@ func TestRun_exports(t *testing.T) {
 	}{
 		{
 			name: "export solves with local exporter",
-			exports: []Export{
+			exports: []rm.Export{
 				{Definition: def, JobName: "build", Local: "/tmp/out/myapp"},
 			},
 			solver: &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
@@ -662,7 +663,7 @@ func TestRun_exports(t *testing.T) {
 		},
 		{
 			name: "directory export uses Local as OutputDir",
-			exports: []Export{
+			exports: []rm.Export{
 				{Definition: def, JobName: "build", Local: "/tmp/out/dist", Dir: true},
 			},
 			solver: &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
@@ -675,7 +676,7 @@ func TestRun_exports(t *testing.T) {
 		},
 		{
 			name: "export solve error wraps job and path",
-			exports: []Export{
+			exports: []rm.Export{
 				{Definition: def, JobName: "compile", Local: "/tmp/bin/app"},
 			},
 			solver: &fakeSolver{solveFn: func(_ context.Context, _ *llb.Definition, _ client.SolveOpt, ch chan *client.SolveStatus) (*client.SolveResponse, error) {
@@ -687,21 +688,21 @@ func TestRun_exports(t *testing.T) {
 		},
 		{
 			name: "nil export definition returns error",
-			exports: []Export{
+			exports: []rm.Export{
 				{Definition: nil, JobName: "bad", Local: "/tmp/out/x"},
 			},
 			solver:       &fakeSolver{},
 			sender:       &fakeSender{},
-			wantSentinel: ErrNilDefinition,
+			wantSentinel: rm.ErrNilDefinition,
 		},
 		{
 			name: "empty export local returns error",
-			exports: []Export{
+			exports: []rm.Export{
 				{Definition: def, JobName: "bad", Local: ""},
 			},
 			solver:       &fakeSolver{},
 			sender:       &fakeSender{},
-			wantSentinel: pipeline.ErrEmptyExportLocal,
+			wantSentinel: pipelinemodel.ErrEmptyExportLocal,
 		},
 	}
 
@@ -723,9 +724,9 @@ func TestRun_exports(t *testing.T) {
 				return &client.SolveResponse{}, nil
 			}}
 
-			err := Run(t.Context(), RunInput{
+			err := Run(t.Context(), rm.RunInput{
 				Solver:  jobSolver,
-				Jobs:    []Job{{Name: "job", Definition: def}},
+				Jobs:    []rm.Job{{Name: "job", Definition: def}},
 				Sender:  tt.sender,
 				Exports: tt.exports,
 			})
@@ -774,11 +775,11 @@ func TestRun_exports(t *testing.T) {
 				return &client.SolveResponse{}, nil
 			}}
 
-			err = Run(t.Context(), RunInput{
+			err = Run(t.Context(), rm.RunInput{
 				Solver: solver,
-				Jobs:   []Job{{Name: "build", Definition: def}},
+				Jobs:   []rm.Job{{Name: "build", Definition: def}},
 				Sender: &fakeSender{},
-				Exports: []Export{
+				Exports: []rm.Export{
 					{Definition: def, JobName: "build", Local: "/tmp/a"},
 					{Definition: def, JobName: "build", Local: "/tmp/b"},
 					{Definition: def, JobName: "build", Local: "/tmp/c"},
@@ -813,11 +814,11 @@ func TestRun_exports(t *testing.T) {
 				return &client.SolveResponse{}, nil
 			}}
 
-			err = Run(t.Context(), RunInput{
+			err = Run(t.Context(), rm.RunInput{
 				Solver: solver,
-				Jobs:   []Job{{Name: "build", Definition: def}},
+				Jobs:   []rm.Job{{Name: "build", Definition: def}},
 				Sender: &fakeSender{},
-				Exports: []Export{
+				Exports: []rm.Export{
 					{Definition: def, JobName: "build", Local: "/tmp/a"},
 					{Definition: def, JobName: "build", Local: "/tmp/b"},
 				},
@@ -844,9 +845,9 @@ func TestRun_cacheEntriesFlowToSolveOpt(t *testing.T) {
 		return &client.SolveResponse{}, nil
 	}}
 
-	err = Run(t.Context(), RunInput{
+	err = Run(t.Context(), rm.RunInput{
 		Solver:       solver,
-		Jobs:         []Job{{Name: "build", Definition: def}},
+		Jobs:         []rm.Job{{Name: "build", Definition: def}},
 		Sender:       &fakeSender{},
 		CacheExports: exports,
 		CacheImports: imports,
@@ -877,11 +878,11 @@ func TestRun_imagePublish(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 
-		err := Run(t.Context(), RunInput{
+		err := Run(t.Context(), rm.RunInput{
 			Solver: solver,
-			Jobs:   []Job{{Name: "build", Definition: def}},
+			Jobs:   []rm.Job{{Name: "build", Definition: def}},
 			Sender: &fakeSender{},
-			ImagePublishes: []ImagePublish{
+			ImagePublishes: []rm.ImagePublish{
 				{Definition: def, JobName: "build", Image: "ghcr.io/user/app:v1", Push: true, Platform: "linux/amd64"},
 			},
 		})
@@ -907,11 +908,11 @@ func TestRun_imagePublish(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 
-		err := Run(t.Context(), RunInput{
+		err := Run(t.Context(), rm.RunInput{
 			Solver: solver,
-			Jobs:   []Job{{Name: "build", Definition: def}},
+			Jobs:   []rm.Job{{Name: "build", Definition: def}},
 			Sender: &fakeSender{},
-			ImagePublishes: []ImagePublish{
+			ImagePublishes: []rm.ImagePublish{
 				{Definition: def, JobName: "build", Image: "localhost:5000/app:dev", Push: true, Insecure: true, Platform: "linux/amd64"},
 			},
 		})
@@ -934,11 +935,11 @@ func TestRun_imagePublish(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 
-		err := Run(t.Context(), RunInput{
+		err := Run(t.Context(), rm.RunInput{
 			Solver: solver,
-			Jobs:   []Job{{Name: "build", Definition: def}},
+			Jobs:   []rm.Job{{Name: "build", Definition: def}},
 			Sender: &fakeSender{},
-			ImagePublishes: []ImagePublish{
+			ImagePublishes: []rm.ImagePublish{
 				{Definition: def, JobName: "build", Image: "myapp:dev", Push: false, Platform: "linux/amd64"},
 			},
 		})
@@ -961,11 +962,11 @@ func TestRun_imagePublish(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 
-		err := Run(t.Context(), RunInput{
+		err := Run(t.Context(), rm.RunInput{
 			Solver: solver,
-			Jobs:   []Job{{Name: "build", Definition: def}},
+			Jobs:   []rm.Job{{Name: "build", Definition: def}},
 			Sender: &fakeSender{},
-			ImagePublishes: []ImagePublish{
+			ImagePublishes: []rm.ImagePublish{
 				{Definition: def, JobName: "build", Image: "ghcr.io/user/app:v1", Push: true, Platform: "linux/amd64"},
 			},
 		})
@@ -982,15 +983,15 @@ func TestRun_imagePublish(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 
-		err := Run(t.Context(), RunInput{
+		err := Run(t.Context(), rm.RunInput{
 			Solver: solver,
-			Jobs:   []Job{{Name: "build", Definition: def}},
+			Jobs:   []rm.Job{{Name: "build", Definition: def}},
 			Sender: &fakeSender{},
-			ImagePublishes: []ImagePublish{
+			ImagePublishes: []rm.ImagePublish{
 				{Definition: nil, JobName: "build", Image: "ghcr.io/user/app:v1", Push: true},
 			},
 		})
-		require.ErrorIs(t, err, ErrNilDefinition)
+		require.ErrorIs(t, err, rm.ErrNilDefinition)
 	})
 }
 
@@ -1003,7 +1004,7 @@ func TestGroupPublishes(t *testing.T) {
 	t.Run("single variant produces one group", func(t *testing.T) {
 		t.Parallel()
 
-		pubs := []ImagePublish{
+		pubs := []rm.ImagePublish{
 			{Definition: def, JobName: "build", Image: "ghcr.io/user/app:v1", Push: true, Platform: "linux/amd64"},
 		}
 		groups, err := groupPublishes(pubs)
@@ -1017,7 +1018,7 @@ func TestGroupPublishes(t *testing.T) {
 	t.Run("same image groups together", func(t *testing.T) {
 		t.Parallel()
 
-		pubs := []ImagePublish{
+		pubs := []rm.ImagePublish{
 			{Definition: def, JobName: "build-amd64", Image: "ghcr.io/user/app:v1", Push: true, Platform: "linux/amd64"},
 			{Definition: def, JobName: "build-arm64", Image: "ghcr.io/user/app:v1", Push: true, Platform: "linux/arm64"},
 		}
@@ -1031,7 +1032,7 @@ func TestGroupPublishes(t *testing.T) {
 	t.Run("different images separate groups", func(t *testing.T) {
 		t.Parallel()
 
-		pubs := []ImagePublish{
+		pubs := []rm.ImagePublish{
 			{Definition: def, JobName: "a", Image: "app:v1", Push: true, Platform: "linux/amd64"},
 			{Definition: def, JobName: "b", Image: "app:v2", Push: true, Platform: "linux/amd64"},
 		}
@@ -1045,23 +1046,23 @@ func TestGroupPublishes(t *testing.T) {
 	t.Run("conflicting push setting rejected", func(t *testing.T) {
 		t.Parallel()
 
-		pubs := []ImagePublish{
+		pubs := []rm.ImagePublish{
 			{Definition: def, JobName: "build-amd64", Image: "ghcr.io/user/app:v1", Push: true, Platform: "linux/amd64"},
 			{Definition: def, JobName: "build-arm64", Image: "ghcr.io/user/app:v1", Push: false, Platform: "linux/arm64"},
 		}
 		_, err := groupPublishes(pubs)
-		require.ErrorIs(t, err, ErrPublishSettingConflict)
+		require.ErrorIs(t, err, rm.ErrPublishSettingConflict)
 	})
 
 	t.Run("conflicting export-docker setting rejected", func(t *testing.T) {
 		t.Parallel()
 
-		pubs := []ImagePublish{
+		pubs := []rm.ImagePublish{
 			{Definition: def, JobName: "build-amd64", Image: "app:v1", ExportDocker: true, Platform: "linux/amd64"},
 			{Definition: def, JobName: "build-arm64", Image: "app:v1", ExportDocker: false, Platform: "linux/arm64"},
 		}
 		_, err := groupPublishes(pubs)
-		require.ErrorIs(t, err, ErrPublishSettingConflict)
+		require.ErrorIs(t, err, rm.ErrPublishSettingConflict)
 	})
 }
 
@@ -1071,7 +1072,7 @@ func TestGroupPublishes_exportDocker(t *testing.T) {
 	def, err := llb.Scratch().Marshal(t.Context())
 	require.NoError(t, err)
 
-	pubs := []ImagePublish{
+	pubs := []rm.ImagePublish{
 		{Definition: def, JobName: "build", Image: "myapp:dev", ExportDocker: true, Platform: "linux/amd64"},
 	}
 	groups, err := groupPublishes(pubs)
@@ -1092,17 +1093,17 @@ func TestRun_exportDockerMultiPlatformError(t *testing.T) {
 	}}
 
 	rt := new(runtimetest.MockRuntime)
-	err = Run(t.Context(), RunInput{
+	err = Run(t.Context(), rm.RunInput{
 		Solver:  solver,
 		Runtime: rt,
-		Jobs:    []Job{{Name: "build", Definition: def}},
+		Jobs:    []rm.Job{{Name: "build", Definition: def}},
 		Sender:  &fakeSender{},
-		ImagePublishes: []ImagePublish{
+		ImagePublishes: []rm.ImagePublish{
 			{Definition: def, JobName: "build-amd64", Image: "myapp:latest", ExportDocker: true, Platform: "linux/amd64"},
 			{Definition: def, JobName: "build-arm64", Image: "myapp:latest", ExportDocker: true, Platform: "linux/arm64"},
 		},
 	})
-	require.ErrorIs(t, err, ErrExportDockerMultiPlatform)
+	require.ErrorIs(t, err, rm.ErrExportDockerMultiPlatform)
 	rt.AssertNotCalled(t, "LoadImage")
 }
 
@@ -1125,16 +1126,16 @@ func TestRun_duplicatePlatformError(t *testing.T) {
 		},
 	}
 
-	err = Run(t.Context(), RunInput{
+	err = Run(t.Context(), rm.RunInput{
 		Solver: solver,
-		Jobs:   []Job{{Name: "build", Definition: def}},
+		Jobs:   []rm.Job{{Name: "build", Definition: def}},
 		Sender: &fakeSender{},
-		ImagePublishes: []ImagePublish{
+		ImagePublishes: []rm.ImagePublish{
 			{Definition: def, JobName: "build-a", Image: "myapp:latest", Push: true, Platform: "linux/amd64"},
 			{Definition: def, JobName: "build-b", Image: "myapp:latest", Push: true, Platform: "linux/amd64"},
 		},
 	})
-	require.ErrorIs(t, err, ErrDuplicatePlatform)
+	require.ErrorIs(t, err, rm.ErrDuplicatePlatform)
 }
 
 // TestRun_exportDocker tests the export-docker path using a mock runtime.
@@ -1159,12 +1160,12 @@ func TestRun_exportDocker(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 
-		err := Run(t.Context(), RunInput{
+		err := Run(t.Context(), rm.RunInput{
 			Solver:  solver,
 			Runtime: rt,
-			Jobs:    []Job{{Name: "build", Definition: def}},
+			Jobs:    []rm.Job{{Name: "build", Definition: def}},
 			Sender:  &fakeSender{},
-			ImagePublishes: []ImagePublish{
+			ImagePublishes: []rm.ImagePublish{
 				{Definition: def, JobName: "build", Image: "myapp:dev", ExportDocker: true, Platform: "linux/amd64"},
 			},
 		})
@@ -1200,12 +1201,12 @@ func TestRun_exportDocker(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 
-		err := Run(t.Context(), RunInput{
+		err := Run(t.Context(), rm.RunInput{
 			Solver:  solver,
 			Runtime: rt,
-			Jobs:    []Job{{Name: "build", Definition: def}},
+			Jobs:    []rm.Job{{Name: "build", Definition: def}},
 			Sender:  &fakeSender{},
-			ImagePublishes: []ImagePublish{
+			ImagePublishes: []rm.ImagePublish{
 				{Definition: def, JobName: "build", Image: "ghcr.io/user/app:v1", Push: true, ExportDocker: true, Platform: "linux/amd64"},
 			},
 		})
@@ -1224,16 +1225,16 @@ func TestRun_exportDocker(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 
-		err := Run(t.Context(), RunInput{
+		err := Run(t.Context(), rm.RunInput{
 			Solver:  solver,
 			Runtime: rt,
-			Jobs:    []Job{{Name: "build", Definition: def}},
+			Jobs:    []rm.Job{{Name: "build", Definition: def}},
 			Sender:  &fakeSender{},
-			ImagePublishes: []ImagePublish{
+			ImagePublishes: []rm.ImagePublish{
 				{Definition: nil, JobName: "build", Image: "myapp:dev", ExportDocker: true, Platform: "linux/amd64"},
 			},
 		})
-		require.ErrorIs(t, err, ErrNilDefinition)
+		require.ErrorIs(t, err, rm.ErrNilDefinition)
 		rt.AssertNotCalled(t, "LoadImage")
 	})
 }
@@ -1391,7 +1392,7 @@ func TestRunNodeDeferredWhenSkip(t *testing.T) {
 	}
 
 	depNode := &dagNode{
-		job:     Job{Name: "build", Definition: &llb.Definition{Def: [][]byte{{}}}},
+		job:     rm.Job{Name: "build", Definition: &llb.Definition{Def: [][]byte{{}}}},
 		done:    make(chan struct{}),
 		outputs: map[string]string{"deploy": "no"},
 	}
@@ -1401,7 +1402,7 @@ func TestRunNodeDeferredWhenSkip(t *testing.T) {
 	whenMock.On("EvaluateDeferred", mock.Anything, mock.Anything).Return(false, nil)
 
 	node := &dagNode{
-		job: Job{
+		job: rm.Job{
 			Name:       "deploy",
 			Definition: &llb.Definition{Def: [][]byte{{}}},
 			DependsOn:  []string{"build"},
@@ -1432,7 +1433,7 @@ func TestRunNodeDeferredWhenSkip(t *testing.T) {
 	// Verify a JobSkippedMsg was sent for "deploy".
 	var skippedJob string
 	for _, m := range sender.msgs {
-		if msg, ok := m.(progress.JobSkippedMsg); ok {
+		if msg, ok := m.(progressmodel.JobSkippedMsg); ok {
 			skippedJob = msg.Job
 		}
 	}
@@ -1453,7 +1454,7 @@ func TestRunNodeSkippedDepPropagatesSkip(t *testing.T) {
 	sender := &fakeSender{}
 
 	depNode := &dagNode{
-		job:     Job{Name: "build", Definition: &llb.Definition{Def: [][]byte{{}}}},
+		job:     rm.Job{Name: "build", Definition: &llb.Definition{Def: [][]byte{{}}}},
 		done:    make(chan struct{}),
 		skipped: true,
 	}
@@ -1464,7 +1465,7 @@ func TestRunNodeSkippedDepPropagatesSkip(t *testing.T) {
 	whenMock := &MockCondition{}
 
 	node := &dagNode{
-		job: Job{
+		job: rm.Job{
 			Name:       "deploy",
 			Definition: &llb.Definition{Def: [][]byte{{}}},
 			DependsOn:  []string{"build"},
@@ -1498,7 +1499,7 @@ func TestRunNodeSkippedDepPropagatesSkip(t *testing.T) {
 	// Verify a JobSkippedMsg was sent for "deploy".
 	var skippedJobs []string
 	for _, m := range sender.msgs {
-		if msg, ok := m.(progress.JobSkippedMsg); ok {
+		if msg, ok := m.(progressmodel.JobSkippedMsg); ok {
 			skippedJobs = append(skippedJobs, msg.Job)
 		}
 	}
@@ -1523,7 +1524,7 @@ func TestRunNodeSkippedStepsReported(t *testing.T) {
 	sender := &fakeSender{}
 
 	node := &dagNode{
-		job: Job{
+		job: rm.Job{
 			Name:         "build",
 			Definition:   def,
 			SkippedSteps: []string{"slow-test", "lint"},
@@ -1546,7 +1547,7 @@ func TestRunNodeSkippedStepsReported(t *testing.T) {
 	// Verify StepSkippedMsg messages.
 	var reported []string
 	for _, m := range sender.msgs {
-		if msg, ok := m.(progress.StepSkippedMsg); ok {
+		if msg, ok := m.(progressmodel.StepSkippedMsg); ok {
 			reported = append(reported, msg.Job+"/"+msg.Step)
 		}
 	}
@@ -1578,7 +1579,7 @@ func TestRunNodeOutputExtractionFailure(t *testing.T) {
 	sender := &fakeSender{}
 
 	node := &dagNode{
-		job: Job{
+		job: rm.Job{
 			Name:       "build",
 			Definition: def,
 			OutputDef:  outputDef,
@@ -1617,9 +1618,9 @@ func TestRunNode_jobTimeout(t *testing.T) {
 				return nil, ctx.Err()
 			}}
 
-			err = Run(t.Context(), RunInput{
+			err = Run(t.Context(), rm.RunInput{
 				Solver: solver,
-				Jobs: []Job{{
+				Jobs: []rm.Job{{
 					Name:       "slow",
 					Definition: def,
 					Timeout:    1 * time.Second,
@@ -1627,7 +1628,7 @@ func TestRunNode_jobTimeout(t *testing.T) {
 				Sender: &fakeSender{},
 			})
 			require.Error(t, err)
-			assert.ErrorIs(t, err, ErrJobTimeout)
+			assert.ErrorIs(t, err, rm.ErrJobTimeout)
 		})
 	})
 
@@ -1642,9 +1643,9 @@ func TestRunNode_jobTimeout(t *testing.T) {
 				return &client.SolveResponse{}, nil
 			}}
 
-			err = Run(t.Context(), RunInput{
+			err = Run(t.Context(), rm.RunInput{
 				Solver: solver,
-				Jobs: []Job{{
+				Jobs: []rm.Job{{
 					Name:       "fast",
 					Definition: def,
 					Timeout:    5 * time.Second,
@@ -1675,12 +1676,12 @@ func TestRunNode_retry(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 
-		err = Run(t.Context(), RunInput{
+		err = Run(t.Context(), rm.RunInput{
 			Solver: solver,
-			Jobs: []Job{{
+			Jobs: []rm.Job{{
 				Name:       "flaky",
 				Definition: def,
-				Retry:      &pipeline.Retry{Attempts: 3, Backoff: pipeline.BackoffNone},
+				Retry:      &pipelinemodel.Retry{Attempts: 3, Backoff: pipelinemodel.BackoffNone},
 			}},
 			Sender: &fakeSender{},
 		})
@@ -1702,12 +1703,12 @@ func TestRunNode_retry(t *testing.T) {
 			return nil, solveErr
 		}}
 
-		err = Run(t.Context(), RunInput{
+		err = Run(t.Context(), rm.RunInput{
 			Solver: solver,
-			Jobs: []Job{{
+			Jobs: []rm.Job{{
 				Name:       "always-fails",
 				Definition: def,
-				Retry:      &pipeline.Retry{Attempts: 2, Backoff: pipeline.BackoffNone},
+				Retry:      &pipelinemodel.Retry{Attempts: 2, Backoff: pipelinemodel.BackoffNone},
 			}},
 			Sender: &fakeSender{},
 		})
@@ -1731,15 +1732,15 @@ func TestRunNode_retry(t *testing.T) {
 				return &client.SolveResponse{}, nil
 			}}
 
-			err = Run(t.Context(), RunInput{
+			err = Run(t.Context(), rm.RunInput{
 				Solver: solver,
-				Jobs: []Job{{
+				Jobs: []rm.Job{{
 					Name:       "backoff",
 					Definition: def,
-					Retry: &pipeline.Retry{
+					Retry: &pipelinemodel.Retry{
 						Attempts: 3,
 						Delay:    100 * time.Millisecond,
-						Backoff:  pipeline.BackoffExponential,
+						Backoff:  pipelinemodel.BackoffExponential,
 					},
 				}},
 				Sender: &fakeSender{},
@@ -1760,22 +1761,22 @@ func TestRunNode_retry(t *testing.T) {
 				return nil, errors.New("always fails")
 			}}
 
-			err = Run(t.Context(), RunInput{
+			err = Run(t.Context(), rm.RunInput{
 				Solver: solver,
-				Jobs: []Job{{
+				Jobs: []rm.Job{{
 					Name:       "timeout-retry",
 					Definition: def,
 					Timeout:    500 * time.Millisecond,
-					Retry: &pipeline.Retry{
+					Retry: &pipelinemodel.Retry{
 						Attempts: 100,
 						Delay:    200 * time.Millisecond,
-						Backoff:  pipeline.BackoffNone,
+						Backoff:  pipelinemodel.BackoffNone,
 					},
 				}},
 				Sender: &fakeSender{},
 			})
 			require.Error(t, err)
-			assert.ErrorIs(t, err, ErrJobTimeout)
+			assert.ErrorIs(t, err, rm.ErrJobTimeout)
 		})
 	})
 }
@@ -1785,43 +1786,43 @@ func TestRetryDelay(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		retry   *pipeline.Retry
+		retry   *pipelinemodel.Retry
 		attempt int
 		want    time.Duration
 	}{
 		{
 			name:    "none backoff returns base delay",
-			retry:   &pipeline.Retry{Delay: time.Second, Backoff: pipeline.BackoffNone},
+			retry:   &pipelinemodel.Retry{Delay: time.Second, Backoff: pipelinemodel.BackoffNone},
 			attempt: 3,
 			want:    time.Second,
 		},
 		{
 			name:    "linear backoff",
-			retry:   &pipeline.Retry{Delay: time.Second, Backoff: pipeline.BackoffLinear},
+			retry:   &pipelinemodel.Retry{Delay: time.Second, Backoff: pipelinemodel.BackoffLinear},
 			attempt: 2,
 			want:    3 * time.Second,
 		},
 		{
 			name:    "exponential backoff attempt 0",
-			retry:   &pipeline.Retry{Delay: time.Second, Backoff: pipeline.BackoffExponential},
+			retry:   &pipelinemodel.Retry{Delay: time.Second, Backoff: pipelinemodel.BackoffExponential},
 			attempt: 0,
 			want:    time.Second,
 		},
 		{
 			name:    "exponential backoff attempt 3",
-			retry:   &pipeline.Retry{Delay: time.Second, Backoff: pipeline.BackoffExponential},
+			retry:   &pipelinemodel.Retry{Delay: time.Second, Backoff: pipelinemodel.BackoffExponential},
 			attempt: 3,
 			want:    8 * time.Second,
 		},
 		{
 			name:    "exponential overflow capped at attempt 63",
-			retry:   &pipeline.Retry{Delay: time.Hour, Backoff: pipeline.BackoffExponential},
+			retry:   &pipelinemodel.Retry{Delay: time.Hour, Backoff: pipelinemodel.BackoffExponential},
 			attempt: 63,
 			want:    _maxDelay,
 		},
 		{
 			name:    "linear overflow capped",
-			retry:   &pipeline.Retry{Delay: time.Duration(math.MaxInt64 / 2), Backoff: pipeline.BackoffLinear},
+			retry:   &pipelinemodel.Retry{Delay: time.Duration(math.MaxInt64 / 2), Backoff: pipelinemodel.BackoffLinear},
 			attempt: 2,
 			want:    _maxDelay,
 		},
@@ -1839,16 +1840,16 @@ func TestRetryDelay(t *testing.T) {
 func TestJobTimeoutError(t *testing.T) {
 	t.Parallel()
 
-	jte := &JobTimeoutError{JobName: "deploy", Timeout: 30 * time.Second}
+	jte := &rm.JobTimeoutError{JobName: "deploy", Timeout: 30 * time.Second}
 
 	t.Run("errors.Is matches ErrJobTimeout", func(t *testing.T) {
 		t.Parallel()
-		assert.ErrorIs(t, jte, ErrJobTimeout)
+		assert.ErrorIs(t, jte, rm.ErrJobTimeout)
 	})
 
 	t.Run("errors.As extracts fields", func(t *testing.T) {
 		t.Parallel()
-		var target *JobTimeoutError
+		var target *rm.JobTimeoutError
 		require.ErrorAs(t, jte, &target)
 		assert.Equal(t, "deploy", target.JobName)
 		assert.Equal(t, 30*time.Second, target.Timeout)
@@ -1863,16 +1864,16 @@ func TestJobTimeoutError(t *testing.T) {
 func TestStepTimeoutError(t *testing.T) {
 	t.Parallel()
 
-	ste := &StepTimeoutError{JobName: "build", StepName: "compile", Timeout: 5 * time.Minute}
+	ste := &rm.StepTimeoutError{JobName: "build", StepName: "compile", Timeout: 5 * time.Minute}
 
 	t.Run("errors.Is matches ErrStepTimeout", func(t *testing.T) {
 		t.Parallel()
-		assert.ErrorIs(t, ste, ErrStepTimeout)
+		assert.ErrorIs(t, ste, rm.ErrStepTimeout)
 	})
 
 	t.Run("errors.As extracts fields", func(t *testing.T) {
 		t.Parallel()
-		var target *StepTimeoutError
+		var target *rm.StepTimeoutError
 		require.ErrorAs(t, ste, &target)
 		assert.Equal(t, "build", target.JobName)
 		assert.Equal(t, "compile", target.StepName)
@@ -1898,7 +1899,7 @@ func TestRunNode_jobTimeout_sentinelError(t *testing.T) {
 		}}
 
 		node := &dagNode{
-			job: Job{
+			job: rm.Job{
 				Name:       "slow-job",
 				Definition: def,
 				Timeout:    1 * time.Second,
@@ -1917,9 +1918,9 @@ func TestRunNode_jobTimeout_sentinelError(t *testing.T) {
 
 		err = runNode(t.Context(), node, cfg)
 		require.Error(t, err)
-		require.ErrorIs(t, err, ErrJobTimeout)
+		require.ErrorIs(t, err, rm.ErrJobTimeout)
 
-		var jte *JobTimeoutError
+		var jte *rm.JobTimeoutError
 		require.ErrorAs(t, err, &jte)
 		assert.Equal(t, "slow-job", jte.JobName)
 		assert.Equal(t, 1*time.Second, jte.Timeout)
@@ -1945,10 +1946,10 @@ func TestRunNode_retry_displaysRetry(t *testing.T) {
 	sender := &fakeSender{}
 
 	node := &dagNode{
-		job: Job{
+		job: rm.Job{
 			Name:       "flaky",
 			Definition: def,
-			Retry:      &pipeline.Retry{Attempts: 3, Backoff: pipeline.BackoffNone},
+			Retry:      &pipelinemodel.Retry{Attempts: 3, Backoff: pipelinemodel.BackoffNone},
 		},
 		done: make(chan struct{}),
 	}
@@ -1974,7 +1975,7 @@ func TestRunNode_retry_displaysRetry(t *testing.T) {
 	}
 	var retryCalls []retryCall
 	for _, m := range sender.msgs {
-		if msg, ok := m.(progress.JobRetryMsg); ok {
+		if msg, ok := m.(progressmodel.JobRetryMsg); ok {
 			retryCalls = append(retryCalls, retryCall{msg.Job, msg.Attempt, msg.MaxAttempts})
 		}
 	}
@@ -2004,7 +2005,7 @@ func TestRunNode_jobTimeout_displaysTimeout(t *testing.T) {
 		sender := &fakeSender{}
 
 		node := &dagNode{
-			job: Job{
+			job: rm.Job{
 				Name:       "slow-job",
 				Definition: def,
 				Timeout:    1 * time.Second,
@@ -2031,7 +2032,7 @@ func TestRunNode_jobTimeout_displaysTimeout(t *testing.T) {
 		}
 		var timeoutCalls []timeoutCall
 		for _, m := range sender.msgs {
-			if msg, ok := m.(progress.JobTimeoutMsg); ok {
+			if msg, ok := m.(progressmodel.JobTimeoutMsg); ok {
 				timeoutCalls = append(timeoutCalls, timeoutCall{msg.Job, msg.Timeout})
 			}
 		}
@@ -2054,26 +2055,26 @@ func TestCleanTimeoutError(t *testing.T) {
 		err         error
 		wantErr     error
 		wantExitErr bool // original ExitError should be chained
-		wantStepErr bool // should produce *StepTimeoutError
+		wantStepErr bool // should produce *rm.StepTimeoutError
 	}{
 		{
 			name:        "exit code 124 detected as timeout",
 			err:         &gatewaypb.ExitError{ExitCode: 124, Err: errors.New("process failed")},
-			wantErr:     ErrStepTimeout,
+			wantErr:     rm.ErrStepTimeout,
 			wantExitErr: true,
 			wantStepErr: true,
 		},
 		{
 			name:        "wrapped ExitError 124 found through chain",
 			err:         fmt.Errorf("solving job: %w", &gatewaypb.ExitError{ExitCode: 124, Err: errors.New("process failed")}),
-			wantErr:     ErrStepTimeout,
+			wantErr:     rm.ErrStepTimeout,
 			wantExitErr: true,
 			wantStepErr: true,
 		},
 		{
 			name:        "exit code 137 detected as timeout (BusyBox timeout -s KILL)",
 			err:         &gatewaypb.ExitError{ExitCode: 137, Err: errors.New("process failed")},
-			wantErr:     ErrStepTimeout,
+			wantErr:     rm.ErrStepTimeout,
 			wantExitErr: true,
 			wantStepErr: true,
 		},
@@ -2101,7 +2102,7 @@ func TestCleanTimeoutError(t *testing.T) {
 				require.ErrorAs(t, got, &exitErr)
 			}
 			if tt.wantStepErr {
-				var ste *StepTimeoutError
+				var ste *rm.StepTimeoutError
 				require.ErrorAs(t, got, &ste)
 				assert.Equal(t, jobName, ste.JobName)
 				assert.Equal(t, "compile", ste.StepName)
@@ -2123,9 +2124,9 @@ func TestCleanTimeoutError_multipleStepTimeouts(t *testing.T) {
 	exitErr := &gatewaypb.ExitError{ExitCode: 124, Err: errors.New("process failed")}
 	got := cleanTimeoutError(exitErr, jobName, stepTimeouts)
 
-	// StepTimeoutError is still produced (signals ErrStepTimeout).
-	require.ErrorIs(t, got, ErrStepTimeout)
-	var ste *StepTimeoutError
+	// rm.StepTimeoutError is still produced (signals rm.ErrStepTimeout).
+	require.ErrorIs(t, got, rm.ErrStepTimeout)
+	var ste *rm.StepTimeoutError
 	require.ErrorAs(t, got, &ste)
 	assert.Equal(t, jobName, ste.JobName)
 	// With multiple entries, step attribution is ambiguous — fields are empty.
@@ -2159,9 +2160,9 @@ func TestRun_failFast(t *testing.T) {
 				}
 			}}
 
-			err = Run(t.Context(), RunInput{
+			err = Run(t.Context(), rm.RunInput{
 				Solver: solver,
-				Jobs: []Job{
+				Jobs: []rm.Job{
 					{Name: "a", Definition: defA},
 					{Name: "b", Definition: defB},
 					{Name: "c", Definition: defC},
@@ -2198,9 +2199,9 @@ func TestRun_failFast(t *testing.T) {
 				}
 			}}
 
-			err = Run(t.Context(), RunInput{
+			err = Run(t.Context(), rm.RunInput{
 				Solver: solver,
-				Jobs: []Job{
+				Jobs: []rm.Job{
 					{Name: "a", Definition: defA},
 					{Name: "b", Definition: defB},
 					{Name: "c", Definition: defC},
@@ -2245,9 +2246,9 @@ func TestRun_failFast(t *testing.T) {
 
 		sender := &fakeSender{}
 
-		err = Run(t.Context(), RunInput{
+		err = Run(t.Context(), rm.RunInput{
 			Solver: solver,
-			Jobs: []Job{
+			Jobs: []rm.Job{
 				{Name: "a", Definition: defA},
 				{Name: "b", Definition: defB, DependsOn: []string{"a"}},
 				{Name: "d", Definition: defD},
@@ -2293,15 +2294,15 @@ func TestRun_failFast(t *testing.T) {
 			return &client.SolveResponse{}, nil
 		}}
 
-		err = Run(t.Context(), RunInput{
+		err = Run(t.Context(), rm.RunInput{
 			Solver: solver,
-			Jobs: []Job{
+			Jobs: []rm.Job{
 				{Name: "a", Definition: defA},
 				{Name: "b", Definition: defB},
 			},
 			Sender:   &fakeSender{},
 			FailFast: false,
-			Exports: []Export{
+			Exports: []rm.Export{
 				{Definition: exportDefA, JobName: "a", Local: "/tmp/a/out"},
 				{Definition: exportDefB, JobName: "b", Local: "/tmp/b/out"},
 			},
@@ -2327,9 +2328,9 @@ func TestRun_failFast(t *testing.T) {
 			return nil, errors.New("boom")
 		}}
 
-		err = Run(t.Context(), RunInput{
+		err = Run(t.Context(), rm.RunInput{
 			Solver: solver,
-			Jobs: []Job{
+			Jobs: []rm.Job{
 				{Name: "a", Definition: defA},
 				{Name: "b", Definition: defB},
 			},
@@ -2345,7 +2346,7 @@ func TestRun_failFast(t *testing.T) {
 func TestStepControlledExecution(t *testing.T) {
 	t.Parallel()
 
-	// stepBuildFunc returns a simple StepExec.Build that produces a scratch state.
+	// stepBuildFunc returns a simple rm.StepExec.Build that produces a scratch state.
 	stepBuildFunc := func(base llb.State, _ int) (llb.State, error) {
 		return llb.Scratch(), nil
 	}
@@ -2371,12 +2372,12 @@ func TestStepControlledExecution(t *testing.T) {
 		def, err := llb.Scratch().Marshal(t.Context())
 		require.NoError(t, err)
 
-		err = Run(t.Context(), RunInput{
+		err = Run(t.Context(), rm.RunInput{
 			Solver: solver,
-			Jobs: []Job{{
+			Jobs: []rm.Job{{
 				Name:       "test",
 				Definition: def,
-				Steps: []StepExec{
+				Steps: []rm.StepExec{
 					{Name: "a", Build: stepBuildFunc},
 					{Name: "b", Build: stepBuildFunc},
 				},
@@ -2413,15 +2414,15 @@ func TestStepControlledExecution(t *testing.T) {
 		def, err := llb.Scratch().Marshal(t.Context())
 		require.NoError(t, err)
 
-		err = Run(t.Context(), RunInput{
+		err = Run(t.Context(), rm.RunInput{
 			Solver: solver,
-			Jobs: []Job{{
+			Jobs: []rm.Job{{
 				Name:       "test",
 				Definition: def,
-				Steps: []StepExec{
+				Steps: []rm.StepExec{
 					{
 						Name:  "flaky",
-						Retry: &pipeline.Retry{Attempts: 3, Backoff: pipeline.BackoffNone},
+						Retry: &pipelinemodel.Retry{Attempts: 3, Backoff: pipelinemodel.BackoffNone},
 						Build: stepBuildFunc,
 					},
 				},
@@ -2435,9 +2436,9 @@ func TestStepControlledExecution(t *testing.T) {
 
 		// Verify StepRetryMsg was sent.
 		sender.mu.Lock()
-		var retryMsgs []progress.StepRetryMsg
+		var retryMsgs []progressmodel.StepRetryMsg
 		for _, m := range sender.msgs {
-			if msg, ok := m.(progress.StepRetryMsg); ok {
+			if msg, ok := m.(progressmodel.StepRetryMsg); ok {
 				retryMsgs = append(retryMsgs, msg)
 			}
 		}
@@ -2469,12 +2470,12 @@ func TestStepControlledExecution(t *testing.T) {
 		def, err := llb.Scratch().Marshal(t.Context())
 		require.NoError(t, err)
 
-		err = Run(t.Context(), RunInput{
+		err = Run(t.Context(), rm.RunInput{
 			Solver: solver,
-			Jobs: []Job{{
+			Jobs: []rm.Job{{
 				Name:       "test",
 				Definition: def,
-				Steps: []StepExec{
+				Steps: []rm.StepExec{
 					{Name: "optional", AllowFailure: true, Build: stepBuildFunc},
 					{Name: "required", Build: stepBuildFunc},
 				},
@@ -2488,9 +2489,9 @@ func TestStepControlledExecution(t *testing.T) {
 
 		// Verify StepAllowedFailureMsg was sent.
 		sender.mu.Lock()
-		var allowedMsgs []progress.StepAllowedFailureMsg
+		var allowedMsgs []progressmodel.StepAllowedFailureMsg
 		for _, m := range sender.msgs {
-			if msg, ok := m.(progress.StepAllowedFailureMsg); ok {
+			if msg, ok := m.(progressmodel.StepAllowedFailureMsg); ok {
 				allowedMsgs = append(allowedMsgs, msg)
 			}
 		}
@@ -2520,12 +2521,12 @@ func TestStepControlledExecution(t *testing.T) {
 		def, err := llb.Scratch().Marshal(t.Context())
 		require.NoError(t, err)
 
-		err = Run(t.Context(), RunInput{
+		err = Run(t.Context(), rm.RunInput{
 			Solver: solver,
-			Jobs: []Job{{
+			Jobs: []rm.Job{{
 				Name:       "test",
 				Definition: def,
-				Steps: []StepExec{
+				Steps: []rm.StepExec{
 					{Name: "fail", Build: stepBuildFunc},
 					{Name: "never-reached", Build: stepBuildFunc},
 				},
@@ -2559,15 +2560,15 @@ func TestStepControlledExecution(t *testing.T) {
 		def, err := llb.Scratch().Marshal(t.Context())
 		require.NoError(t, err)
 
-		err = Run(t.Context(), RunInput{
+		err = Run(t.Context(), rm.RunInput{
 			Solver: solver,
-			Jobs: []Job{{
+			Jobs: []rm.Job{{
 				Name:       "test",
 				Definition: def,
-				Steps: []StepExec{
+				Steps: []rm.StepExec{
 					{
 						Name:         "flaky",
-						Retry:        &pipeline.Retry{Attempts: 2, Backoff: pipeline.BackoffNone},
+						Retry:        &pipelinemodel.Retry{Attempts: 2, Backoff: pipelinemodel.BackoffNone},
 						AllowFailure: true,
 						Build:        stepBuildFunc,
 					},
@@ -2584,9 +2585,9 @@ func TestStepControlledExecution(t *testing.T) {
 		var retryCount, allowedCount int
 		for _, m := range sender.msgs {
 			switch m.(type) {
-			case progress.StepRetryMsg:
+			case progressmodel.StepRetryMsg:
 				retryCount++
-			case progress.StepAllowedFailureMsg:
+			case progressmodel.StepAllowedFailureMsg:
 				allowedCount++
 			default:
 			}

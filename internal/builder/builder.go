@@ -14,8 +14,9 @@ import (
 	"github.com/containerd/platforms"
 	"github.com/moby/buildkit/client/llb"
 
-	"github.com/ndisidore/cicada/internal/progress"
+	"github.com/ndisidore/cicada/internal/progress/progressmodel"
 	"github.com/ndisidore/cicada/pkg/pipeline"
+	"github.com/ndisidore/cicada/pkg/pipeline/pipelinemodel"
 )
 
 // errMissingDepState indicates a dependency's LLB state was not found during build.
@@ -37,7 +38,7 @@ type LocalExport struct {
 type ImageExport struct {
 	Definition *llb.Definition
 	JobName    string
-	Publish    pipeline.Publish
+	Publish    pipelinemodel.Publish
 	Platform   string
 }
 
@@ -46,9 +47,9 @@ type jobResult struct {
 	def          *llb.Definition
 	state        llb.State
 	stepTimeouts map[string]time.Duration
-	cmdInfos     map[string]progress.CmdInfo // vertex name -> command metadata
-	stepDefs     []StepDef                   // per-step build closures; nil when no step control needed
-	baseState    llb.State                   // pre-step state; only set when stepDefs is non-nil
+	cmdInfos     map[string]progressmodel.CmdInfo // vertex name -> command metadata
+	stepDefs     []StepDef                        // per-step build closures; nil when no step control needed
+	baseState    llb.State                        // pre-step state; only set when stepDefs is non-nil
 }
 
 // StepBuildFunc builds a single step's LLB state on top of a base state.
@@ -59,10 +60,10 @@ type StepBuildFunc func(base llb.State, retryAttempt int) (llb.State, error)
 // StepDef describes a single step for gateway-based step-controlled execution.
 type StepDef struct {
 	Name         string
-	Retry        *pipeline.Retry
+	Retry        *pipelinemodel.Retry
 	AllowFailure bool
 	Timeouts     map[string]time.Duration
-	CmdInfos     map[string]progress.CmdInfo // vertex name -> command metadata
+	CmdInfos     map[string]progressmodel.CmdInfo // vertex name -> command metadata
 	Build        StepBuildFunc
 }
 
@@ -81,9 +82,9 @@ type Result struct {
 	// StepTimeouts maps job names to per-vertex timeout durations.
 	StepTimeouts map[string]map[string]time.Duration
 	// CmdInfos maps job names to per-vertex command metadata.
-	CmdInfos map[string]map[string]progress.CmdInfo
+	CmdInfos map[string]map[string]progressmodel.CmdInfo
 	// SecretDecls carries pipeline-level secret declarations for CLI resolution.
-	SecretDecls []pipeline.SecretDecl
+	SecretDecls []pipelinemodel.SecretDecl
 	// StepDefs maps job names to per-step build closures for step-controlled
 	// execution. Only populated for jobs with step-level retry or allow-failure.
 	StepDefs map[string][]StepDef
@@ -111,7 +112,7 @@ type jobOpts struct {
 	imgOpts         []llb.ImageOption
 	runOpts         []llb.RunOption
 	excludePatterns []string
-	pipelineEnv     []pipeline.EnvVar
+	pipelineEnv     []pipelinemodel.EnvVar
 	exposeDeps      bool
 	globalNoCache   bool
 	noCacheFilter   map[string]struct{}
@@ -119,11 +120,11 @@ type jobOpts struct {
 
 // Build converts a pipeline to BuildKit LLB definitions.
 // It reuses a cached topological order when available, otherwise validates first.
-func Build(ctx context.Context, p pipeline.Pipeline, opts BuildOpts) (Result, error) {
+func Build(ctx context.Context, p pipelinemodel.Pipeline, opts BuildOpts) (Result, error) {
 	order := p.TopoOrder
 	if !validOrder(order, len(p.Jobs)) {
 		var err error
-		order, err = p.Validate()
+		order, err = pipeline.Validate(&p)
 		if err != nil {
 			return Result{}, fmt.Errorf("validating pipeline: %w", err)
 		}
@@ -149,7 +150,7 @@ func Build(ctx context.Context, p pipeline.Pipeline, opts BuildOpts) (Result, er
 		JobNames:     make([]string, 0, len(order)),
 		OutputDefs:   make(map[string]*llb.Definition, len(order)),
 		StepTimeouts: make(map[string]map[string]time.Duration, len(order)),
-		CmdInfos:     make(map[string]map[string]progress.CmdInfo, len(order)),
+		CmdInfos:     make(map[string]map[string]progressmodel.CmdInfo, len(order)),
 		SecretDecls:  p.Secrets,
 		StepDefs:     make(map[string][]StepDef),
 		BaseStates:   make(map[string]llb.State),
@@ -167,7 +168,7 @@ func Build(ctx context.Context, p pipeline.Pipeline, opts BuildOpts) (Result, er
 
 // appendJob builds a single job's LLB and appends its definitions, exports,
 // and image publishes to the result.
-func appendJob(ctx context.Context, job *pipeline.Job, states map[string]llb.State, jo jobOpts, result *Result) error {
+func appendJob(ctx context.Context, job *pipelinemodel.Job, states map[string]llb.State, jo jobOpts, result *Result) error {
 	jr, err := buildJob(ctx, job, states, jo)
 	if err != nil {
 		return fmt.Errorf("building job %q: %w", job.Name, err)
@@ -213,7 +214,7 @@ func appendJob(ctx context.Context, job *pipeline.Job, states map[string]llb.Sta
 }
 
 // collectExports gathers all export declarations from a job (job-level + step-level).
-func collectExports(job *pipeline.Job) []pipeline.Export {
+func collectExports(job *pipelinemodel.Job) []pipelinemodel.Export {
 	n := len(job.Exports)
 	for i := range job.Steps {
 		n += len(job.Steps[i].Exports)
@@ -221,7 +222,7 @@ func collectExports(job *pipeline.Job) []pipeline.Export {
 	if n == 0 {
 		return nil
 	}
-	exports := make([]pipeline.Export, 0, n)
+	exports := make([]pipelinemodel.Export, 0, n)
 	exports = append(exports, job.Exports...)
 	for i := range job.Steps {
 		exports = append(exports, job.Steps[i].Exports...)
@@ -247,7 +248,7 @@ func validOrder(order []int, n int) bool {
 // jobCacheOpts returns per-job image and run options that disable caching
 // when the job is targeted by NoCacheFilter or has NoCache set. It
 // short-circuits when globalNoCache is already active to avoid redundant opts.
-func jobCacheOpts(job *pipeline.Job, opts jobOpts) ([]llb.ImageOption, []llb.RunOption) {
+func jobCacheOpts(job *pipelinemodel.Job, opts jobOpts) ([]llb.ImageOption, []llb.RunOption) {
 	imgOpts := append([]llb.ImageOption(nil), opts.imgOpts...)
 	runOpts := append([]llb.RunOption(nil), opts.runOpts...)
 	if opts.globalNoCache {
@@ -268,7 +269,7 @@ func jobCacheOpts(job *pipeline.Job, opts jobOpts) ([]llb.ImageOption, []llb.Run
 //revive:disable-next-line:function-length,cognitive-complexity,cyclomatic buildJob is a linear pipeline of LLB operations; splitting it further hurts readability.
 func buildJob(
 	ctx context.Context,
-	job *pipeline.Job,
+	job *pipelinemodel.Job,
 	depStates map[string]llb.State,
 	opts jobOpts,
 ) (jobResult, error) {
@@ -360,7 +361,7 @@ func buildJob(
 
 	// Execute steps sequentially, chaining state.
 	var stepTimeouts map[string]time.Duration
-	var cmdInfos map[string]progress.CmdInfo
+	var cmdInfos map[string]progressmodel.CmdInfo
 	for i := range job.Steps {
 		step := &job.Steps[i]
 
@@ -377,7 +378,7 @@ func buildJob(
 		}
 		if result.cmdInfos != nil {
 			if cmdInfos == nil {
-				cmdInfos = make(map[string]progress.CmdInfo)
+				cmdInfos = make(map[string]progressmodel.CmdInfo)
 			}
 			maps.Copy(cmdInfos, result.cmdInfos)
 		}
@@ -415,7 +416,7 @@ func buildJob(
 
 // jobNeedsStepControl reports whether any step in the job has retry or
 // allow-failure, requiring per-step gateway execution.
-func jobNeedsStepControl(job *pipeline.Job) bool {
+func jobNeedsStepControl(job *pipelinemodel.Job) bool {
 	for i := range job.Steps {
 		if job.Steps[i].Retry != nil || job.Steps[i].AllowFailure {
 			return true
@@ -436,14 +437,14 @@ type stepSharedCtx struct {
 	jobShell     []string
 	localOpts    []llb.LocalOption
 	jobNoCached  bool
-	jobSecrets   []pipeline.SecretRef
+	jobSecrets   []pipelinemodel.SecretRef
 }
 
 // stepBuildResult holds the output of building a single step's LLB.
 type stepBuildResult struct {
 	state    llb.State
 	timeouts map[string]time.Duration
-	cmdInfos map[string]progress.CmdInfo
+	cmdInfos map[string]progressmodel.CmdInfo
 }
 
 // buildStepOps applies a single step's LLB operations to a base state.
@@ -452,7 +453,7 @@ type stepBuildResult struct {
 //revive:disable-next-line:cognitive-complexity,cyclomatic,function-length buildStepOps is a linear pipeline of LLB operations; splitting it hurts readability.
 func buildStepOps(
 	base llb.State,
-	step *pipeline.Step,
+	step *pipelinemodel.Step,
 	retryAttempt int,
 	shared stepSharedCtx,
 ) (stepBuildResult, error) {
@@ -481,7 +482,7 @@ func buildStepOps(
 	}
 
 	if len(step.Run) == 0 {
-		return stepBuildResult{}, fmt.Errorf("job %q step %q: %w", shared.jobName, step.Name, pipeline.ErrMissingRun)
+		return stepBuildResult{}, fmt.Errorf("job %q step %q: %w", shared.jobName, step.Name, pipelinemodel.ErrMissingRun)
 	}
 
 	// Pre-compute step-level mount/cache and secret run options.
@@ -502,10 +503,10 @@ func buildStepOps(
 	}
 
 	var timeouts map[string]time.Duration
-	var cmdInfos map[string]progress.CmdInfo
+	var cmdInfos map[string]progressmodel.CmdInfo
 	for j, cmd := range step.Run {
 		if strings.TrimSpace(cmd) == "" {
-			return stepBuildResult{}, fmt.Errorf("job %q step %q run[%d]: %w", shared.jobName, step.Name, j, pipeline.ErrEmptyRunCommand)
+			return stepBuildResult{}, fmt.Errorf("job %q step %q run[%d]: %w", shared.jobName, step.Name, j, pipelinemodel.ErrEmptyRunCommand)
 		}
 
 		// Preamble sources dependency output env vars into the shell.
@@ -524,9 +525,9 @@ func buildStepOps(
 		vertexName := shared.jobName + "/" + step.Name + "/" + cmd
 
 		if cmdInfos == nil {
-			cmdInfos = make(map[string]progress.CmdInfo)
+			cmdInfos = make(map[string]progressmodel.CmdInfo)
 		}
-		cmdInfos[vertexName] = progress.CmdInfo{UserCmd: cmd, FullCmd: shellCmd}
+		cmdInfos[vertexName] = progressmodel.CmdInfo{UserCmd: cmd, FullCmd: shellCmd}
 
 		if step.Timeout > 0 {
 			if timeouts == nil {
@@ -591,7 +592,7 @@ func singleQuote(s string) string {
 }
 
 // buildMountRunOpts converts mount and cache slices into LLB run options.
-func buildMountRunOpts(mounts []pipeline.Mount, caches []pipeline.Cache, localOpts []llb.LocalOption) []llb.RunOption {
+func buildMountRunOpts(mounts []pipelinemodel.Mount, caches []pipelinemodel.Cache, localOpts []llb.LocalOption) []llb.RunOption {
 	if len(mounts) == 0 && len(caches) == 0 {
 		return nil
 	}
@@ -620,7 +621,7 @@ func buildMountRunOpts(mounts []pipeline.Mount, caches []pipeline.Cache, localOp
 // buildSecretRunOpts converts job and step secret references into LLB run options.
 // Env secrets use llb.AddSecretWithDest with SecretAsEnvName (nil dest); mount
 // secrets use llb.AddSecret with the filesystem path.
-func buildSecretRunOpts(jobSecrets, stepSecrets []pipeline.SecretRef) []llb.RunOption {
+func buildSecretRunOpts(jobSecrets, stepSecrets []pipelinemodel.SecretRef) []llb.RunOption {
 	total := len(jobSecrets) + len(stepSecrets)
 	if total == 0 {
 		return nil
@@ -638,7 +639,7 @@ func buildSecretRunOpts(jobSecrets, stepSecrets []pipeline.SecretRef) []llb.RunO
 // secretRefToRunOpt converts a SecretRef into an llb.RunOption: env refs
 // inject via SecretAsEnvName (nil dest to avoid a file mount), mount refs
 // bind to the filesystem path.
-func secretRefToRunOpt(ref pipeline.SecretRef) llb.RunOption {
+func secretRefToRunOpt(ref pipelinemodel.SecretRef) llb.RunOption {
 	if ref.Env != "" {
 		return llb.AddSecretWithDest(ref.Name, nil, llb.SecretAsEnvName(ref.Env))
 	}
@@ -650,7 +651,7 @@ func secretRefToRunOpt(ref pipeline.SecretRef) llb.RunOption {
 // (only when exposeDeps is true).
 //
 //revive:disable-next-line:flag-parameter exposeDeps controls a clear behavioral branch.
-func depMountOpts(job *pipeline.Job, depStates map[string]llb.State, exposeDeps bool) ([]llb.RunOption, error) {
+func depMountOpts(job *pipelinemodel.Job, depStates map[string]llb.State, exposeDeps bool) ([]llb.RunOption, error) {
 	var opts []llb.RunOption
 	for _, dep := range job.DependsOn {
 		depSt, ok := depStates[dep]

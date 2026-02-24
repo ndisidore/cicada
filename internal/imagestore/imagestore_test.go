@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ndisidore/cicada/internal/progress"
+	"github.com/ndisidore/cicada/internal/progress/progressmodel"
 )
 
 // fakeSolver implements the Solver interface for testing.
@@ -24,10 +24,10 @@ func (f *fakeSolver) Solve(ctx context.Context, def *llb.Definition, opt client.
 	return f.solveFn(ctx, def, opt, ch)
 }
 
-// fakeSender implements progress.Sender for testing by draining all messages.
+// fakeSender implements progressmodel.Sender for testing by draining all messages.
 type fakeSender struct{}
 
-func (*fakeSender) Send(_ progress.Msg) {}
+func (*fakeSender) Send(_ progressmodel.Msg) {}
 
 func TestCheckCached(t *testing.T) {
 	t.Parallel()

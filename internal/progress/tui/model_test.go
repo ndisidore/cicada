@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ndisidore/cicada/internal/progress"
+	"github.com/ndisidore/cicada/internal/progress/progressmodel"
 )
 
 func TestMultiModelUpdate(t *testing.T) {
@@ -52,8 +52,8 @@ func TestMultiModelUpdate(t *testing.T) {
 		{
 			name: "job added then status",
 			msgs: []tea.Msg{
-				progress.JobAddedMsg{Job: "build"},
-				progress.JobStatusMsg{Job: "build", Status: &client.SolveStatus{
+				progressmodel.JobAddedMsg{Job: "build"},
+				progressmodel.JobStatusMsg{Job: "build", Status: &client.SolveStatus{
 					Vertexes: []*client.Vertex{
 						{Digest: digest.FromString("a"), Name: "compile", Started: &now},
 					},
@@ -65,8 +65,8 @@ func TestMultiModelUpdate(t *testing.T) {
 		{
 			name: "vertex completes",
 			msgs: []tea.Msg{
-				progress.JobAddedMsg{Job: "lint"},
-				progress.JobStatusMsg{Job: "lint", Status: &client.SolveStatus{
+				progressmodel.JobAddedMsg{Job: "lint"},
+				progressmodel.JobStatusMsg{Job: "lint", Status: &client.SolveStatus{
 					Vertexes: []*client.Vertex{
 						{Digest: digest.FromString("a"), Name: "golangci", Started: &now, Completed: &completed},
 					},
@@ -78,8 +78,8 @@ func TestMultiModelUpdate(t *testing.T) {
 		{
 			name: "vertex cached",
 			msgs: []tea.Msg{
-				progress.JobAddedMsg{Job: "build"},
-				progress.JobStatusMsg{Job: "build", Status: &client.SolveStatus{
+				progressmodel.JobAddedMsg{Job: "build"},
+				progressmodel.JobStatusMsg{Job: "build", Status: &client.SolveStatus{
 					Vertexes: []*client.Vertex{
 						{Digest: digest.FromString("a"), Name: "deps", Cached: true},
 					},
@@ -91,8 +91,8 @@ func TestMultiModelUpdate(t *testing.T) {
 		{
 			name: "vertex error",
 			msgs: []tea.Msg{
-				progress.JobAddedMsg{Job: "deploy"},
-				progress.JobStatusMsg{Job: "deploy", Status: &client.SolveStatus{
+				progressmodel.JobAddedMsg{Job: "deploy"},
+				progressmodel.JobStatusMsg{Job: "deploy", Status: &client.SolveStatus{
 					Vertexes: []*client.Vertex{
 						{Digest: digest.FromString("a"), Name: "push", Error: "timeout"},
 					},
@@ -104,7 +104,7 @@ func TestMultiModelUpdate(t *testing.T) {
 		{
 			name: "job skipped",
 			msgs: []tea.Msg{
-				progress.JobSkippedMsg{Job: "deploy"},
+				progressmodel.JobSkippedMsg{Job: "deploy"},
 			},
 			wantJobs:    1,
 			wantSkipped: map[string]bool{"deploy": true},
@@ -112,8 +112,8 @@ func TestMultiModelUpdate(t *testing.T) {
 		{
 			name: "job added then skipped marks existing job",
 			msgs: []tea.Msg{
-				progress.JobAddedMsg{Job: "deploy"},
-				progress.JobSkippedMsg{Job: "deploy"},
+				progressmodel.JobAddedMsg{Job: "deploy"},
+				progressmodel.JobSkippedMsg{Job: "deploy"},
 			},
 			wantJobs:    1,
 			wantSkipped: map[string]bool{"deploy": true},
@@ -121,8 +121,8 @@ func TestMultiModelUpdate(t *testing.T) {
 		{
 			name: "step skipped within job",
 			msgs: []tea.Msg{
-				progress.JobAddedMsg{Job: "build"},
-				progress.StepSkippedMsg{Job: "build", Step: "slow-test"},
+				progressmodel.JobAddedMsg{Job: "build"},
+				progressmodel.StepSkippedMsg{Job: "build", Step: "slow-test"},
 			},
 			wantJobs:         1,
 			wantSkippedSteps: map[string][]string{"build": {"slow-test"}},
@@ -144,8 +144,8 @@ func TestMultiModelUpdate(t *testing.T) {
 		{
 			name: "job retry sets attempt fields",
 			msgs: []tea.Msg{
-				progress.JobAddedMsg{Job: "flaky"},
-				progress.JobRetryMsg{Job: "flaky", Attempt: 2, MaxAttempts: 4},
+				progressmodel.JobAddedMsg{Job: "flaky"},
+				progressmodel.JobRetryMsg{Job: "flaky", Attempt: 2, MaxAttempts: 4},
 			},
 			wantJobs:  1,
 			wantRetry: &wantRetry{jobName: "flaky", attempt: 2, maxAttempts: 4},
@@ -153,8 +153,8 @@ func TestMultiModelUpdate(t *testing.T) {
 		{
 			name: "job timeout sets timedOut",
 			msgs: []tea.Msg{
-				progress.JobAddedMsg{Job: "slow"},
-				progress.JobTimeoutMsg{Job: "slow", Timeout: 30 * time.Second},
+				progressmodel.JobAddedMsg{Job: "slow"},
+				progressmodel.JobTimeoutMsg{Job: "slow", Timeout: 30 * time.Second},
 			},
 			wantTimedOut: &wantTimeout{jobName: "slow", timeout: 30 * time.Second},
 			wantJobs:     1,
@@ -162,8 +162,8 @@ func TestMultiModelUpdate(t *testing.T) {
 		{
 			name: "vertex with step timeout and exit code 124",
 			msgs: []tea.Msg{
-				progress.JobAddedMsg{Job: "build", StepTimeouts: map[string]time.Duration{"build/step/cmd": 2 * time.Minute}},
-				progress.JobStatusMsg{Job: "build", Status: &client.SolveStatus{
+				progressmodel.JobAddedMsg{Job: "build", StepTimeouts: map[string]time.Duration{"build/step/cmd": 2 * time.Minute}},
+				progressmodel.JobStatusMsg{Job: "build", Status: &client.SolveStatus{
 					Vertexes: []*client.Vertex{
 						{Digest: digest.FromString("a"), Name: "build/step/cmd", Error: "process did not complete successfully: exit code: 124"},
 					},
@@ -175,8 +175,8 @@ func TestMultiModelUpdate(t *testing.T) {
 		{
 			name: "vertex with step timeout but different exit code",
 			msgs: []tea.Msg{
-				progress.JobAddedMsg{Job: "build", StepTimeouts: map[string]time.Duration{"build/step/cmd": 2 * time.Minute}},
-				progress.JobStatusMsg{Job: "build", Status: &client.SolveStatus{
+				progressmodel.JobAddedMsg{Job: "build", StepTimeouts: map[string]time.Duration{"build/step/cmd": 2 * time.Minute}},
+				progressmodel.JobStatusMsg{Job: "build", Status: &client.SolveStatus{
 					Vertexes: []*client.Vertex{
 						{Digest: digest.FromString("a"), Name: "build/step/cmd", Error: "exit code: 1"},
 					},
@@ -188,14 +188,14 @@ func TestMultiModelUpdate(t *testing.T) {
 		{
 			name: "running step with step timeout marked as timeout on timed-out job done",
 			msgs: []tea.Msg{
-				progress.JobAddedMsg{Job: "j", StepTimeouts: map[string]time.Duration{"j/step/cmd": 3 * time.Second}},
-				progress.JobStatusMsg{Job: "j", Status: &client.SolveStatus{
+				progressmodel.JobAddedMsg{Job: "j", StepTimeouts: map[string]time.Duration{"j/step/cmd": 3 * time.Second}},
+				progressmodel.JobStatusMsg{Job: "j", Status: &client.SolveStatus{
 					Vertexes: []*client.Vertex{
 						{Digest: digest.FromString("step1"), Name: "j/step/cmd", Started: &now},
 					},
 				}},
-				progress.JobTimeoutMsg{Job: "j", Timeout: 3 * time.Second},
-				progress.JobDoneMsg{Job: "j"},
+				progressmodel.JobTimeoutMsg{Job: "j", Timeout: 3 * time.Second},
+				progressmodel.JobDoneMsg{Job: "j"},
 			},
 			wantJobs:   1,
 			wantStatus: map[string]map[string]stepStatus{"j": {"j/step/cmd": statusTimeout}},
@@ -203,13 +203,13 @@ func TestMultiModelUpdate(t *testing.T) {
 		{
 			name: "running step with step timeout stays running on non-timed-out job done",
 			msgs: []tea.Msg{
-				progress.JobAddedMsg{Job: "j", StepTimeouts: map[string]time.Duration{"j/step/cmd": 3 * time.Second}},
-				progress.JobStatusMsg{Job: "j", Status: &client.SolveStatus{
+				progressmodel.JobAddedMsg{Job: "j", StepTimeouts: map[string]time.Duration{"j/step/cmd": 3 * time.Second}},
+				progressmodel.JobStatusMsg{Job: "j", Status: &client.SolveStatus{
 					Vertexes: []*client.Vertex{
 						{Digest: digest.FromString("step1"), Name: "j/step/cmd", Started: &now},
 					},
 				}},
-				progress.JobDoneMsg{Job: "j"},
+				progressmodel.JobDoneMsg{Job: "j"},
 			},
 			wantJobs:   1,
 			wantStatus: map[string]map[string]stepStatus{"j": {"j/step/cmd": statusRunning}},
@@ -217,14 +217,14 @@ func TestMultiModelUpdate(t *testing.T) {
 		{
 			name: "running step without timeout annotation marked as timeout on timed-out job done",
 			msgs: []tea.Msg{
-				progress.JobAddedMsg{Job: "j"},
-				progress.JobStatusMsg{Job: "j", Status: &client.SolveStatus{
+				progressmodel.JobAddedMsg{Job: "j"},
+				progressmodel.JobStatusMsg{Job: "j", Status: &client.SolveStatus{
 					Vertexes: []*client.Vertex{
 						{Digest: digest.FromString("step1"), Name: "j/step/cmd", Started: &now},
 					},
 				}},
-				progress.JobTimeoutMsg{Job: "j", Timeout: 5 * time.Second},
-				progress.JobDoneMsg{Job: "j"},
+				progressmodel.JobTimeoutMsg{Job: "j", Timeout: 5 * time.Second},
+				progressmodel.JobDoneMsg{Job: "j"},
 			},
 			wantJobs:   1,
 			wantStatus: map[string]map[string]stepStatus{"j": {"j/step/cmd": statusTimeout}},
@@ -232,13 +232,13 @@ func TestMultiModelUpdate(t *testing.T) {
 		{
 			name: "running step without timeout stays running on non-timed-out job done",
 			msgs: []tea.Msg{
-				progress.JobAddedMsg{Job: "j"},
-				progress.JobStatusMsg{Job: "j", Status: &client.SolveStatus{
+				progressmodel.JobAddedMsg{Job: "j"},
+				progressmodel.JobStatusMsg{Job: "j", Status: &client.SolveStatus{
 					Vertexes: []*client.Vertex{
 						{Digest: digest.FromString("step1"), Name: "j/step/cmd", Started: &now},
 					},
 				}},
-				progress.JobDoneMsg{Job: "j"},
+				progressmodel.JobDoneMsg{Job: "j"},
 			},
 			wantJobs:   1,
 			wantStatus: map[string]map[string]stepStatus{"j": {"j/step/cmd": statusRunning}},
@@ -246,8 +246,8 @@ func TestMultiModelUpdate(t *testing.T) {
 		{
 			name: "step retry adds log entry",
 			msgs: []tea.Msg{
-				progress.JobAddedMsg{Job: "build"},
-				progress.StepRetryMsg{Job: "build", Step: "compile", Attempt: 2, MaxAttempts: 3},
+				progressmodel.JobAddedMsg{Job: "build"},
+				progressmodel.StepRetryMsg{Job: "build", Step: "compile", Attempt: 2, MaxAttempts: 3},
 			},
 			wantJobs: 1,
 			wantLogs: map[string][]string{
@@ -257,13 +257,13 @@ func TestMultiModelUpdate(t *testing.T) {
 		{
 			name: "step allowed failure updates list and vertex status",
 			msgs: []tea.Msg{
-				progress.JobAddedMsg{Job: "build"},
-				progress.JobStatusMsg{Job: "build", Status: &client.SolveStatus{
+				progressmodel.JobAddedMsg{Job: "build"},
+				progressmodel.JobStatusMsg{Job: "build", Status: &client.SolveStatus{
 					Vertexes: []*client.Vertex{
 						{Digest: digest.FromString("a"), Name: "build/flaky/run", Error: "exit code: 1"},
 					},
 				}},
-				progress.StepAllowedFailureMsg{Job: "build", Step: "flaky"},
+				progressmodel.StepAllowedFailureMsg{Job: "build", Step: "flaky"},
 			},
 			wantJobs: 1,
 			wantAllowedFailure: &wantAllowedFailure{
@@ -275,14 +275,14 @@ func TestMultiModelUpdate(t *testing.T) {
 		{
 			name: "multiple jobs",
 			msgs: []tea.Msg{
-				progress.JobAddedMsg{Job: "lint"},
-				progress.JobAddedMsg{Job: "build"},
-				progress.JobStatusMsg{Job: "lint", Status: &client.SolveStatus{
+				progressmodel.JobAddedMsg{Job: "lint"},
+				progressmodel.JobAddedMsg{Job: "build"},
+				progressmodel.JobStatusMsg{Job: "lint", Status: &client.SolveStatus{
 					Vertexes: []*client.Vertex{
 						{Digest: digest.FromString("a"), Name: "check", Cached: true},
 					},
 				}},
-				progress.JobStatusMsg{Job: "build", Status: &client.SolveStatus{
+				progressmodel.JobStatusMsg{Job: "build", Status: &client.SolveStatus{
 					Vertexes: []*client.Vertex{
 						{Digest: digest.FromString("b"), Name: "compile", Started: &now},
 					},

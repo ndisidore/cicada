@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ndisidore/cicada/pkg/pipeline"
+	"github.com/ndisidore/cicada/pkg/pipeline/pipelinemodel"
 )
 
 // t.Parallel omitted: t.Setenv mutates the process environment.
@@ -18,34 +18,34 @@ func TestResolve_hostEnv(t *testing.T) {
 		name    string
 		envVal  string // value to set; left unset when empty and unsetEnv is true
 		unset   bool
-		decl    pipeline.SecretDecl
+		decl    pipelinemodel.SecretDecl
 		wantVal string
 		wantErr bool
 	}{
 		{
 			name:   "reads env var matching Name",
 			envVal: "s3cr3t",
-			decl: pipeline.SecretDecl{
+			decl: pipelinemodel.SecretDecl{
 				Name:   "MY_SECRET",
-				Source: pipeline.SecretSourceHostEnv,
+				Source: pipelinemodel.SecretSourceHostEnv,
 			},
 			wantVal: "s3cr3t",
 		},
 		{
 			name:  "unset env var returns error",
 			unset: true,
-			decl: pipeline.SecretDecl{
+			decl: pipelinemodel.SecretDecl{
 				Name:   "MISSING_VAR",
-				Source: pipeline.SecretSourceHostEnv,
+				Source: pipelinemodel.SecretSourceHostEnv,
 			},
 			wantErr: true,
 		},
 		{
 			name:   "Var overrides Name for env lookup",
 			envVal: "from-override",
-			decl: pipeline.SecretDecl{
+			decl: pipelinemodel.SecretDecl{
 				Name:   "secret_name",
-				Source: pipeline.SecretSourceHostEnv,
+				Source: pipelinemodel.SecretSourceHostEnv,
 				Var:    "CICADA_TEST_OVERRIDE",
 			},
 			wantVal: "from-override",
@@ -69,10 +69,10 @@ func TestResolve_hostEnv(t *testing.T) {
 				t.Setenv(envKey, tt.envVal)
 			}
 
-			got, err := Resolve(context.Background(), []pipeline.SecretDecl{tt.decl})
+			got, err := Resolve(context.Background(), []pipelinemodel.SecretDecl{tt.decl})
 			if tt.wantErr {
 				require.Error(t, err)
-				assert.ErrorIs(t, err, pipeline.ErrSecretResolution)
+				assert.ErrorIs(t, err, pipelinemodel.ErrSecretResolution)
 				return
 			}
 			require.NoError(t, err)
@@ -120,16 +120,16 @@ func TestResolve_file(t *testing.T) {
 				require.NoError(t, os.WriteFile(path, []byte(tt.content), 0o600))
 			}
 
-			decl := pipeline.SecretDecl{
+			decl := pipelinemodel.SecretDecl{
 				Name:   "file_secret",
-				Source: pipeline.SecretSourceFile,
+				Source: pipelinemodel.SecretSourceFile,
 				Path:   path,
 			}
 
-			got, err := Resolve(context.Background(), []pipeline.SecretDecl{decl})
+			got, err := Resolve(context.Background(), []pipelinemodel.SecretDecl{decl})
 			if tt.wantErr {
 				require.Error(t, err)
-				assert.ErrorIs(t, err, pipeline.ErrSecretResolution)
+				assert.ErrorIs(t, err, pipelinemodel.ErrSecretResolution)
 				return
 			}
 			require.NoError(t, err)
@@ -170,16 +170,16 @@ func TestResolve_cmd(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			decl := pipeline.SecretDecl{
+			decl := pipelinemodel.SecretDecl{
 				Name:   "cmd_secret",
-				Source: pipeline.SecretSourceCmd,
+				Source: pipelinemodel.SecretSourceCmd,
 				Cmd:    tt.cmd,
 			}
 
-			got, err := Resolve(context.Background(), []pipeline.SecretDecl{decl})
+			got, err := Resolve(context.Background(), []pipelinemodel.SecretDecl{decl})
 			if tt.wantErr {
 				require.Error(t, err)
-				assert.ErrorIs(t, err, pipeline.ErrSecretResolution)
+				assert.ErrorIs(t, err, pipelinemodel.ErrSecretResolution)
 				return
 			}
 			require.NoError(t, err)
@@ -193,13 +193,13 @@ func TestResolve_cmd(t *testing.T) {
 func TestResolve_unknownSource(t *testing.T) {
 	t.Parallel()
 
-	decl := pipeline.SecretDecl{
+	decl := pipelinemodel.SecretDecl{
 		Name:   "bad",
-		Source: pipeline.SecretSource("vault"),
+		Source: pipelinemodel.SecretSource("vault"),
 	}
 
-	_, err := Resolve(context.Background(), []pipeline.SecretDecl{decl})
-	require.ErrorIs(t, err, pipeline.ErrSecretResolution)
+	_, err := Resolve(context.Background(), []pipelinemodel.SecretDecl{decl})
+	require.ErrorIs(t, err, pipelinemodel.ErrSecretResolution)
 	assert.Contains(t, err.Error(), "unknown source")
 }
 
@@ -217,15 +217,15 @@ func TestResolve_cancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	decl := pipeline.SecretDecl{
+	decl := pipelinemodel.SecretDecl{
 		Name:   "ctx_secret",
-		Source: pipeline.SecretSourceCmd,
+		Source: pipelinemodel.SecretSourceCmd,
 		Cmd:    "sleep 10",
 	}
 
-	_, err := Resolve(ctx, []pipeline.SecretDecl{decl})
+	_, err := Resolve(ctx, []pipelinemodel.SecretDecl{decl})
 	require.Error(t, err)
-	assert.ErrorIs(t, err, pipeline.ErrSecretResolution)
+	assert.ErrorIs(t, err, pipelinemodel.ErrSecretResolution)
 }
 
 // t.Parallel omitted: t.Setenv mutates the process environment.
@@ -236,10 +236,10 @@ func TestResolve_multipleDecls(t *testing.T) {
 
 	t.Setenv("CICADA_MULTI_TEST", "env-val")
 
-	decls := []pipeline.SecretDecl{
-		{Name: "CICADA_MULTI_TEST", Source: pipeline.SecretSourceHostEnv},
-		{Name: "from_file", Source: pipeline.SecretSourceFile, Path: filePath},
-		{Name: "from_cmd", Source: pipeline.SecretSourceCmd, Cmd: "echo cmd-val"},
+	decls := []pipelinemodel.SecretDecl{
+		{Name: "CICADA_MULTI_TEST", Source: pipelinemodel.SecretSourceHostEnv},
+		{Name: "from_file", Source: pipelinemodel.SecretSourceFile, Path: filePath},
+		{Name: "from_cmd", Source: pipelinemodel.SecretSourceCmd, Cmd: "echo cmd-val"},
 	}
 
 	got, err := Resolve(context.Background(), decls)

@@ -5,25 +5,27 @@ import (
 	"maps"
 	"slices"
 	"strings"
+
+	pm "github.com/ndisidore/cicada/pkg/pipeline/pipelinemodel"
 )
 
 // Expand performs two-phase matrix expansion on a pipeline.
 // Phase 1 expands pipeline-level matrices (correlated deps across jobs).
 // Phase 2 expands job-level matrices (all-variant deps).
 // Returns the original pipeline unchanged if no matrices are present.
-func Expand(p Pipeline) (Pipeline, error) {
-	if p.Matrix == nil && !slices.ContainsFunc(p.Jobs, func(j Job) bool { return j.Matrix != nil }) {
+func Expand(p pm.Pipeline) (pm.Pipeline, error) {
+	if p.Matrix == nil && !slices.ContainsFunc(p.Jobs, func(j pm.Job) bool { return j.Matrix != nil }) {
 		return p, nil
 	}
 
 	expanded, err := expandPipeline(p)
 	if err != nil {
-		return Pipeline{}, err
+		return pm.Pipeline{}, fmt.Errorf("expanding pipeline matrix: %w", err)
 	}
 
 	expanded, err = expandJobs(expanded)
 	if err != nil {
-		return Pipeline{}, err
+		return pm.Pipeline{}, fmt.Errorf("expanding job matrices: %w", err)
 	}
 
 	return expanded, nil
@@ -31,29 +33,29 @@ func Expand(p Pipeline) (Pipeline, error) {
 
 // expandPipeline handles phase 1: pipeline-level matrix expansion with
 // correlated dependency rewriting.
-func expandPipeline(p Pipeline) (Pipeline, error) {
+func expandPipeline(p pm.Pipeline) (pm.Pipeline, error) {
 	if p.Matrix == nil {
 		return p, nil
 	}
 
 	if err := ValidateMatrix(p.Matrix); err != nil {
-		return Pipeline{}, fmt.Errorf("pipeline matrix: %w", err)
+		return pm.Pipeline{}, fmt.Errorf("pipeline matrix: %w", err)
 	}
 
 	if err := checkDimCollisions(p.Matrix, p.Jobs); err != nil {
-		return Pipeline{}, err
+		return pm.Pipeline{}, fmt.Errorf("pipeline matrix: %w", err)
 	}
 
 	combos, err := p.Matrix.Combinations()
 	if err != nil {
-		return Pipeline{}, fmt.Errorf("pipeline matrix: %w", err)
+		return pm.Pipeline{}, fmt.Errorf("pipeline matrix: %w", err)
 	}
 	savedJobs := p.Jobs
 	p.Jobs = nil
 	expanded := p.Clone()
 	p.Jobs = savedJobs
 	expanded.Matrix = nil
-	expanded.Jobs = make([]Job, 0, len(savedJobs)*len(combos))
+	expanded.Jobs = make([]pm.Job, 0, len(savedJobs)*len(combos))
 
 	for _, combo := range combos {
 		for i := range p.Jobs {
@@ -83,14 +85,14 @@ func expandPipeline(p Pipeline) (Pipeline, error) {
 // all-variant dependency rewriting.
 //
 //revive:disable-next-line:cognitive-complexity expandJobs is a linear expansion pipeline; splitting it hurts readability.
-func expandJobs(p Pipeline) (Pipeline, error) {
-	if !slices.ContainsFunc(p.Jobs, func(j Job) bool { return j.Matrix != nil }) {
+func expandJobs(p pm.Pipeline) (pm.Pipeline, error) {
+	if !slices.ContainsFunc(p.Jobs, func(j pm.Job) bool { return j.Matrix != nil }) {
 		return p, nil
 	}
 
 	// Build expansion map: original job name -> all expanded variant names.
 	expansionMap := make(map[string][]string)
-	var expanded []Job
+	var expanded []pm.Job
 
 	for i := range p.Jobs {
 		job := &p.Jobs[i]
@@ -103,12 +105,12 @@ func expandJobs(p Pipeline) (Pipeline, error) {
 		}
 
 		if err := ValidateMatrix(job.Matrix); err != nil {
-			return Pipeline{}, fmt.Errorf("job %q matrix: %w", job.Name, err)
+			return pm.Pipeline{}, fmt.Errorf("job %q matrix: %w", job.Name, err)
 		}
 
 		combos, err := job.Matrix.Combinations()
 		if err != nil {
-			return Pipeline{}, fmt.Errorf("job %q matrix: %w", job.Name, err)
+			return pm.Pipeline{}, fmt.Errorf("job %q matrix: %w", job.Name, err)
 		}
 		names := make([]string, 0, len(combos))
 		for _, combo := range combos {
@@ -155,29 +157,32 @@ const _maxMatrixCombinations = 10_000
 // ValidateMatrix checks that a matrix has at least one dimension with valid
 // names, at least one value per dimension, and that the total combination
 // count does not exceed _maxMatrixCombinations.
-func ValidateMatrix(m *Matrix) error {
+func ValidateMatrix(m *pm.Matrix) error {
+	if m == nil {
+		return fmt.Errorf("nil matrix: %w", pm.ErrEmptyMatrix)
+	}
 	if len(m.Dimensions) == 0 {
-		return ErrEmptyMatrix
+		return fmt.Errorf("no dimensions: %w", pm.ErrEmptyMatrix)
 	}
 	seen := make(map[string]struct{}, len(m.Dimensions))
 	total := 1
 	for i := range m.Dimensions {
 		d := &m.Dimensions[i]
 		if !_validDimName.MatchString(d.Name) {
-			return fmt.Errorf("dimension %q: %w", d.Name, ErrInvalidDimName)
+			return fmt.Errorf("dimension %q: %w", d.Name, pm.ErrInvalidDimName)
 		}
 		if _, ok := seen[d.Name]; ok {
-			return fmt.Errorf("dimension %q: %w", d.Name, ErrDuplicateDim)
+			return fmt.Errorf("dimension %q: %w", d.Name, pm.ErrDuplicateDim)
 		}
 		seen[d.Name] = struct{}{}
 		if len(d.Values) == 0 {
-			return fmt.Errorf("dimension %q: %w", d.Name, ErrEmptyDimension)
+			return fmt.Errorf("dimension %q: %w", d.Name, pm.ErrEmptyDimension)
 		}
 		total *= len(d.Values)
 		if total > _maxMatrixCombinations {
 			return fmt.Errorf(
 				"%d combinations exceeds limit of %d: %w",
-				total, _maxMatrixCombinations, ErrMatrixTooLarge,
+				total, _maxMatrixCombinations, pm.ErrMatrixTooLarge,
 			)
 		}
 	}
@@ -186,10 +191,10 @@ func ValidateMatrix(m *Matrix) error {
 
 // checkDimCollisions ensures no dimension name appears in both the pipeline
 // matrix and any job matrix.
-func checkDimCollisions(pm *Matrix, jobs []Job) error {
-	pipelineDims := make(map[string]struct{}, len(pm.Dimensions))
-	for i := range pm.Dimensions {
-		pipelineDims[pm.Dimensions[i].Name] = struct{}{}
+func checkDimCollisions(pMatrix *pm.Matrix, jobs []pm.Job) error {
+	pipelineDims := make(map[string]struct{}, len(pMatrix.Dimensions))
+	for i := range pMatrix.Dimensions {
+		pipelineDims[pMatrix.Dimensions[i].Name] = struct{}{}
 	}
 	for i := range jobs {
 		if jobs[i].Matrix == nil {
@@ -200,7 +205,7 @@ func checkDimCollisions(pm *Matrix, jobs []Job) error {
 			if _, ok := pipelineDims[name]; ok {
 				return fmt.Errorf(
 					"job %q dimension %q: %w (also in pipeline matrix)",
-					jobs[i].Name, name, ErrDuplicateDim,
+					jobs[i].Name, name, pm.ErrDuplicateDim,
 				)
 			}
 		}
@@ -225,7 +230,7 @@ func mergeMatrixValues(existing, combo map[string]string) map[string]string {
 // applied to image, run, workdir, platform, mount source/target, cache target,
 // and step fields. Cache IDs are copied verbatim (including any namespace prefix
 // from phase 1); callers re-namespace IDs via matrixCacheID after replication.
-func replicateJob(j *Job, combo map[string]string) Job {
+func replicateJob(j *pm.Job, combo map[string]string) pm.Job {
 	return substituteJobVars(*j, combo, "matrix.")
 }
 
@@ -304,7 +309,7 @@ func rewriteDeps(deps []string, expansionMap map[string][]string) []string {
 
 // correlateArtifactFroms rewrites Artifact.From fields to their correlated
 // (same-replica) names during pipeline-level matrix expansion.
-func correlateArtifactFroms(artifacts []Artifact, combo map[string]string) {
+func correlateArtifactFroms(artifacts []pm.Artifact, combo map[string]string) {
 	for i := range artifacts {
 		if artifacts[i].From == "" {
 			continue
@@ -318,7 +323,7 @@ func correlateArtifactFroms(artifacts []Artifact, combo map[string]string) {
 // variants), artifacts keep a 1:1 mapping. If From resolves to exactly one
 // variant, it is rewritten; otherwise it is left as-is (validation will catch
 // any issues).
-func rewriteArtifactFroms(artifacts []Artifact, expansionMap map[string][]string) {
+func rewriteArtifactFroms(artifacts []pm.Artifact, expansionMap map[string][]string) {
 	for i := range artifacts {
 		if artifacts[i].From == "" {
 			continue
