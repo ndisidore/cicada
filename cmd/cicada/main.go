@@ -72,7 +72,7 @@ func main() {
 		parse:   p.ParseFile,
 		getwd:   os.Getwd,
 		stdout:  os.Stdout,
-		isTTY:   term.IsTerminal(int(os.Stdout.Fd())) && os.Getenv("CI") == "",
+		isTTY:   term.IsTerminal(int(os.Stdout.Fd())) && os.Getenv("CI") == "", //nolint:gosec // G115: file descriptors are small non-negative integers, safe to cast uintptr->int
 	}
 
 	named := map[runtime.Type]func() runtime.Runtime{
