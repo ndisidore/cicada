@@ -8,7 +8,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/sblinch/kdl-go/document"
+	kdl "github.com/calico32/kdl-go"
 
 	"github.com/ndisidore/cicada/pkg/pipeline"
 	"github.com/ndisidore/cicada/pkg/pipeline/pipelinemodel"
@@ -133,7 +133,7 @@ func (gc *groupCollector) merge() ([]pipelinemodel.Job, error) {
 }
 
 // parseIncludeNode extracts include properties from a KDL node.
-func parseIncludeNode(node *document.Node, filename string) (includeDirective, error) {
+func parseIncludeNode(node *kdl.Node, filename string) (includeDirective, error) {
 	source, err := requireStringArg(node, filename, string(NodeTypeInclude))
 	if err != nil {
 		return includeDirective{}, err
@@ -154,7 +154,7 @@ func parseIncludeNode(node *document.Node, filename string) (includeDirective, e
 	}
 
 	// Reject unknown properties (only as + on-conflict allowed).
-	for k := range node.Properties {
+	for k := range node.Properties() {
 		if k != PropAs && k != PropOnConflict {
 			return includeDirective{}, fmt.Errorf(
 				"%s: include %q: %w: %q", filename, source, ErrUnknownProp, k,
@@ -163,9 +163,10 @@ func parseIncludeNode(node *document.Node, filename string) (includeDirective, e
 	}
 
 	// Parameters are passed as child nodes.
-	params := make(map[string]string, len(node.Children))
-	for _, child := range node.Children {
-		name := child.Name.ValueString()
+	children := childrenOf(node)
+	params := make(map[string]string, len(children))
+	for _, child := range children {
+		name := child.Name()
 		if _, dup := params[name]; dup {
 			return includeDirective{}, fmt.Errorf(
 				"%s: include %q: %w: %q", filename, source, ErrDuplicateField, name,
@@ -191,7 +192,7 @@ func parseIncludeNode(node *document.Node, filename string) (includeDirective, e
 // parseFragmentNode parses a fragment KDL node into a pipelinemodel.Fragment.
 //
 //revive:disable-next-line:cognitive-complexity parseFragmentNode is a flat switch dispatch over child node types; splitting it hurts readability.
-func (p *Parser) parseFragmentNode(node *document.Node, filename string, state *includeState) (pipelinemodel.Fragment, error) {
+func (p *Parser) parseFragmentNode(node *kdl.Node, filename string, state *includeState) (pipelinemodel.Fragment, error) {
 	name, err := requireStringArg(node, filename, string(NodeTypeFragment))
 	if err != nil {
 		return pipelinemodel.Fragment{}, fmt.Errorf("%s: fragment missing name: %w", filename, err)
@@ -203,8 +204,8 @@ func (p *Parser) parseFragmentNode(node *document.Node, filename string, state *
 	}
 	gc := newGroupCollector(filename)
 
-	for _, child := range node.Children {
-		switch nt := NodeType(child.Name.ValueString()); nt {
+	for _, child := range childrenOf(node) {
+		switch nt := NodeType(child.Name()); nt {
 		case NodeTypeParam:
 			pd, err := parseParamNode(child, filename)
 			if err != nil {
@@ -250,7 +251,7 @@ func (p *Parser) parseFragmentNode(node *document.Node, filename string, state *
 }
 
 // parseParamNode parses a param KDL node into a pipelinemodel.ParamDef.
-func parseParamNode(node *document.Node, filename string) (pipelinemodel.ParamDef, error) {
+func parseParamNode(node *kdl.Node, filename string) (pipelinemodel.ParamDef, error) {
 	name, err := requireStringArg(node, filename, string(NodeTypeParam))
 	if err != nil {
 		return pipelinemodel.ParamDef{}, fmt.Errorf("%s: param missing name: %w", filename, err)
@@ -262,7 +263,7 @@ func parseParamNode(node *document.Node, filename string) (pipelinemodel.ParamDe
 	}
 
 	pd := pipelinemodel.ParamDef{Name: name}
-	if _, hasDefault := node.Properties[PropDefault]; hasDefault {
+	if _, hasDefault := node.Properties()[PropDefault]; hasDefault {
 		pd.Default = def
 	} else {
 		pd.Required = true
@@ -284,7 +285,7 @@ func checkDuplicateParam(defs []pipelinemodel.ParamDef, name, filename, fragName
 }
 
 // resolveChildInclude parses an include child node and resolves it.
-func (p *Parser) resolveChildInclude(child *document.Node, filename string, state *includeState) ([]pipelinemodel.Job, includeDirective, error) {
+func (p *Parser) resolveChildInclude(child *kdl.Node, filename string, state *includeState) ([]pipelinemodel.Job, includeDirective, error) {
 	inc, err := parseIncludeNode(child, filename)
 	if err != nil {
 		return nil, includeDirective{}, err
@@ -349,10 +350,10 @@ func (p *Parser) parseIncludedFile(rc io.Reader, absPath string, params map[stri
 		return "", nil, err
 	}
 
-	var fragNode *document.Node
+	var fragNode *kdl.Node
 	hasPipelineChildren := false
 	for _, node := range doc.Nodes {
-		switch nt := NodeType(node.Name.ValueString()); nt {
+		switch nt := NodeType(node.Name()); nt {
 		case NodeTypeFragment:
 			if fragNode != nil {
 				return "", nil, fmt.Errorf("%s: %w: multiple %q nodes", absPath, ErrAmbiguousFile, NodeTypeFragment)
@@ -378,7 +379,7 @@ func (p *Parser) parseIncludedFile(rc io.Reader, absPath string, params map[stri
 }
 
 // includeFragment resolves a fragment node from an included file.
-func (p *Parser) includeFragment(node *document.Node, absPath string, params map[string]string, state *includeState) (string, []pipelinemodel.Job, error) {
+func (p *Parser) includeFragment(node *kdl.Node, absPath string, params map[string]string, state *includeState) (string, []pipelinemodel.Job, error) {
 	frag, err := p.parseFragmentNode(node, absPath, state)
 	if err != nil {
 		return "", nil, err
@@ -413,7 +414,7 @@ func parseConflictStrategy(s string) (pipelinemodel.ConflictStrategy, error) {
 // pipeline-level matrix and defaults.
 //
 //revive:disable-next-line:cognitive-complexity includePipelineFile is a flat switch dispatch; splitting it hurts readability.
-func (p *Parser) includePipelineFile(nodes []*document.Node, absPath string, params map[string]string, state *includeState) (string, []pipelinemodel.Job, error) {
+func (p *Parser) includePipelineFile(nodes []*kdl.Node, absPath string, params map[string]string, state *includeState) (string, []pipelinemodel.Job, error) {
 	name := nameFromFilename(absPath)
 	if len(params) > 0 {
 		return "", nil, fmt.Errorf("pipeline %q: %w", name, pipelinemodel.ErrPipelineNoParams)
@@ -421,7 +422,7 @@ func (p *Parser) includePipelineFile(nodes []*document.Node, absPath string, par
 
 	gc := newGroupCollector(absPath)
 	for _, node := range nodes {
-		switch nt := NodeType(node.Name.ValueString()); nt {
+		switch nt := NodeType(node.Name()); nt {
 		case NodeTypeStep:
 			job, err := parseBareStep(node, absPath)
 			if err != nil {
@@ -435,9 +436,10 @@ func (p *Parser) includePipelineFile(nodes []*document.Node, absPath string, par
 			}
 			gc.addJob(job)
 		case NodeTypeMatrix:
-			dims := make([]string, len(node.Children))
-			for i, d := range node.Children {
-				dims[i] = d.Name.ValueString()
+			matrixChildren := childrenOf(node)
+			dims := make([]string, len(matrixChildren))
+			for i, d := range matrixChildren {
+				dims[i] = d.Name()
 			}
 			slog.Warn("included pipeline matrix ignored",
 				slog.String("pipeline", name),

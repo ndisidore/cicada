@@ -6,5 +6,6 @@ step "greet" {
 step "build" {
   image "node:24-alpine"
   depends-on "greet"
-  run "node -e \"console.log('hello from node')\""
+  // KDL v2 raw string: double quotes inside need no escaping.
+  run #"node -e 'console.log("hello from node")'"#
 }

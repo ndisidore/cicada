@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sblinch/kdl-go/document"
+	kdl "github.com/calico32/kdl-go"
 
 	"github.com/ndisidore/cicada/pkg/conditional"
 	"github.com/ndisidore/cicada/pkg/pipeline"
@@ -20,15 +20,17 @@ import (
 // the string values. Structural validation (empty matrix, duplicate/invalid
 // dimension names, empty dimensions, combination cap) is delegated to
 // pipeline.ValidateMatrix.
-func parseMatrix(node *document.Node, filename, scope string) (pipelinemodel.Matrix, error) {
+func parseMatrix(node *kdl.Node, filename, scope string) (pipelinemodel.Matrix, error) {
+	children := childrenOf(node)
 	m := pipelinemodel.Matrix{
-		Dimensions: make([]pipelinemodel.Dimension, 0, len(node.Children)),
+		Dimensions: make([]pipelinemodel.Dimension, 0, len(children)),
 	}
 
-	for _, child := range node.Children {
-		dimName := child.Name.ValueString()
-		values := make([]string, 0, len(child.Arguments))
-		for i := range child.Arguments {
+	for _, child := range children {
+		dimName := child.Name()
+		childArgs := child.Arguments()
+		values := make([]string, 0, len(childArgs))
+		for i := range childArgs {
 			v, err := arg[string](child, i)
 			if err != nil {
 				return pipelinemodel.Matrix{}, fmt.Errorf(
@@ -49,7 +51,7 @@ func parseMatrix(node *document.Node, filename, scope string) (pipelinemodel.Mat
 }
 
 // parseEnvNode extracts a key-value pair from an env node (two string args).
-func parseEnvNode(node *document.Node, filename, scope string) (pipelinemodel.EnvVar, error) {
+func parseEnvNode(node *kdl.Node, filename, scope string) (pipelinemodel.EnvVar, error) {
 	kv, err := stringArgs2(node, filename, string(NodeTypeEnv))
 	if err != nil {
 		return pipelinemodel.EnvVar{}, fmt.Errorf("%s: %s: %w", filename, scope, err)
@@ -58,11 +60,11 @@ func parseEnvNode(node *document.Node, filename, scope string) (pipelinemodel.En
 }
 
 // parseExportNode extracts an export path and required local property.
-func parseExportNode(node *document.Node, filename, scopeName string) (pipelinemodel.Export, error) {
-	if len(node.Arguments) > 1 {
+func parseExportNode(node *kdl.Node, filename, scopeName string) (pipelinemodel.Export, error) {
+	if len(node.Arguments()) > 1 {
 		return pipelinemodel.Export{}, fmt.Errorf(
 			"%s: %q: export requires exactly one argument, got %d: %w",
-			filename, scopeName, len(node.Arguments), ErrExtraArgs,
+			filename, scopeName, len(node.Arguments()), ErrExtraArgs,
 		)
 	}
 	path, err := requireStringArg(node, filename, string(NodeTypeExport))
@@ -82,11 +84,11 @@ func parseExportNode(node *document.Node, filename, scopeName string) (pipelinem
 }
 
 // parseArtifactNode extracts an artifact definition (one positional arg + source/target properties).
-func parseArtifactNode(node *document.Node, filename, scopeName string) (pipelinemodel.Artifact, error) {
-	if len(node.Arguments) > 1 {
+func parseArtifactNode(node *kdl.Node, filename, scopeName string) (pipelinemodel.Artifact, error) {
+	if len(node.Arguments()) > 1 {
 		return pipelinemodel.Artifact{}, fmt.Errorf(
 			"%s: %q: artifact requires exactly one argument, got %d: %w",
-			filename, scopeName, len(node.Arguments), ErrExtraArgs,
+			filename, scopeName, len(node.Arguments()), ErrExtraArgs,
 		)
 	}
 	from, err := requireStringArg(node, filename, string(NodeTypeArtifact))
@@ -117,11 +119,11 @@ func parseArtifactNode(node *document.Node, filename, scopeName string) (pipelin
 // parsePublishNode extracts a publish declaration from a KDL node.
 // One required string argument (image reference), optional push bool prop
 // (default true), optional insecure bool prop (default false).
-func parsePublishNode(node *document.Node, filename, scopeName string) (pipelinemodel.Publish, error) {
-	if len(node.Arguments) > 1 {
+func parsePublishNode(node *kdl.Node, filename, scopeName string) (pipelinemodel.Publish, error) {
+	if len(node.Arguments()) > 1 {
 		return pipelinemodel.Publish{}, fmt.Errorf(
 			"%s: %q: publish requires exactly one argument, got %d: %w",
-			filename, scopeName, len(node.Arguments), ErrExtraArgs,
+			filename, scopeName, len(node.Arguments()), ErrExtraArgs,
 		)
 	}
 	image, err := requireStringArg(node, filename, string(NodeTypePublish))
@@ -137,18 +139,18 @@ func parsePublishNode(node *document.Node, filename, scopeName string) (pipeline
 		return pipelinemodel.Publish{}, fmt.Errorf("%s: %q: publish: %w", filename, scopeName, err)
 	}
 	// Default push=true when the property is absent.
-	if _, hasPush := node.Properties[PropPush]; !hasPush {
+	if _, hasPush := node.Properties()[PropPush]; !hasPush {
 		push = true
 	}
 	return pipelinemodel.Publish{Image: image, Push: push, Insecure: insecure}, nil
 }
 
 // parseWhenNode extracts a when condition from a KDL node.
-func parseWhenNode(node *document.Node, filename, scopeName string) (*conditional.When, error) {
-	if len(node.Arguments) > 1 {
+func parseWhenNode(node *kdl.Node, filename, scopeName string) (*conditional.When, error) {
+	if len(node.Arguments()) > 1 {
 		return nil, fmt.Errorf(
 			"%s: %s: when requires exactly one argument, got %d: %w",
-			filename, scopeName, len(node.Arguments), ErrExtraArgs,
+			filename, scopeName, len(node.Arguments()), ErrExtraArgs,
 		)
 	}
 	expr, err := requireStringArg(node, filename, string(NodeTypeWhen))
@@ -171,42 +173,42 @@ func parseWhenNode(node *document.Node, filename, scopeName string) (*conditiona
 // All optional. Defaults: attempts=1, delay=0, backoff="none".
 //
 //revive:disable-next-line:cognitive-complexity,cyclomatic parseRetryNode is a linear field-dispatch parser; splitting it hurts readability.
-func parseRetryNode(node *document.Node, filename, scope string) (*pipelinemodel.Retry, error) {
+func parseRetryNode(node *kdl.Node, filename, scope string) (*pipelinemodel.Retry, error) {
 	r := &pipelinemodel.Retry{
 		Attempts: 1,
 		Backoff:  pipelinemodel.BackoffNone,
 	}
-	if len(node.Arguments) > 0 {
+	if len(node.Arguments()) > 0 {
 		return nil, fmt.Errorf("%s: %s: retry takes no arguments: %w", filename, scope, ErrExtraArgs)
 	}
 	seen := make(map[string]bool, 3)
-	for _, child := range node.Children {
-		name := child.Name.ValueString()
+	for _, child := range childrenOf(node) {
+		name := child.Name()
 		if seen[name] {
 			return nil, fmt.Errorf("%s: %s: retry: %w: %q", filename, scope, ErrDuplicateField, name)
 		}
 		seen[name] = true
 		switch name {
 		case PropAttempts:
-			if len(child.Arguments) > 1 {
+			if len(child.Arguments()) > 1 {
 				return nil, fmt.Errorf(
 					"%s: %s: retry %s requires exactly one argument, got %d: %w",
-					filename, scope, name, len(child.Arguments), ErrExtraArgs,
+					filename, scope, name, len(child.Arguments()), ErrExtraArgs,
 				)
 			}
-			v, err := arg[int64](child, 0)
+			v, err := arg[int](child, 0)
 			if err != nil {
 				return nil, fmt.Errorf("%s: %s: retry attempts: %w", filename, scope, err)
 			}
 			if v < 1 {
 				return nil, fmt.Errorf("%s: %s: retry: attempts %d: %w", filename, scope, v, pipelinemodel.ErrInvalidRetryAttempts)
 			}
-			r.Attempts = int(v)
+			r.Attempts = v
 		case PropDelay:
-			if len(child.Arguments) > 1 {
+			if len(child.Arguments()) > 1 {
 				return nil, fmt.Errorf(
 					"%s: %s: retry %s requires exactly one argument, got %d: %w",
-					filename, scope, name, len(child.Arguments), ErrExtraArgs,
+					filename, scope, name, len(child.Arguments()), ErrExtraArgs,
 				)
 			}
 			v, err := requireStringArg(child, filename, name)
@@ -222,10 +224,10 @@ func parseRetryNode(node *document.Node, filename, scope string) (*pipelinemodel
 			}
 			r.Delay = d
 		case PropBackoff:
-			if len(child.Arguments) > 1 {
+			if len(child.Arguments()) > 1 {
 				return nil, fmt.Errorf(
 					"%s: %s: retry %s requires exactly one argument, got %d: %w",
-					filename, scope, name, len(child.Arguments), ErrExtraArgs,
+					filename, scope, name, len(child.Arguments()), ErrExtraArgs,
 				)
 			}
 			v, err := requireStringArg(child, filename, name)
@@ -247,12 +249,13 @@ func parseRetryNode(node *document.Node, filename, scope string) (*pipelinemodel
 }
 
 // parseShellNode parses variadic string arguments from a shell node.
-func parseShellNode(node *document.Node, filename, scope string) ([]string, error) {
-	if len(node.Arguments) == 0 {
+func parseShellNode(node *kdl.Node, filename, scope string) ([]string, error) {
+	nodeArgs := node.Arguments()
+	if len(nodeArgs) == 0 {
 		return nil, fmt.Errorf("%s: %s: shell: %w", filename, scope, pipelinemodel.ErrEmptyShell)
 	}
-	args := make([]string, 0, len(node.Arguments))
-	for i := range node.Arguments {
+	args := make([]string, 0, len(nodeArgs))
+	for i := range nodeArgs {
 		v, err := arg[string](node, i)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %s: shell argument %d: %w", filename, scope, i, err)
@@ -268,42 +271,42 @@ func parseShellNode(node *document.Node, filename, scope string) ([]string, erro
 // restriction to hostEnv) is deferred to pipeline.Validate via validateSecretDecls.
 //
 //revive:disable-next-line:cognitive-complexity parseSecretDeclNode is a linear field-dispatch parser; splitting it hurts readability.
-func parseSecretDeclNode(node *document.Node, filename, scope string) (pipelinemodel.SecretDecl, error) {
+func parseSecretDeclNode(node *kdl.Node, filename, scope string) (pipelinemodel.SecretDecl, error) {
 	name, err := requireStringArg(node, filename, string(NodeTypeSecret))
 	if err != nil {
 		return pipelinemodel.SecretDecl{}, fmt.Errorf("%s: %s: secret missing name: %w", filename, scope, err)
 	}
-	if len(node.Arguments) > 1 {
+	if len(node.Arguments()) > 1 {
 		return pipelinemodel.SecretDecl{}, fmt.Errorf(
 			"%s: %s: secret %q: requires exactly one argument, got %d: %w",
-			filename, scope, name, len(node.Arguments), ErrExtraArgs,
+			filename, scope, name, len(node.Arguments()), ErrExtraArgs,
 		)
 	}
 	// Secret declarations use children only (source, var, path, cmd); reject stray properties.
-	if len(node.Properties) > 0 {
-		k := slices.Sorted(maps.Keys(node.Properties))[0]
+	if len(node.Properties()) > 0 {
+		k := slices.Sorted(maps.Keys(node.Properties()))[0]
 		return pipelinemodel.SecretDecl{}, fmt.Errorf(
 			"%s: %s: secret %q: %w: %q", filename, scope, name, ErrUnknownProp, k,
 		)
 	}
 	d := pipelinemodel.SecretDecl{Name: name}
 	seen := make(map[string]bool, 4)
-	for _, child := range node.Children {
-		field := child.Name.ValueString()
+	for _, child := range childrenOf(node) {
+		field := child.Name()
 		if seen[field] {
 			return pipelinemodel.SecretDecl{}, fmt.Errorf("%s: %s: secret %q: %w: %q", filename, scope, name, ErrDuplicateField, field)
 		}
 		seen[field] = true
 		switch field {
 		case PropSource, PropVar, PropPath, PropCmd:
-			if len(child.Arguments) > 1 {
+			if len(child.Arguments()) > 1 {
 				return pipelinemodel.SecretDecl{}, fmt.Errorf(
 					"%s: %s: secret %q: %s requires exactly one argument, got %d: %w",
-					filename, scope, name, field, len(child.Arguments), ErrExtraArgs,
+					filename, scope, name, field, len(child.Arguments()), ErrExtraArgs,
 				)
 			}
-			if len(child.Properties) > 0 {
-				k := slices.Sorted(maps.Keys(child.Properties))[0]
+			if len(child.Properties()) > 0 {
+				k := slices.Sorted(maps.Keys(child.Properties()))[0]
 				return pipelinemodel.SecretDecl{}, fmt.Errorf(
 					"%s: %s: secret %q: %s: %w: %q", filename, scope, name, field, ErrUnknownProp, k,
 				)
@@ -334,18 +337,18 @@ func parseSecretDeclNode(node *document.Node, filename, scope string) (pipelinem
 
 // parseSecretRefNode parses a job/step-level secret reference from a KDL node.
 // One required string argument (secret name), optional env= and mount= properties.
-func parseSecretRefNode(node *document.Node, filename, scope string) (pipelinemodel.SecretRef, error) {
+func parseSecretRefNode(node *kdl.Node, filename, scope string) (pipelinemodel.SecretRef, error) {
 	name, err := requireStringArg(node, filename, string(NodeTypeSecret))
 	if err != nil {
 		return pipelinemodel.SecretRef{}, fmt.Errorf("%s: %s: secret ref missing name: %w", filename, scope, err)
 	}
-	if len(node.Arguments) > 1 {
+	if len(node.Arguments()) > 1 {
 		return pipelinemodel.SecretRef{}, fmt.Errorf(
 			"%s: %s: secret %q: requires exactly one argument, got %d: %w",
-			filename, scope, name, len(node.Arguments), ErrExtraArgs,
+			filename, scope, name, len(node.Arguments()), ErrExtraArgs,
 		)
 	}
-	if len(node.Children) > 0 {
+	if len(childrenOf(node)) > 0 {
 		return pipelinemodel.SecretRef{}, fmt.Errorf(
 			"%s: %s: secret %q: %w", filename, scope, name, ErrUnexpectedChildren,
 		)
@@ -359,7 +362,7 @@ func parseSecretRefNode(node *document.Node, filename, scope string) (pipelinemo
 		return pipelinemodel.SecretRef{}, fmt.Errorf("%s: %s: secret %q: %w", filename, scope, name, err)
 	}
 	// Reject unknown properties deterministically.
-	for _, k := range slices.Sorted(maps.Keys(node.Properties)) {
+	for _, k := range slices.Sorted(maps.Keys(node.Properties())) {
 		if k != PropEnv && k != PropMount {
 			return pipelinemodel.SecretRef{}, fmt.Errorf(
 				"%s: %s: secret %q: %w: %q", filename, scope, name, ErrUnknownProp, k,

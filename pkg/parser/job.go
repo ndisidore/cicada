@@ -5,14 +5,14 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/sblinch/kdl-go/document"
+	kdl "github.com/calico32/kdl-go"
 
 	"github.com/ndisidore/cicada/pkg/conditional"
 	"github.com/ndisidore/cicada/pkg/pipeline/pipelinemodel"
 )
 
 // parseJob parses a job KDL node into a pipelinemodel.Job.
-func parseJob(node *document.Node, filename string) (pipelinemodel.Job, error) {
+func parseJob(node *kdl.Node, filename string) (pipelinemodel.Job, error) {
 	name, err := requireStringArg(node, filename, string(NodeTypeJob))
 	if err != nil {
 		return pipelinemodel.Job{}, fmt.Errorf(
@@ -22,7 +22,7 @@ func parseJob(node *document.Node, filename string) (pipelinemodel.Job, error) {
 
 	j := pipelinemodel.Job{Name: name}
 	seen := make(map[NodeType]bool)
-	for _, child := range node.Children {
+	for _, child := range childrenOf(node) {
 		if err := applyJobField(&j, child, filename, seen); err != nil {
 			return pipelinemodel.Job{}, err
 		}
@@ -36,8 +36,8 @@ func parseJob(node *document.Node, filename string) (pipelinemodel.Job, error) {
 // the type's zero value.
 //
 //revive:disable-next-line:cognitive-complexity,cyclomatic,function-length applyJobField is a flat switch dispatch; splitting it hurts readability.
-func applyJobField(j *pipelinemodel.Job, node *document.Node, filename string, seen map[NodeType]bool) error {
-	nt := NodeType(node.Name.ValueString())
+func applyJobField(j *pipelinemodel.Job, node *kdl.Node, filename string, seen map[NodeType]bool) error {
+	nt := NodeType(node.Name())
 	scope := fmt.Sprintf("job %q", j.Name)
 	switch nt {
 	case NodeTypeImage:
@@ -111,7 +111,7 @@ func applyJobField(j *pipelinemodel.Job, node *document.Node, filename string, s
 			return err
 		}
 	case NodeTypeNoCache:
-		if len(node.Arguments) > 0 {
+		if len(node.Arguments()) > 0 {
 			return fmt.Errorf("%s: %s: no-cache takes no arguments: %w", filename, scope, ErrExtraArgs)
 		}
 		if j.NoCache {
@@ -184,7 +184,7 @@ func applyJobField(j *pipelinemodel.Job, node *document.Node, filename string, s
 }
 
 // parseJobStep parses a step KDL node within a job into a pipelinemodel.Step.
-func parseJobStep(node *document.Node, filename, jobName string) (pipelinemodel.Step, error) {
+func parseJobStep(node *kdl.Node, filename, jobName string) (pipelinemodel.Step, error) {
 	name, err := requireStringArg(node, filename, string(NodeTypeStep))
 	if err != nil {
 		return pipelinemodel.Step{}, fmt.Errorf(
@@ -194,7 +194,7 @@ func parseJobStep(node *document.Node, filename, jobName string) (pipelinemodel.
 
 	s := pipelinemodel.Step{Name: name}
 	seen := make(map[NodeType]bool)
-	for _, child := range node.Children {
+	for _, child := range childrenOf(node) {
 		if err := applyJobStepField(&s, child, filename, jobName, seen); err != nil {
 			return pipelinemodel.Step{}, err
 		}
@@ -208,8 +208,8 @@ func parseJobStep(node *document.Node, filename, jobName string) (pipelinemodel.
 // the type's zero value.
 //
 //revive:disable-next-line:cognitive-complexity,cyclomatic,function-length applyJobStepField is a flat switch dispatch over node types; splitting it hurts readability.
-func applyJobStepField(s *pipelinemodel.Step, node *document.Node, filename, jobName string, seen map[NodeType]bool) error {
-	nt := NodeType(node.Name.ValueString())
+func applyJobStepField(s *pipelinemodel.Step, node *kdl.Node, filename, jobName string, seen map[NodeType]bool) error {
+	nt := NodeType(node.Name())
 	scope := fmt.Sprintf("job %q step %q", jobName, s.Name)
 	switch nt {
 	case NodeTypeRun:
@@ -301,7 +301,7 @@ func applyJobStepField(s *pipelinemodel.Step, node *document.Node, filename, job
 		}
 		s.Secrets = append(s.Secrets, ref)
 	case NodeTypeNoCache:
-		if len(node.Arguments) > 0 {
+		if len(node.Arguments()) > 0 {
 			return fmt.Errorf("%s: %s: no-cache takes no arguments: %w", filename, scope, ErrExtraArgs)
 		}
 		if s.NoCache {
@@ -309,7 +309,7 @@ func applyJobStepField(s *pipelinemodel.Step, node *document.Node, filename, job
 		}
 		s.NoCache = true
 	case NodeTypeAllowFailure:
-		if len(node.Arguments) > 0 {
+		if len(node.Arguments()) > 0 {
 			return fmt.Errorf("%s: %s: allow-failure takes no arguments: %w", filename, scope, ErrExtraArgs)
 		}
 		if s.AllowFailure {
@@ -335,7 +335,7 @@ func applyJobStepField(s *pipelinemodel.Step, node *document.Node, filename, job
 // run commands go to the inner Step.
 //
 //revive:disable-next-line:cognitive-complexity,cyclomatic parseBareStep is a flat switch dispatch over node types; splitting it hurts readability.
-func parseBareStep(node *document.Node, filename string) (pipelinemodel.Job, error) {
+func parseBareStep(node *kdl.Node, filename string) (pipelinemodel.Job, error) {
 	name, err := requireStringArg(node, filename, string(NodeTypeStep))
 	if err != nil {
 		return pipelinemodel.Job{}, fmt.Errorf(
@@ -347,8 +347,8 @@ func parseBareStep(node *document.Node, filename string) (pipelinemodel.Job, err
 	s := pipelinemodel.Step{Name: name}
 	seen := make(map[NodeType]bool)
 
-	for _, child := range node.Children {
-		nt := NodeType(child.Name.ValueString())
+	for _, child := range childrenOf(node) {
+		nt := NodeType(child.Name())
 		switch nt {
 		case NodeTypeRun:
 			// run goes to the inner step.
@@ -358,7 +358,7 @@ func parseBareStep(node *document.Node, filename string) (pipelinemodel.Job, err
 			}
 			s.Run = append(s.Run, v)
 		case NodeTypeAllowFailure:
-			if len(child.Arguments) > 0 {
+			if len(child.Arguments()) > 0 {
 				return pipelinemodel.Job{}, fmt.Errorf(
 					"%s: step %q: allow-failure takes no arguments: %w", filename, name, ErrExtraArgs)
 			}
