@@ -149,6 +149,19 @@ func main() {
 				Action:    a.validateAction,
 			},
 			{
+				Name:      "visualize",
+				Usage:     "render a pipeline as a flow diagram",
+				ArgsUsage: "<file>",
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:    "output",
+						Aliases: []string{"o"},
+						Usage:   "write diagram to file (.d2 or .dot); default: terminal (Unicode box-drawing)",
+					},
+				},
+				Action: a.visualizeAction,
+			},
+			{
 				Name:               "run",
 				Usage:              "run a KDL pipeline against BuildKit",
 				ArgsUsage:          "<file>",
