@@ -5,11 +5,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/moby/buildkit/client"
 	"github.com/opencontainers/go-digest"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/ndisidore/cicada/internal/progress/progressmodel"
 )
@@ -298,7 +298,7 @@ func (m *multiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		m.frame = (m.frame + 1) % (len(_spinnerFrames) * len(_boringSpinnerFrames))
 		return m, tea.Tick(_spinnerInterval, func(time.Time) tea.Msg { return tickMsg{} })
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
@@ -353,7 +353,7 @@ func statusStyle(s stepStatus) lipgloss.Style {
 }
 
 // View implements tea.Model.
-func (m *multiModel) View() string {
+func (m *multiModel) View() tea.View {
 	var b strings.Builder
 
 	icons := _richIcons
@@ -380,7 +380,7 @@ func (m *multiModel) View() string {
 		}
 	}
 
-	return b.String()
+	return tea.NewView(b.String())
 }
 
 // renderCtx groups per-render parameters to keep renderTo under CS-05.

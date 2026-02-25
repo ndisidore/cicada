@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"sync"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/ndisidore/cicada/internal/progress/progressmodel"
 )

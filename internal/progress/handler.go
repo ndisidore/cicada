@@ -8,7 +8,7 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // ErrUnknownFormat is returned when an unrecognized log format is requested.
@@ -78,7 +78,7 @@ func (h *PrettyHandler) Handle(_ context.Context, r slog.Record) error {
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	_, err := io.WriteString(h.out, line+"\n")
+	_, err := lipgloss.Fprintln(h.out, line)
 	return err
 }
 

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/moby/buildkit/client"
 	"github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/assert"
@@ -690,7 +690,7 @@ func TestMultiModelView(t *testing.T) {
 
 			view := m.View()
 			for _, want := range tt.contains {
-				assert.Contains(t, view, want)
+				assert.Contains(t, view.Content, want)
 			}
 		})
 	}
