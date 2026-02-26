@@ -34,7 +34,7 @@ import (
 func (a *app) validateAction(_ context.Context, cmd *cli.Command) error {
 	path := cmd.Args().First()
 	if path == "" {
-		return errors.New("usage: cicada validate <file>")
+		return errors.New("usage: cicada validate <file | ->")
 	}
 
 	p, err := a.parse(path)
@@ -54,7 +54,7 @@ func (a *app) validateAction(_ context.Context, cmd *cli.Command) error {
 func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 	path := cmd.Args().First()
 	if path == "" {
-		return errors.New("usage: cicada run <file>")
+		return errors.New("usage: cicada run <file | ->")
 	}
 
 	parallelism := cmd.Int("parallelism")
@@ -308,7 +308,7 @@ func (a *app) resolveAddr(ctx context.Context, cmd *cli.Command) (string, error)
 func (a *app) pullAction(ctx context.Context, cmd *cli.Command) (shutdownErr error) {
 	path := cmd.Args().First()
 	if path == "" {
-		return errors.New("usage: cicada pull <file>")
+		return errors.New("usage: cicada pull <file | ->")
 	}
 
 	p, err := a.parse(path)

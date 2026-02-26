@@ -17,7 +17,7 @@ import (
 func (a *app) visualizeAction(_ context.Context, cmd *cli.Command) error {
 	path := cmd.Args().First()
 	if path == "" {
-		return errors.New("usage: cicada visualize <file>")
+		return errors.New("usage: cicada visualize <file | ->")
 	}
 
 	p, err := a.parse(path)
