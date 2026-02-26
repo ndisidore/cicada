@@ -2,10 +2,17 @@
 package parser
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+)
+
+// Sentinel errors for StdinResolver misconfiguration.
+var (
+	ErrNilStdin = errors.New("stdin resolver: Stdin is nil")
+	ErrNilInner = errors.New("stdin resolver: Inner resolver is nil")
 )
 
 // Resolver opens include sources for reading. Implementations return the
@@ -13,6 +20,27 @@ import (
 // relative include resolution), and any error.
 type Resolver interface {
 	Resolve(source string, basePath string) (io.ReadCloser, string, error)
+}
+
+// StdinResolver intercepts the "-" source to read from standard input,
+// delegating all other sources to the wrapped Inner resolver.
+type StdinResolver struct {
+	Stdin io.Reader
+	Inner Resolver
+}
+
+// Resolve returns stdin when source is "-", otherwise delegates to Inner.
+func (s *StdinResolver) Resolve(source string, basePath string) (io.ReadCloser, string, error) {
+	if source == "-" {
+		if s.Stdin == nil {
+			return nil, "", fmt.Errorf("resolve source %q: %w", source, ErrNilStdin)
+		}
+		return io.NopCloser(s.Stdin), _stdinFilename, nil
+	}
+	if s.Inner == nil {
+		return nil, "", fmt.Errorf("resolve source %q: %w", source, ErrNilInner)
+	}
+	return s.Inner.Resolve(source, basePath)
 }
 
 // FileResolver resolves includes from the local filesystem.

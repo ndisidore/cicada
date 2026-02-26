@@ -25,9 +25,9 @@ func childrenOf(node *kdl.Node) []*kdl.Node {
 }
 
 // dirOf returns the directory portion of a file path, suitable for resolving
-// relative includes. For synthetic filenames, returns ".".
+// relative includes. For synthetic and stdin filenames, returns ".".
 func dirOf(filename string) string {
-	if filename == _syntheticFilename {
+	if filename == _syntheticFilename || filename == _stdinFilename {
 		return "."
 	}
 	return filepath.Dir(filename)
@@ -35,10 +35,14 @@ func dirOf(filename string) string {
 
 // nameFromFilename derives a pipeline name from its filename (e.g. "ci.kdl" -> "ci").
 func nameFromFilename(filename string) string {
-	if filename == _syntheticFilename {
+	switch filename {
+	case _syntheticFilename:
 		return ""
+	case _stdinFilename:
+		return "stdin"
+	default:
+		return strings.TrimSuffix(filepath.Base(filename), ".kdl")
 	}
-	return strings.TrimSuffix(filepath.Base(filename), ".kdl")
 }
 
 // coerceValue extracts a typed Go value from a kdl.Value, returning ErrTypeMismatch

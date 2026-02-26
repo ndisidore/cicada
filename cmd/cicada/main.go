@@ -66,7 +66,10 @@ type app struct {
 }
 
 func main() {
-	p := &parser.Parser{Resolver: &parser.FileResolver{}}
+	p := &parser.Parser{Resolver: &parser.StdinResolver{
+		Stdin: os.Stdin,
+		Inner: &parser.FileResolver{},
+	}}
 	a := &app{
 		connect: defaultConnect,
 		parse:   p.ParseFile,
@@ -145,13 +148,13 @@ func main() {
 			{
 				Name:      "validate",
 				Usage:     "validate a KDL pipeline file",
-				ArgsUsage: "<file>",
+				ArgsUsage: "<file | ->",
 				Action:    a.validateAction,
 			},
 			{
 				Name:      "visualize",
 				Usage:     "render a pipeline as a flow diagram",
-				ArgsUsage: "<file>",
+				ArgsUsage: "<file | ->",
 				Flags: []cli.Flag{
 					&cli.StringFlag{
 						Name:    "output",
@@ -164,7 +167,7 @@ func main() {
 			{
 				Name:               "run",
 				Usage:              "run a KDL pipeline against BuildKit",
-				ArgsUsage:          "<file>",
+				ArgsUsage:          "<file | ->",
 				Before:             initEngine,
 				SliceFlagSeparator: ";",
 				Flags: append(buildkitFlags(),
@@ -237,7 +240,7 @@ func main() {
 			{
 				Name:      "pull",
 				Usage:     "pre-pull pipeline images into the BuildKit cache",
-				ArgsUsage: "<file>",
+				ArgsUsage: "<file | ->",
 				Before:    initEngine,
 				Flags: append(buildkitFlags(),
 					&cli.BoolFlag{

@@ -53,6 +53,9 @@ func (p *Parser) ParseFile(path string) (pipelinemodel.Pipeline, error) {
 // _syntheticFilename identifies in-memory content for dirOf fallback.
 const _syntheticFilename = "<string>"
 
+// _stdinFilename identifies content read from standard input.
+const _stdinFilename = "<stdin>"
+
 // ParseString parses KDL content from a string into a Pipeline.
 // Includes are resolved relative to the current working directory.
 func (p *Parser) ParseString(content string) (pipelinemodel.Pipeline, error) {
