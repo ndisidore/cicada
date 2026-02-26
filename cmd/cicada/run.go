@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	bkclient "github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb/imagemetaresolver"
@@ -14,6 +16,9 @@ import (
 	"github.com/moby/buildkit/session/secrets/secretsprovider"
 	"github.com/tonistiigi/fsutil"
 	"github.com/urfave/cli/v3"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/ndisidore/cicada/internal/builder"
 	"github.com/ndisidore/cicada/internal/cache"
@@ -24,6 +29,7 @@ import (
 	"github.com/ndisidore/cicada/internal/runner/runnermodel"
 	"github.com/ndisidore/cicada/internal/secret"
 	"github.com/ndisidore/cicada/internal/synccontext"
+	"github.com/ndisidore/cicada/internal/tracing"
 	"github.com/ndisidore/cicada/pkg/conditional"
 	"github.com/ndisidore/cicada/pkg/gitinfo"
 	"github.com/ndisidore/cicada/pkg/pipeline"
@@ -50,8 +56,8 @@ func (a *app) validateAction(_ context.Context, cmd *cli.Command) error {
 	return nil
 }
 
-//revive:disable-next-line:function-length runAction is a linear pipeline of parse-filter-build-convert-execute; splitting it would obscure the sequential flow.
-func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
+//revive:disable-next-line:function-length,cyclomatic,cognitive-complexity linear parse→filter→eval→compile→execute pipeline; splitting obscures flow.
+func (a *app) runAction(ctx context.Context, cmd *cli.Command) (runErr error) {
 	path := cmd.Args().First()
 	if path == "" {
 		return errors.New("usage: cicada run <file | ->")
@@ -62,7 +68,46 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("invalid value %d for flag --parallelism: must be >= 0", parallelism)
 	}
 
+	tracer, tracingShutdown, err := tracing.Setup(ctx, tracing.Config{
+		Endpoint: cmd.String("trace-endpoint"),
+		File:     cmd.String("trace-file"),
+		Stdout:   cmd.Bool("trace"),
+	})
+	if err != nil {
+		return fmt.Errorf("setting up tracing: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tracingShutdown(shutdownCtx); err != nil { //nolint:contextcheck // ctx may be cancelled at shutdown time; fresh deadline required
+			slogctx.FromContext(ctx).LogAttrs(ctx, slog.LevelWarn, "flushing traces",
+				slog.String("error", err.Error()))
+		}
+	}()
+
+	// Root span covers the full run including pre-execution phases.
+	// pipeline.run (and its job/vertex children) become children of this span.
+	pipelineFile := filepath.Base(path)
+	ctx, rootSpan := tracer.Start(ctx, "cicada.run",
+		trace.WithAttributes(attribute.String("pipeline.file", pipelineFile)),
+	)
+	defer func() {
+		if runErr != nil {
+			rootSpan.RecordError(runErr)
+			rootSpan.SetStatus(codes.Error, runErr.Error())
+		}
+		rootSpan.End()
+	}()
+
+	_, parseSpan := tracer.Start(ctx, "pipeline.parse",
+		trace.WithAttributes(attribute.String("pipeline.file", pipelineFile)),
+	)
 	p, err := a.parse(path)
+	if err != nil {
+		parseSpan.RecordError(err)
+		parseSpan.SetStatus(codes.Error, err.Error())
+	}
+	parseSpan.End()
 	if err != nil {
 		return fmt.Errorf("parsing %s: %w", path, err)
 	}
@@ -82,7 +127,15 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 		Branch: gitinfo.DetectBranch(ctx, os.Getenv),
 		Tag:    gitinfo.DetectTag(ctx, os.Getenv),
 	}
-	condResult, err := pipeline.EvaluateConditions(ctx, p, wctx)
+	evalCtx, evalSpan := tracer.Start(ctx, "pipeline.eval-conditions",
+		trace.WithAttributes(attribute.String("pipeline.name", p.Name)),
+	)
+	condResult, err := pipeline.EvaluateConditions(evalCtx, p, wctx)
+	if err != nil {
+		evalSpan.RecordError(err)
+		evalSpan.SetStatus(codes.Error, err.Error())
+	}
+	evalSpan.End()
 	if err != nil {
 		return fmt.Errorf("evaluating when conditions: %w", err)
 	}
@@ -100,13 +153,24 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 
 	noCacheFilter := buildNoCacheFilter(ctx, cmd.StringSlice("no-cache-filter"), p)
 
-	result, err := builder.Build(ctx, p, builder.BuildOpts{
+	compileCtx, compileSpan := tracer.Start(ctx, "pipeline.compile",
+		trace.WithAttributes(
+			attribute.String("pipeline.name", p.Name),
+			attribute.Int("job.count", len(p.Jobs)),
+		),
+	)
+	result, err := builder.Build(compileCtx, p, builder.BuildOpts{
 		NoCache:         cmd.Bool("no-cache"),
 		NoCacheFilter:   noCacheFilter,
 		ExcludePatterns: excludes,
 		MetaResolver:    imagemetaresolver.Default(),
 		ExposeDeps:      cmd.Bool("expose-deps"),
 	})
+	if err != nil {
+		compileSpan.RecordError(err)
+		compileSpan.SetStatus(codes.Error, err.Error())
+	}
+	compileSpan.End()
 	if err != nil {
 		return fmt.Errorf("building %s: %w", path, err)
 	}
@@ -169,6 +233,7 @@ func (a *app) runAction(ctx context.Context, cmd *cli.Command) error {
 		failFast:       cmd.Bool("fail-fast"),
 		session:        sessionAttachables,
 		secretValues:   secretValues,
+		tracer:         tracer,
 	})
 }
 
@@ -188,6 +253,7 @@ type pipelineRunParams struct {
 	failFast       bool
 	session        []session.Attachable
 	secretValues   map[string]string
+	tracer         trace.Tracer
 }
 
 // resolveSecrets resolves pipeline secret declarations to host values and
@@ -265,9 +331,10 @@ func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipe
 	}
 
 	runErr := runner.Run(ctx, runnermodel.RunInput{
-		Solver:  solver,
-		Runtime: a.rt,
-		Jobs:    params.jobs,
+		PipelineName: params.pipe.Name,
+		Solver:       solver,
+		Runtime:      a.rt,
+		Jobs:         params.jobs,
 		LocalMounts: map[string]fsutil.FS{
 			"context": contextFS,
 		},
@@ -282,6 +349,7 @@ func (a *app) executePipeline(ctx context.Context, cmd *cli.Command, params pipe
 		WhenContext:    params.whenCtx,
 		Session:        params.session,
 		SecretValues:   params.secretValues,
+		Tracer:         params.tracer,
 	})
 
 	if params.cacheCollector != nil {

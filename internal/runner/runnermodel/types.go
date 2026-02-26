@@ -12,6 +12,7 @@ import (
 	gateway "github.com/moby/buildkit/frontend/gateway/client"
 	"github.com/moby/buildkit/session"
 	"github.com/tonistiigi/fsutil"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/ndisidore/cicada/internal/cache"
 	"github.com/ndisidore/cicada/internal/progress/progressmodel"
@@ -42,6 +43,23 @@ type Solver interface {
 type DeferredEvaluator interface {
 	EvaluateDeferred(ctx conditional.Context, depOutputs map[string]map[string]string) (bool, error)
 }
+
+// StatusObserver receives BuildKit SolveStatus updates for a single job.
+// Observe is called for each status update; Flush is called on solve
+// completion (normal or cancelled) so implementations can close open spans.
+type StatusObserver interface {
+	Observe(status *client.SolveStatus)
+	Flush()
+}
+
+// noopObserver is a zero-cost StatusObserver used when tracing is disabled.
+type noopObserver struct{}
+
+func (noopObserver) Observe(*client.SolveStatus) {}
+func (noopObserver) Flush()                      {}
+
+// NoopObserver returns a StatusObserver that discards all events.
+func NoopObserver() StatusObserver { return noopObserver{} }
 
 // Job pairs an LLB definition with its human-readable job name and dependencies.
 type Job struct {
@@ -95,6 +113,8 @@ type ImagePublish struct {
 
 // RunInput holds parameters for executing a pipeline against BuildKit.
 type RunInput struct {
+	// PipelineName is used as an attribute on the root trace span.
+	PipelineName string
 	// Solver is the BuildKit API client used to solve LLB definitions.
 	Solver Solver
 	// Runtime is the container runtime used for image loading (export-docker).
@@ -127,4 +147,6 @@ type RunInput struct {
 	Session []session.Attachable
 	// SecretValues maps secret names to plaintext values for log redaction.
 	SecretValues map[string]string
+	// Tracer instruments pipeline.run and job spans. Nil or noop tracer disables tracing.
+	Tracer trace.Tracer
 }

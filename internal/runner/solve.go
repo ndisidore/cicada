@@ -19,6 +19,7 @@ import (
 
 	"github.com/ndisidore/cicada/internal/progress/progressmodel"
 	rm "github.com/ndisidore/cicada/internal/runner/runnermodel"
+	"github.com/ndisidore/cicada/internal/tracing"
 	"github.com/ndisidore/cicada/pkg/slogctx"
 )
 
@@ -37,7 +38,14 @@ func solveJob(ctx context.Context, in solveJobInput) error {
 	}
 
 	ch := make(chan *client.SolveStatus)
-	displayCh := teeStatus(ctx, ch, in.cfg.collector, in.cfg.secretValues, in.name)
+	var obs rm.StatusObserver
+	if in.cfg.tracer != nil {
+		obs = tracing.NewObserver(ctx, in.cfg.tracer)
+	}
+	displayCh := teeStatus(ctx, teeStatusInput{
+		src: ch, collector: in.cfg.collector,
+		observer: obs, secrets: in.cfg.secretValues, jobName: in.name,
+	})
 
 	in.cfg.sender.Send(progressmodel.JobAddedMsg{Job: in.name, StepTimeouts: in.stepTimeouts, CmdInfos: in.cmdInfos})
 	var wg sync.WaitGroup
@@ -80,7 +88,14 @@ func solveJobSteps(ctx context.Context, node *dagNode, cfg runConfig) error {
 	}
 
 	ch := make(chan *client.SolveStatus)
-	displayCh := teeStatus(ctx, ch, cfg.collector, cfg.secretValues, node.job.Name)
+	var obs rm.StatusObserver
+	if cfg.tracer != nil {
+		obs = tracing.NewObserver(ctx, cfg.tracer)
+	}
+	displayCh := teeStatus(ctx, teeStatusInput{
+		src: ch, collector: cfg.collector,
+		observer: obs, secrets: cfg.secretValues, jobName: node.job.Name,
+	})
 
 	cfg.sender.Send(progressmodel.JobAddedMsg{Job: node.job.Name, StepTimeouts: merged, CmdInfos: mergedCmds})
 	var wg sync.WaitGroup

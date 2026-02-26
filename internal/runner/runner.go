@@ -11,6 +11,9 @@ import (
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/session"
 	"github.com/tonistiigi/fsutil"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 
@@ -37,6 +40,7 @@ type runConfig struct {
 	whenCtx      *conditional.Context
 	session      []session.Attachable
 	secretValues map[string]string
+	tracer       trace.Tracer
 }
 
 // dagNode tracks a job and a done channel that is closed on completion.
@@ -75,6 +79,16 @@ func Run(ctx context.Context, in rm.RunInput) error {
 		return err
 	}
 
+	tracer := in.Tracer
+	if tracer == nil {
+		tracer = tracenoop.NewTracerProvider().Tracer("cicada")
+	}
+	runCtx, runSpan := tracer.Start(ctx, "pipeline.run",
+		trace.WithAttributes(attribute.String("pipeline.name", in.PipelineName)),
+	)
+	defer runSpan.End()
+	ctx = runCtx
+
 	limit := int64(len(in.Jobs))
 	if in.Parallelism > 0 {
 		limit = int64(in.Parallelism)
@@ -94,6 +108,7 @@ func Run(ctx context.Context, in rm.RunInput) error {
 		whenCtx:      in.WhenContext,
 		session:      in.Session,
 		secretValues: in.SecretValues,
+		tracer:       tracer,
 	}
 
 	var jobErr error
