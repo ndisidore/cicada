@@ -9,6 +9,10 @@ import (
 	"time"
 
 	gatewaypb "github.com/moby/buildkit/frontend/gateway/pb"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/ndisidore/cicada/internal/progress/progressmodel"
 	rm "github.com/ndisidore/cicada/internal/runner/runnermodel"
@@ -72,11 +76,20 @@ func runNode(ctx context.Context, node *dagNode, cfg runConfig) error {
 	}
 	defer cfg.sem.Release(1)
 
+	tracer := cfg.tracer
+	if tracer == nil {
+		tracer = tracenoop.NewTracerProvider().Tracer("cicada")
+	}
+	jobCtx, jobSpan := tracer.Start(ctx, "job/"+node.job.Name,
+		trace.WithAttributes(attribute.String("job.name", node.job.Name)),
+	)
+	defer jobSpan.End()
+
 	// Apply job-level timeout.
-	solveCtx := ctx
+	solveCtx := jobCtx
 	if node.job.Timeout > 0 {
 		var cancel context.CancelFunc
-		solveCtx, cancel = context.WithTimeoutCause(ctx, node.job.Timeout,
+		solveCtx, cancel = context.WithTimeoutCause(jobCtx, node.job.Timeout,
 			&rm.JobTimeoutError{JobName: node.job.Name, Timeout: node.job.Timeout})
 		defer cancel()
 	}
@@ -89,6 +102,8 @@ func runNode(ctx context.Context, node *dagNode, cfg runConfig) error {
 				fmt.Sprintf("job %q timed out after %s", node.job.Name, node.job.Timeout),
 				cause,
 			)
+			jobSpan.RecordError(node.err)
+			jobSpan.SetStatus(codes.Error, node.err.Error())
 			return node.err
 		}
 		if len(node.job.StepTimeouts) > 0 {
@@ -100,9 +115,13 @@ func runNode(ctx context.Context, node *dagNode, cfg runConfig) error {
 				fmt.Sprintf("job %q: exit code: %d", node.job.Name, exitErr.ExitCode),
 				err,
 			)
+			jobSpan.RecordError(node.err)
+			jobSpan.SetStatus(codes.Error, node.err.Error())
 			return node.err
 		}
 		node.err = fmt.Errorf("job %q: %w", node.job.Name, err)
+		jobSpan.RecordError(node.err)
+		jobSpan.SetStatus(codes.Error, node.err.Error())
 		return node.err
 	}
 

@@ -1246,7 +1246,7 @@ func TestTeeStatus(t *testing.T) {
 		t.Parallel()
 
 		ch := make(chan *client.SolveStatus, 1)
-		result := teeStatus(t.Context(), ch, nil, nil, "step")
+		result := teeStatus(t.Context(), teeStatusInput{src: ch, jobName: "step"})
 		// With nil collector, teeStatus returns the source channel directly.
 		assert.Equal(t, (<-chan *client.SolveStatus)(ch), result)
 	})
@@ -1272,7 +1272,7 @@ func TestTeeStatus(t *testing.T) {
 		}
 		close(src)
 
-		out := teeStatus(t.Context(), src, collector, nil, "build")
+		out := teeStatus(t.Context(), teeStatusInput{src: src, collector: collector, jobName: "build"})
 
 		var received int
 		for range out {
@@ -1293,7 +1293,7 @@ func TestTeeStatus(t *testing.T) {
 			src := make(chan *client.SolveStatus)
 
 			ctx, cancel := context.WithCancel(t.Context())
-			out := teeStatus(ctx, src, collector, nil, "step")
+			out := teeStatus(ctx, teeStatusInput{src: src, collector: collector, jobName: "step"})
 
 			// Cancel; the tee goroutine exits the select loop and drains src.
 			cancel()

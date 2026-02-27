@@ -35,7 +35,10 @@ func solveExport(ctx context.Context, exp rm.Export, cfg runConfig) error {
 
 	ch := make(chan *client.SolveStatus)
 	displayName := "export:" + exp.JobName
-	displayCh := teeStatus(ctx, ch, cfg.collector, cfg.secretValues, displayName)
+	displayCh := teeStatus(ctx, teeStatusInput{
+		src: ch, collector: cfg.collector,
+		secrets: cfg.secretValues, jobName: displayName,
+	})
 
 	cfg.sender.Send(progressmodel.JobAddedMsg{Job: displayName})
 	var wg sync.WaitGroup
@@ -244,7 +247,10 @@ func solveMultiPlatformPublish(ctx context.Context, grp publishGroup, cfg runCon
 
 	ch := make(chan *client.SolveStatus)
 	displayName := "publish:" + grp.Image
-	displayCh := teeStatus(ctx, ch, cfg.collector, cfg.secretValues, displayName)
+	displayCh := teeStatus(ctx, teeStatusInput{
+		src: ch, collector: cfg.collector,
+		secrets: cfg.secretValues, jobName: displayName,
+	})
 
 	cfg.sender.Send(progressmodel.JobAddedMsg{Job: displayName})
 	var wg sync.WaitGroup
@@ -284,7 +290,10 @@ func solveImagePublish(ctx context.Context, pub rm.ImagePublish, cfg runConfig) 
 
 	ch := make(chan *client.SolveStatus)
 	displayName := "publish:" + pub.JobName
-	displayCh := teeStatus(ctx, ch, cfg.collector, cfg.secretValues, displayName)
+	displayCh := teeStatus(ctx, teeStatusInput{
+		src: ch, collector: cfg.collector,
+		secrets: cfg.secretValues, jobName: displayName,
+	})
 
 	cfg.sender.Send(progressmodel.JobAddedMsg{Job: displayName})
 	var wg sync.WaitGroup
@@ -319,7 +328,10 @@ func solveImageExportDocker(ctx context.Context, pub rm.ImagePublish, cfg runCon
 
 	ch := make(chan *client.SolveStatus)
 	displayName := "export-docker:" + pub.JobName
-	displayCh := teeStatus(ctx, ch, cfg.collector, cfg.secretValues, displayName)
+	displayCh := teeStatus(ctx, teeStatusInput{
+		src: ch, collector: cfg.collector,
+		secrets: cfg.secretValues, jobName: displayName,
+	})
 
 	cfg.sender.Send(progressmodel.JobAddedMsg{Job: displayName})
 	var bridgeWg sync.WaitGroup

@@ -234,6 +234,19 @@ func main() {
 						Name:  "no-sync-cache",
 						Usage: "disable content-hash file sync cache",
 					},
+					&cli.StringFlag{
+						Name:    "trace-endpoint",
+						Usage:   "OTLP gRPC endpoint for tracing (e.g. localhost:4317)",
+						Sources: cli.EnvVars("OTEL_EXPORTER_OTLP_ENDPOINT"),
+					},
+					&cli.StringFlag{
+						Name:  "trace-file",
+						Usage: "write OTEL span JSON to file",
+					},
+					&cli.BoolFlag{
+						Name:  "trace",
+						Usage: "write OTEL span JSON to stderr (debug mode)",
+					},
 				),
 				Action: a.runAction,
 			},
