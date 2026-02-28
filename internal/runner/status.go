@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"sync"
 
 	"github.com/moby/buildkit/client"
 
@@ -49,6 +50,38 @@ type teeStatusInput struct {
 	observer  rm.StatusObserver
 	secrets   map[string]string
 	jobName   string
+}
+
+// statusSession wires a raw BuildKit status channel through the tee interposer
+// and a bridge goroutine. Call Wait after the solver returns.
+type statusSession struct {
+	Ch chan *client.SolveStatus
+	wg sync.WaitGroup
+}
+
+// Wait blocks until the bridge goroutine finishes draining the display channel.
+func (s *statusSession) Wait() { s.wg.Wait() }
+
+// newStatusSession creates a statusSession, starts the bridge goroutine, and
+// sends msg to cfg.sender. obs may be nil.
+func newStatusSession(
+	ctx context.Context,
+	cfg runConfig,
+	displayName string,
+	msg progressmodel.JobAddedMsg,
+	obs rm.StatusObserver,
+) *statusSession {
+	s := &statusSession{Ch: make(chan *client.SolveStatus)}
+	displayCh := teeStatus(ctx, teeStatusInput{
+		src:       s.Ch,
+		collector: cfg.collector,
+		observer:  obs,
+		secrets:   cfg.secretValues,
+		jobName:   displayName,
+	})
+	cfg.sender.Send(msg)
+	s.wg.Go(bridgeStatus(ctx, cfg.sender, displayName, displayCh))
+	return s
 }
 
 // teeStatus interposes a Collector, StatusObserver, and secret redaction

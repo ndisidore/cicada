@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"sync"
@@ -100,9 +101,7 @@ func (c *HashCache) Load() error {
 func (c *HashCache) Save() error {
 	c.mu.RLock()
 	snapshot := make(map[string]cacheEntry, len(c.entries))
-	for k, v := range c.entries {
-		snapshot[k] = v
-	}
+	maps.Copy(snapshot, c.entries)
 	c.mu.RUnlock()
 
 	data, err := json.Marshal(cacheFile{

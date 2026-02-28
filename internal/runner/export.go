@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"sync"
 
 	"github.com/containerd/platforms"
 	"github.com/moby/buildkit/client"
@@ -33,16 +32,9 @@ func solveExport(ctx context.Context, exp rm.Export, cfg runConfig) error {
 		outputDir = exp.Local
 	}
 
-	ch := make(chan *client.SolveStatus)
 	displayName := "export:" + exp.JobName
-	displayCh := teeStatus(ctx, teeStatusInput{
-		src: ch, collector: cfg.collector,
-		secrets: cfg.secretValues, jobName: displayName,
-	})
-
-	cfg.sender.Send(progressmodel.JobAddedMsg{Job: displayName})
-	var wg sync.WaitGroup
-	wg.Go(bridgeStatus(ctx, cfg.sender, displayName, displayCh))
+	sess := newStatusSession(ctx, cfg, displayName, progressmodel.JobAddedMsg{Job: displayName}, nil)
+	defer sess.Wait()
 
 	_, err := cfg.solver.Solve(ctx, exp.Definition, client.SolveOpt{
 		Exports: []client.ExportEntry{{
@@ -52,9 +44,7 @@ func solveExport(ctx context.Context, exp rm.Export, cfg runConfig) error {
 		CacheExports: cfg.cacheExports,
 		CacheImports: cfg.cacheImports,
 		Session:      cfg.session,
-	}, ch)
-
-	wg.Wait()
+	}, sess.Ch)
 
 	if err != nil {
 		return fmt.Errorf("solving export: %w", err)
@@ -245,16 +235,9 @@ func solveMultiPlatformPublish(ctx context.Context, grp publishGroup, cfg runCon
 		attrs["registry.insecure"] = "true"
 	}
 
-	ch := make(chan *client.SolveStatus)
 	displayName := "publish:" + grp.Image
-	displayCh := teeStatus(ctx, teeStatusInput{
-		src: ch, collector: cfg.collector,
-		secrets: cfg.secretValues, jobName: displayName,
-	})
-
-	cfg.sender.Send(progressmodel.JobAddedMsg{Job: displayName})
-	var wg sync.WaitGroup
-	wg.Go(bridgeStatus(ctx, cfg.sender, displayName, displayCh))
+	sess := newStatusSession(ctx, cfg, displayName, progressmodel.JobAddedMsg{Job: displayName}, nil)
+	defer sess.Wait()
 
 	_, err := cfg.solver.Build(ctx, client.SolveOpt{
 		Exports: []client.ExportEntry{{
@@ -264,9 +247,7 @@ func solveMultiPlatformPublish(ctx context.Context, grp publishGroup, cfg runCon
 		CacheExports: cfg.cacheExports,
 		CacheImports: cfg.cacheImports,
 		Session:      cfg.session,
-	}, "", multiPlatformBuildFunc(grp.Variants), ch)
-
-	wg.Wait()
+	}, "", multiPlatformBuildFunc(grp.Variants), sess.Ch)
 
 	if err != nil {
 		return fmt.Errorf("solving multi-platform publish: %w", err)
@@ -288,16 +269,9 @@ func solveImagePublish(ctx context.Context, pub rm.ImagePublish, cfg runConfig) 
 		attrs["registry.insecure"] = "true"
 	}
 
-	ch := make(chan *client.SolveStatus)
 	displayName := "publish:" + pub.JobName
-	displayCh := teeStatus(ctx, teeStatusInput{
-		src: ch, collector: cfg.collector,
-		secrets: cfg.secretValues, jobName: displayName,
-	})
-
-	cfg.sender.Send(progressmodel.JobAddedMsg{Job: displayName})
-	var wg sync.WaitGroup
-	wg.Go(bridgeStatus(ctx, cfg.sender, displayName, displayCh))
+	sess := newStatusSession(ctx, cfg, displayName, progressmodel.JobAddedMsg{Job: displayName}, nil)
+	defer sess.Wait()
 
 	_, err := cfg.solver.Solve(ctx, pub.Definition, client.SolveOpt{
 		Exports: []client.ExportEntry{{
@@ -307,9 +281,7 @@ func solveImagePublish(ctx context.Context, pub rm.ImagePublish, cfg runConfig) 
 		CacheExports: cfg.cacheExports,
 		CacheImports: cfg.cacheImports,
 		Session:      cfg.session,
-	}, ch)
-
-	wg.Wait()
+	}, sess.Ch)
 
 	if err != nil {
 		return fmt.Errorf("solving publish: %w", err)
@@ -326,16 +298,9 @@ func solveImageExportDocker(ctx context.Context, pub rm.ImagePublish, cfg runCon
 
 	pr, pw := io.Pipe()
 
-	ch := make(chan *client.SolveStatus)
 	displayName := "export-docker:" + pub.JobName
-	displayCh := teeStatus(ctx, teeStatusInput{
-		src: ch, collector: cfg.collector,
-		secrets: cfg.secretValues, jobName: displayName,
-	})
-
-	cfg.sender.Send(progressmodel.JobAddedMsg{Job: displayName})
-	var bridgeWg sync.WaitGroup
-	bridgeWg.Go(bridgeStatus(ctx, cfg.sender, displayName, displayCh))
+	sess := newStatusSession(ctx, cfg, displayName, progressmodel.JobAddedMsg{Job: displayName}, nil)
+	defer sess.Wait()
 
 	eg, ectx := errgroup.WithContext(ctx)
 
@@ -360,14 +325,12 @@ func solveImageExportDocker(ctx context.Context, pub rm.ImagePublish, cfg runCon
 			CacheExports: cfg.cacheExports,
 			CacheImports: cfg.cacheImports,
 			Session:      cfg.session,
-		}, ch)
+		}, sess.Ch)
 		if err != nil {
 			return fmt.Errorf("solving export-docker: %w", err)
 		}
 		return nil
 	})
 
-	err := eg.Wait()
-	bridgeWg.Wait()
-	return err
+	return eg.Wait()
 }

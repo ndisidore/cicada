@@ -119,8 +119,7 @@ func resolveCmd(ctx context.Context, d pipelinemodel.SecretDecl) ([]byte, error)
 	cmd := exec.CommandContext(ctx, "sh", "-c", d.Cmd) //nolint:gosec // G204: Cmd comes from user's pipeline definition, not external input.
 	out, err := cmd.Output()
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok && len(exitErr.Stderr) > 0 {
 			return nil, fmt.Errorf("running %q: %w: %s", d.Cmd, err, bytes.TrimRight(exitErr.Stderr, "\n"))
 		}
 		return nil, fmt.Errorf("running %q: %w", d.Cmd, err)

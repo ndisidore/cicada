@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"maps"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/containerd/errdefs"
@@ -37,28 +36,17 @@ func solveJob(ctx context.Context, in solveJobInput) error {
 		return fmt.Errorf("job %q: %w", in.name, rm.ErrNilDefinition)
 	}
 
-	ch := make(chan *client.SolveStatus)
-	var obs rm.StatusObserver
-	if in.cfg.tracer != nil {
-		obs = tracing.NewObserver(ctx, in.cfg.tracer)
-	}
-	displayCh := teeStatus(ctx, teeStatusInput{
-		src: ch, collector: in.cfg.collector,
-		observer: obs, secrets: in.cfg.secretValues, jobName: in.name,
-	})
-
-	in.cfg.sender.Send(progressmodel.JobAddedMsg{Job: in.name, StepTimeouts: in.stepTimeouts, CmdInfos: in.cmdInfos})
-	var wg sync.WaitGroup
-	wg.Go(bridgeStatus(ctx, in.cfg.sender, in.name, displayCh))
+	sess := newStatusSession(ctx, in.cfg, in.name,
+		progressmodel.JobAddedMsg{Job: in.name, StepTimeouts: in.stepTimeouts, CmdInfos: in.cmdInfos},
+		tracing.NewObserver(ctx, in.cfg.tracer))
+	defer sess.Wait()
 
 	_, err := in.cfg.solver.Solve(ctx, in.def, client.SolveOpt{
 		LocalMounts:  in.cfg.localMounts,
 		CacheExports: in.cfg.cacheExports,
 		CacheImports: in.cfg.cacheImports,
 		Session:      in.cfg.session,
-	}, ch)
-
-	wg.Wait()
+	}, sess.Ch)
 
 	if err != nil {
 		return fmt.Errorf("solving job: %w", err)
@@ -87,19 +75,10 @@ func solveJobSteps(ctx context.Context, node *dagNode, cfg runConfig) error {
 		}
 	}
 
-	ch := make(chan *client.SolveStatus)
-	var obs rm.StatusObserver
-	if cfg.tracer != nil {
-		obs = tracing.NewObserver(ctx, cfg.tracer)
-	}
-	displayCh := teeStatus(ctx, teeStatusInput{
-		src: ch, collector: cfg.collector,
-		observer: obs, secrets: cfg.secretValues, jobName: node.job.Name,
-	})
-
-	cfg.sender.Send(progressmodel.JobAddedMsg{Job: node.job.Name, StepTimeouts: merged, CmdInfos: mergedCmds})
-	var wg sync.WaitGroup
-	wg.Go(bridgeStatus(ctx, cfg.sender, node.job.Name, displayCh))
+	sess := newStatusSession(ctx, cfg, node.job.Name,
+		progressmodel.JobAddedMsg{Job: node.job.Name, StepTimeouts: merged, CmdInfos: mergedCmds},
+		tracing.NewObserver(ctx, cfg.tracer))
+	defer sess.Wait()
 
 	stepOutputs := make(map[string]string)
 	_, err := cfg.solver.Build(ctx, client.SolveOpt{
@@ -107,9 +86,7 @@ func solveJobSteps(ctx context.Context, node *dagNode, cfg runConfig) error {
 		CacheExports: cfg.cacheExports,
 		CacheImports: cfg.cacheImports,
 		Session:      cfg.session,
-	}, "", stepControlBuildFunc(node, cfg, &stepOutputs), ch)
-
-	wg.Wait()
+	}, "", stepControlBuildFunc(node, cfg, &stepOutputs), sess.Ch)
 
 	if err != nil {
 		return fmt.Errorf("solving job steps: %w", err)
@@ -262,15 +239,15 @@ func solveStep(ctx context.Context, in solveStepInput) (llb.State, gateway.Refer
 }
 
 // cleanTimeoutError detects step-level timeouts by extracting the
-// *gatewaypb.ExitError from the error chain (via errors.As) and checking
+// *gatewaypb.ExitError from the error chain (via errors.AsType) and checking
 // for exit codes 124 (GNU coreutils timeout convention) and 137 (BusyBox
 // timeout -s KILL / 128+9). Note that 137 is ambiguous because OOM kills
 // also produce 128+9, but we treat it as a timeout here since the caller
 // gates this behind step-level timeout configuration.
 // Returns a *StepTimeoutError with the original ExitError chained.
 func cleanTimeoutError(err error, jobName string, stepTimeouts map[string]time.Duration) error {
-	var exitErr *gatewaypb.ExitError
-	if !errors.As(err, &exitErr) {
+	exitErr, ok := errors.AsType[*gatewaypb.ExitError](err)
+	if !ok {
 		return err
 	}
 	// 124: GNU coreutils timeout; 137: BusyBox timeout -s KILL (128+9).

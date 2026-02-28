@@ -12,7 +12,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
-	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/ndisidore/cicada/internal/progress/progressmodel"
 	rm "github.com/ndisidore/cicada/internal/runner/runnermodel"
@@ -76,11 +75,7 @@ func runNode(ctx context.Context, node *dagNode, cfg runConfig) error {
 	}
 	defer cfg.sem.Release(1)
 
-	tracer := cfg.tracer
-	if tracer == nil {
-		tracer = tracenoop.NewTracerProvider().Tracer("cicada")
-	}
-	jobCtx, jobSpan := tracer.Start(ctx, "job/"+node.job.Name,
+	jobCtx, jobSpan := cfg.tracer.Start(ctx, "job/"+node.job.Name,
 		trace.WithAttributes(attribute.String("job.name", node.job.Name)),
 	)
 	defer jobSpan.End()
@@ -109,8 +104,7 @@ func runNode(ctx context.Context, node *dagNode, cfg runConfig) error {
 		if len(node.job.StepTimeouts) > 0 {
 			err = cleanTimeoutError(err, node.job.Name, node.job.StepTimeouts)
 		}
-		var exitErr *gatewaypb.ExitError
-		if errors.As(err, &exitErr) {
+		if exitErr, ok := errors.AsType[*gatewaypb.ExitError](err); ok {
 			node.err = progressmodel.NewDisplayError(
 				fmt.Sprintf("job %q: exit code: %d", node.job.Name, exitErr.ExitCode),
 				err,
