@@ -288,8 +288,7 @@ func main() {
 		},
 		ExitErrHandler: func(_ context.Context, _ *cli.Command, err error) {
 			if err != nil {
-				var de *progressmodel.DisplayError
-				if errors.As(err, &de) {
+				if de, ok := errors.AsType[*progressmodel.DisplayError](err); ok {
 					_, _ = fmt.Fprintf(os.Stderr, "error: %s\n", de.Human)
 				} else {
 					_, _ = fmt.Fprintf(os.Stderr, "error: %v\n", err)

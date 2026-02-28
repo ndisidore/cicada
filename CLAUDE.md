@@ -43,11 +43,19 @@ go build ./cmd/cicada
 ## Project Layout
 
 ```text
-cmd/cicada/      # CLI entry point
-pkg/pipeline/    # Reusable pipeline types (external consumers may import)
-pkg/parser/      # Reusable KDL parser (external consumers may import)
-internal/builder # BuildKit LLB builder (internal only)
-internal/runner  # BuildKit runner (internal only)
+cmd/cicada/            # CLI entry point
+pkg/pipeline/          # Reusable pipeline types (external consumers may import)
+pkg/parser/            # Reusable KDL parser (external consumers may import)
+pkg/conditional/       # CEL-based condition evaluation (external consumers may import)
+pkg/slogctx/           # slog context utilities (external consumers may import)
+pkg/gitinfo/           # Git metadata helpers (external consumers may import)
+internal/builder/      # BuildKit LLB builder (internal only)
+internal/runner/       # BuildKit runner / DAG execution (internal only)
+internal/progress/     # Progress display (TUI, plain, quiet) (internal only)
+internal/cache/        # Cache analytics and spec parsing (internal only)
+internal/secret/       # Host-side secret resolution (internal only)
+internal/runtime/      # Container runtime detection and abstraction (internal only)
+internal/tracing/      # OpenTelemetry setup and vertex observer (internal only)
 ```
 
 - `pkg/` contains packages safe for external import.

@@ -19,7 +19,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-
+	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	"golang.org/x/sync/semaphore"
 
 	"github.com/ndisidore/cicada/internal/cache"
@@ -29,6 +30,11 @@ import (
 	"github.com/ndisidore/cicada/pkg/conditional"
 	"github.com/ndisidore/cicada/pkg/pipeline/pipelinemodel"
 )
+
+// noopTracer returns a noop tracer for use in tests that construct runConfig directly.
+func noopTracer() trace.Tracer {
+	return tracenoop.NewTracerProvider().Tracer("cicada")
+}
 
 // fakeSolver implements the rm.Solver interface for testing.
 type fakeSolver struct {
@@ -1424,6 +1430,7 @@ func TestRunNodeDeferredWhenSkip(t *testing.T) {
 		nodes:   nodes,
 		sem:     semaphore.NewWeighted(1),
 		whenCtx: wctx,
+		tracer:  noopTracer(),
 	}
 
 	err := runNode(t.Context(), node, cfg)
@@ -1486,6 +1493,7 @@ func TestRunNodeSkippedDepPropagatesSkip(t *testing.T) {
 		sender: sender,
 		nodes:  nodes,
 		sem:    semaphore.NewWeighted(1),
+		tracer: noopTracer(),
 		whenCtx: &conditional.Context{
 			Getenv:      func(string) string { return "" },
 			PipelineEnv: map[string]string{},
@@ -1539,6 +1547,7 @@ func TestRunNodeSkippedStepsReported(t *testing.T) {
 		sender: sender,
 		nodes:  nodes,
 		sem:    semaphore.NewWeighted(1),
+		tracer: noopTracer(),
 	}
 
 	err = runNode(t.Context(), node, cfg)
@@ -1594,6 +1603,7 @@ func TestRunNodeOutputExtractionFailure(t *testing.T) {
 		sender: sender,
 		nodes:  nodes,
 		sem:    semaphore.NewWeighted(1),
+		tracer: noopTracer(),
 	}
 
 	err = runNode(t.Context(), node, cfg)
@@ -1914,6 +1924,7 @@ func TestRunNode_jobTimeout_sentinelError(t *testing.T) {
 			sender: &fakeSender{},
 			nodes:  nodes,
 			sem:    semaphore.NewWeighted(1),
+			tracer: noopTracer(),
 		}
 
 		err = runNode(t.Context(), node, cfg)
@@ -1961,6 +1972,7 @@ func TestRunNode_retry_displaysRetry(t *testing.T) {
 		sender: sender,
 		nodes:  nodes,
 		sem:    semaphore.NewWeighted(1),
+		tracer: noopTracer(),
 	}
 
 	err = runNode(t.Context(), node, cfg)
@@ -2020,6 +2032,7 @@ func TestRunNode_jobTimeout_displaysTimeout(t *testing.T) {
 			sender: sender,
 			nodes:  nodes,
 			sem:    semaphore.NewWeighted(1),
+			tracer: noopTracer(),
 		}
 
 		err = runNode(t.Context(), node, cfg)
