@@ -90,9 +90,9 @@ cicada run pipeline.kdl \
 
 ## Selective cache invalidation
 
-### Per-step (CLI)
+### Per-job (CLI)
 
-Use `--no-cache-filter` to disable cache for specific steps by name. Other steps are unaffected:
+Use `--no-cache-filter` to disable cache for specific jobs by name. Other jobs are unaffected:
 
 ```bash
 cicada run pipeline.kdl \
@@ -100,7 +100,7 @@ cicada run pipeline.kdl \
   --cache-from type=registry,ref=ghcr.io/myorg/cache:main
 ```
 
-Multiple steps can be specified by repeating the flag:
+Multiple jobs can be specified by repeating the flag:
 
 ```bash
 cicada run pipeline.kdl \
@@ -276,6 +276,29 @@ Cicada supports per-job retry, timeouts at both job and step level, and custom s
 
 Add a `retry` node to a job to automatically re-run it on failure. Configure `attempts` (number of retries after the initial run), `delay` (wait before the first retry), and `backoff` (how delay scales across retries):
 
+### Step-level retry and `allow-failure`
+
+`retry` also works at the step level to re-run a single step without restarting the whole job. Add `allow-failure` alongside it so that a step exhausting its retries records a warning instead of failing the job:
+
+```kdl
+job "test" {
+    image "alpine:3.19"
+    step "flaky" {
+        run "sh -c 'exit 1'"
+        retry {
+            attempts 2
+            delay "1s"
+        }
+        allow-failure
+    }
+    step "must-pass" {
+        run "echo success"
+    }
+}
+```
+
+After `flaky` exhausts all retries, its status becomes `[w]` (allowed failure) in the progress display and subsequent steps continue. The overall job passes as long as no non-`allow-failure` step fails.
+
 ```kdl
 job "integration" {
     image "node:22"
@@ -351,3 +374,171 @@ job "strict" {
 ```
 
 The last argument should be `-c` so the shell accepts a command string. See the [schema reference](schema.md#shell) for the full inheritance chain and argument validation rules.
+
+---
+
+# Secrets
+
+Secrets let you inject sensitive values (tokens, passwords, keys) into pipeline steps without baking them into the KDL file or the container layer cache. Values are resolved on the host before the build starts and delivered to BuildKit over an encrypted session channel; they are never written to the cache.
+
+## Declaring secrets
+
+Secrets are declared at the pipeline level with a `source` child that specifies how the value is obtained:
+
+```kdl
+// From a host environment variable (var defaults to the secret name)
+secret "API_TOKEN" {
+    source "hostEnv"
+}
+
+// From a host env var with a different name
+secret "REGISTRY_PASS" {
+    source "hostEnv"
+    var "DOCKER_PASSWORD"
+}
+
+// From a file on the host (supports ~/ expansion)
+secret "SSH_KEY" {
+    source "file"
+    path "~/.ssh/id_rsa"
+}
+
+// From the stdout of a shell command
+secret "VAULT_TOKEN" {
+    source "cmd"
+    cmd "vault kv get -field=value secret/ci/token"
+}
+```
+
+## Injecting secrets
+
+Reference a declared secret inside a `job` or `step` with `env` (inject as environment variable) or `mount` (inject as a file):
+
+```kdl
+secret "API_TOKEN" { source "hostEnv" }
+
+step "deploy" {
+    image "alpine:latest"
+    secret "API_TOKEN" env="API_TOKEN"
+    run "curl -H \"Authorization: Bearer $API_TOKEN\" https://api.example.com/deploy"
+}
+
+step "git-push" {
+    image "alpine:latest"
+    secret "SSH_KEY" mount="/root/.ssh/id_rsa"
+    run "ssh-keyscan github.com >> /root/.ssh/known_hosts && git push"
+}
+```
+
+Secret values are automatically redacted from log output. See the [schema reference](schema.md#secret-pipeline-level-declaration) for the full property list.
+
+---
+
+# Inter-Job Output
+
+Jobs can pass values to downstream jobs by writing `KEY=VALUE` lines to the file at `$CICADA_OUTPUT`:
+
+```kdl
+step "check" {
+    image "alpine:latest"
+    run "echo should_deploy=yes >> $CICADA_OUTPUT"
+}
+
+job "deploy" {
+    image "alpine:latest"
+    depends-on "check"
+    when "output('check', 'should_deploy') == 'yes'"
+    step "push" { run "deploy.sh" }
+}
+```
+
+`$CICADA_OUTPUT` is a host-managed file. Values written to it are available to dependent jobs via the `output(job, key)` CEL function in `when` conditions. Dependent jobs also source the file before their first step, making all keys available as environment variables.
+
+---
+
+# Partial Runs
+
+Use `--start-at` and `--stop-after` to run a subset of jobs. Both accept either a job name or a `job:step` pair.
+
+## Resuming after failure
+
+Run from a specific job forward, skipping work that already succeeded:
+
+```bash
+cicada run pipeline.kdl --start-at test
+```
+
+## Running up to a checkpoint
+
+Stop after a specific job (and its transitive dependencies):
+
+```bash
+cicada run pipeline.kdl --stop-after build
+```
+
+## Step-level granularity
+
+Narrow the window to a specific step within a job:
+
+```bash
+# Run the "quality" job starting from the "vet" step
+cicada run pipeline.kdl --start-at quality:vet
+
+# Run the "quality" job only through the "fmt" step
+cicada run pipeline.kdl --stop-after quality:fmt
+
+# Run just the steps between "vet" and "bench" in "quality"
+cicada run pipeline.kdl --start-at quality:vet --stop-after quality:bench
+```
+
+When `--start-at` targets a step, earlier steps in that job still execute (for container state) but have their exports stripped. When `--stop-after` targets a step, later steps in that job are truncated and downstream jobs are excluded.
+
+See the [schema reference](schema.md#filtering) for full semantics.
+
+---
+
+# Offline Builds
+
+Pre-warm the BuildKit image cache with `cicada pull`, then use `--offline` to prevent any network image pulls during the build:
+
+```bash
+# Pull all images referenced by the pipeline
+cicada pull pipeline.kdl
+
+# Run without network image fetches; fail hard on cache miss
+cicada run pipeline.kdl --offline
+```
+
+`--offline` causes the solve to fail immediately if any required image is not present in the BuildKit cache. This is useful for reproducible builds in air-gapped environments or to detect unintended image pull regressions.
+
+---
+
+# Observability
+
+Cicada emits OpenTelemetry traces for pipeline execution. Each job and step becomes a span, linked to BuildKit vertex timing.
+
+## Sending traces to a collector
+
+```bash
+# Send to an OTLP gRPC endpoint (e.g. local Jaeger or OTEL Collector)
+cicada run pipeline.kdl --trace-endpoint localhost:4317
+
+# Or set via environment variable
+OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317 cicada run pipeline.kdl
+```
+
+## Writing traces to a file
+
+```bash
+cicada run pipeline.kdl --trace-file traces.json
+```
+
+The file contains OTEL span JSON, one span per line.
+
+## Debug mode
+
+```bash
+cicada run pipeline.kdl --trace
+```
+
+Writes span JSON to stderr. Useful for quick inspection without a collector.

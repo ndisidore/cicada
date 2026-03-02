@@ -9,6 +9,7 @@ pipeline
 ├── defaults          (0..1)  pipeline-wide inherited config
 ├── matrix            (0..1)  pipeline-level matrix expansion
 ├── env               (0..N)  pipeline-level environment variables
+├── secret            (0..N)  pipeline-level secret declarations
 ├── include           (0..N)  import jobs from other files
 ├── job               (0..N)  explicit multi-step job
 │   └── step          (1..N)  sequential execution units
@@ -67,6 +68,7 @@ pipeline "my-pipeline" { ... }
 | `defaults` | Pipeline-wide config inherited by all jobs |
 | `matrix` | Correlated matrix expansion across all jobs |
 | `env` | Pipeline-level env vars (inherited by all jobs; accessible via `env()` in `when` conditions) |
+| `secret` | Pipeline-level secret declaration (see [Secret declaration](#secret-pipeline-level-declaration)) |
 | `include` | Import jobs from fragment or pipeline files |
 | `job` | Multi-step job definition |
 | `step` | Bare step sugar (see [Bare Step Sugar](#bare-step-sugar)) |
@@ -99,6 +101,59 @@ defaults {
 | `shell` | `<arg>...` | Default shell (see [Shell](#shell)) |
 
 </details>
+
+---
+
+### `secret` (pipeline-level declaration)
+
+Declares a named secret and specifies how to obtain its value on the host. Secrets are resolved before the build starts; the resolved value is passed to BuildKit over a session gRPC channel and never written to the layer cache.
+
+```kdl
+// Read from a host environment variable (defaults to Name if var= is omitted)
+secret "API_TOKEN" {
+    source "hostEnv"
+}
+
+// Read from a host env var with a different name
+secret "REGISTRY_PASS" {
+    source "hostEnv"
+    var "DOCKER_PASSWORD"
+}
+
+// Read from a file on the host
+secret "SSH_KEY" {
+    source "file"
+    path "~/.ssh/id_rsa"
+}
+
+// Run a shell command to obtain the value
+secret "VAULT_SECRET" {
+    source "cmd"
+    cmd "vault kv get -field=value secret/my-app/token"
+}
+```
+
+| Property | Required for | Description |
+|----------|:------------:|-------------|
+| `source` | all | One of `hostEnv`, `file`, `cmd` |
+| `var` | `hostEnv` | Host env var name; defaults to the secret's name |
+| `path` | `file` | Host filesystem path (`~/` expansion supported) |
+| `cmd` | `cmd` | Shell command whose stdout becomes the secret value |
+
+Secrets are injected into jobs or steps using a `secret` reference node (see job/step tables). Exactly one of `env` or `mount` is required per reference:
+
+```kdl
+step "deploy" {
+    image "alpine:latest"
+    // inject as env var
+    secret "API_TOKEN" env="API_TOKEN"
+    // inject as file (useful for SSH keys, TLS certs, etc.)
+    secret "SSH_KEY" mount="/root/.ssh/id_rsa"
+    run "deploy.sh"
+}
+```
+
+Secret values are redacted from log output. See [Secrets](usage.md#secrets) in the usage guide for full examples.
 
 ---
 
@@ -135,6 +190,7 @@ job "test" {
 | `timeout` | `<duration>` | 0..1 | Job-level timeout (see [Timeouts](#timeouts)) |
 | `retry` | (children) | 0..1 | Retry on failure (see [Retry](#retry)) |
 | `shell` | `<arg>...` | 0..1 | Override default shell (see [Shell](#shell)) |
+| `secret` | `<name>` `env=<var>` or `mount=<path>` | 0..N | Inject a declared secret (see [Secret declaration](#secret-pipeline-level-declaration)) |
 | `step` | `<name>` | 1..N | Sequential execution unit |
 
 </details>
@@ -167,6 +223,9 @@ step "install" {
 | `timeout` | `<duration>` | 0..1 | Step-level timeout (see [Timeouts](#timeouts)) |
 | `shell` | `<arg>...` | 0..1 | Override shell for this step (see [Shell](#shell)) |
 | `no-cache` | (none) | 0..1 | Disable caching for this step |
+| `retry` | (children) | 0..1 | Retry this step on failure (see [Retry](#retry)) |
+| `allow-failure` | (none) | 0..1 | Step failure does not fail the job (shown as warning) |
+| `secret` | `<name>` `env=<var>` or `mount=<path>` | 0..N | Inject a declared secret (see [Secret declaration](#secret-pipeline-level-declaration)) |
 
 </details>
 
@@ -397,7 +456,7 @@ job "build" {
 }
 ```
 
-A bare step accepts the union of job and step fields. `run` goes to the inner step; everything else (`image`, `depends-on`, `mount`, `cache`, `env`, `export`, `artifact`, `platform`, `matrix`, `workdir`, `no-cache`, `publish`, `when`, `timeout`, `retry`, `shell`) goes to the job.
+A bare step accepts the union of job and step fields. `run`, `allow-failure`, and step-level `retry` go to the inner step; everything else (`image`, `depends-on`, `mount`, `cache`, `env`, `secret`, `export`, `artifact`, `platform`, `matrix`, `workdir`, `no-cache`, `publish`, `when`, `timeout`, `retry`, `shell`) goes to the job.
 
 ---
 
