@@ -91,25 +91,40 @@ pipeline "hello" {
 }
 ```
 
-### Step Options
+### Step / Job Options
 
-| Option       | Description                              | Example                                  |
-|--------------|------------------------------------------|------------------------------------------|
-| `image`      | Container image to run in                | `image "golang:1.25"`                    |
-| `run`        | Shell command (multiple allowed)         | `run "go test ./..."`                    |
-| `depends-on` | Step dependency (runs after)             | `depends-on "build"`                     |
-| `mount`      | Bind mount from host                     | `mount "." "/src"`                       |
-| `mount` (ro) | Read-only bind mount                     | `mount "." "/src" readonly=true`         |
-| `workdir`    | Working directory inside container       | `workdir "/src"`                         |
-| `cache`      | Persistent cache volume                  | `cache "gomod" "/go/pkg/mod"`            |
+| Option           | Scope     | Description                              | Example                                  |
+|------------------|-----------|------------------------------------------|------------------------------------------|
+| `image`          | job       | Container image to run in                | `image "golang:1.25"`                    |
+| `run`            | step      | Shell command (multiple allowed)         | `run "go test ./..."`                    |
+| `depends-on`     | job       | Job dependency (runs after)              | `depends-on "build"`                     |
+| `mount`          | job/step  | Bind mount from host                     | `mount "." "/src"`                       |
+| `mount` (ro)     | job/step  | Read-only bind mount                     | `mount "." "/src" readonly=true`         |
+| `workdir`        | job/step  | Working directory inside container       | `workdir "/src"`                         |
+| `cache`          | job/step  | Persistent cache volume                  | `cache "gomod" "/go/pkg/mod"`            |
+| `env`            | job/step  | Environment variable                     | `env "GO111MODULE" "on"`                 |
+| `secret`         | job/step  | Inject a declared secret                 | `secret "TOKEN" env="TOKEN"`             |
+| `shell`          | job/step  | Override default shell                   | `shell "/bin/bash" "-e" "-c"`            |
+| `timeout`        | job/step  | Execution timeout                        | `timeout "5m"`                           |
+| `retry`          | job/step  | Retry on failure                         | `retry { attempts 3; delay "5s" }`       |
+| `allow-failure`  | step      | Step failure does not fail the job       | `allow-failure`                          |
+| `when`           | job/step  | Conditional execution (CEL expression)   | `when "branch == 'main'"`                |
+| `no-cache`       | job/step  | Disable BuildKit cache                   | `no-cache`                               |
+| `platform`       | job       | OCI target platform                      | `platform "linux/arm64"`                 |
+| `export`         | job/step  | Export a path to the host                | `export "/out/app" local="./bin/app"`    |
+| `publish`        | job       | Publish filesystem as OCI image          | `publish "ghcr.io/user/app:latest"`      |
 
-Dependencies between steps are resolved via topological sort, and Cicada will catch cycles and missing references before anything runs.
+See [docs/schema.md](docs/schema.md) for the full reference and inheritance rules. Dependencies between jobs are resolved via topological sort; Cicada catches cycles and missing references before anything runs.
 
 ## CLI Usage
 
 ```bash
 # Validate without running
 cicada validate pipeline.kdl
+
+# Render a dependency graph
+cicada visualize pipeline.kdl
+cicada visualize pipeline.kdl --output pipeline.d2
 
 # Run a pipeline
 cicada run pipeline.kdl
@@ -122,7 +137,18 @@ cicada run pipeline.kdl --dry-run
 
 # Skip cache
 cicada run pipeline.kdl --no-cache
+
+# Pre-pull images, then run offline
+cicada pull pipeline.kdl
+cicada run pipeline.kdl --offline
+
+# Manage the local BuildKit engine
+cicada engine start
+cicada engine status
+cicada engine stop
 ```
+
+See [docs/cli.md](docs/cli.md) for the complete flag reference.
 
 ## Development
 
@@ -143,12 +169,19 @@ Yes, `mise ci` runs the *actual* CI checks on your machine. Locally repeatable C
 ## Project Layout
 
 ```text
-cmd/cicada/          CLI entry point
-pkg/pipeline/      Pipeline types and validation (importable)
-pkg/parser/        KDL-to-Pipeline parser (importable)
-internal/builder/  BuildKit LLB generation
-internal/runner/   BuildKit execution engine
-examples/          Example KDL pipelines
+cmd/cicada/            CLI entry point
+pkg/pipeline/          Pipeline types and validation (importable)
+pkg/parser/            KDL-to-Pipeline parser (importable)
+pkg/conditional/       CEL-based condition evaluation (importable)
+pkg/slogctx/           slog context utilities (importable)
+pkg/gitinfo/           Git metadata helpers (importable)
+internal/builder/      BuildKit LLB generation
+internal/runner/       BuildKit execution engine
+internal/cache/        Cache analytics and spec parsing
+internal/secret/       Host-side secret resolution
+internal/runtime/      Container runtime detection and abstraction
+internal/tracing/      OpenTelemetry setup and vertex observer
+examples/              Example KDL pipelines
 ```
 
 Packages under `pkg/` are stable and safe for external consumers to import. Packages under `internal/` are implementation details.
