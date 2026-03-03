@@ -59,7 +59,7 @@ func Setup(ctx context.Context, cfg Config) (trace.Tracer, func(context.Context)
 			_ = exp.Shutdown(ctx)
 		}
 		closeFiles()
-		return nil, nil, fmt.Errorf("building otel resource: %w", err)
+		return noop.NewTracerProvider().Tracer(_serviceName), func(context.Context) error { return nil }, fmt.Errorf("building otel resource: %w", err)
 	}
 
 	opts := make([]sdktrace.TracerProviderOption, 0, len(exporters)+1)

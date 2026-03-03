@@ -1,4 +1,4 @@
-//revive:disable:var-naming Package name conflict with standard library is intentional.
+//revive:disable:var-naming NodeType and Prop constants use domain-naming conventions that trigger the rule.
 package parser
 
 // NodeType represents the type of a KDL node.

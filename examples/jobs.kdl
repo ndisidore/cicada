@@ -15,7 +15,7 @@ defaults {
 
 job "quality" {
     step "fmt" {
-        run "test -z $(gofmt -l .)"
+        run #"test -z "$(gofmt -l .)""#
     }
     step "vet" {
         run "go vet ./..."

@@ -90,6 +90,10 @@ func newStatusSession(
 // overhead). On context cancellation the goroutine drains src so the Solve
 // sender can exit.
 //
+// Pipeline stage order (both collector and observer receive already-redacted status):
+//
+//	src → redactStatus → collector.Observe → observer.Observe → out
+//
 //revive:disable-next-line:cognitive-complexity teeStatus is a channel-forwarding goroutine; splitting it hurts readability.
 func teeStatus(ctx context.Context, in teeStatusInput) <-chan *client.SolveStatus {
 	if in.collector == nil && len(in.secrets) == 0 && in.observer == nil {

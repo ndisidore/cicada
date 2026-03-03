@@ -13,7 +13,7 @@ and compact ASCII icons for non-TTY output (CI logs, piped output, etc.).
 | Cached          | ⚡     | `[=]` | Step result was served from cache                |
 | Pending         | ⏳    | `[ ]` | Step is waiting to start                         |
 | Error           | 🚨    | `[!]` | Step failed                                      |
-| Timeout         | ⏰    | `[t]` | Step exceeded its configured timeout             |
+| Timeout         | ⏰    | `[t]` | Step or job exceeded its configured timeout      |
 | Retry           | 🔄    | `[r]` | Step or job is being retried                     |
 | Allowed Failure | ⚠️    | `[w]` | Step failed but `allow-failure` prevented job failure |
 

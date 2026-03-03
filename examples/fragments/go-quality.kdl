@@ -3,7 +3,7 @@
 // (two sequential steps sharing the same Go image).
 
 fragment "go-quality" {
-    param "go-version" default="1.25"
+    param "go-version" default="1.26"
 
     job "lint" {
         image "golangci/golangci-lint:latest"

@@ -122,13 +122,13 @@ func FilterJobs(jobs []pm.Job, opts pm.FilterOpts) ([]pm.Job, error) {
 	}
 
 	// Forward reachable from StartAt (the job itself + all downstream dependents).
-	var forwardSet map[string]struct{}
+	var forwardSet jobNameSet
 	if startAt.Job != "" {
 		forwardSet = bfsReachable(startAt.Job, adj.dependents)
 	}
 
 	// Backward reachable from StopAfter (the job itself + all upstream dependencies).
-	var backwardSet map[string]struct{}
+	var backwardSet jobNameSet
 	if stopAfter.Job != "" {
 		backwardSet = bfsReachable(stopAfter.Job, adj.dependencies)
 	}
@@ -142,7 +142,7 @@ func FilterJobs(jobs []pm.Job, opts pm.FilterOpts) ([]pm.Job, error) {
 	}
 
 	// Add transitive dependencies of execution window members.
-	fullSet := make(map[string]struct{}, len(executionWindow))
+	fullSet := make(jobNameSet, len(executionWindow))
 	for name := range executionWindow {
 		fullSet[name] = struct{}{}
 	}
@@ -232,10 +232,14 @@ func stripStepExports(steps []pm.Step) {
 	}
 }
 
+// jobNameSet is a set of job names. A nil jobNameSet is the universe: it
+// passes all elements when used as an argument to intersectSets.
+type jobNameSet map[string]struct{}
+
 // bfsReachable returns all nodes reachable from start (inclusive) via the
 // given adjacency map.
-func bfsReachable(start string, adj map[string][]string) map[string]struct{} {
-	visited := map[string]struct{}{start: {}}
+func bfsReachable(start string, adj map[string][]string) jobNameSet {
+	visited := jobNameSet{start: {}}
 	queue := []string{start}
 	for len(queue) > 0 {
 		cur := queue[0]
@@ -250,9 +254,9 @@ func bfsReachable(start string, adj map[string][]string) map[string]struct{} {
 	return visited
 }
 
-// intersectSets returns the intersection of a and b. A nil set is treated
-// as the universe (all elements pass).
-func intersectSets(a, b map[string]struct{}) map[string]struct{} {
+// intersectSets returns the intersection of a and b. A nil jobNameSet is the
+// universe (all elements pass).
+func intersectSets(a, b jobNameSet) jobNameSet {
 	if a == nil {
 		return b
 	}
@@ -263,7 +267,7 @@ func intersectSets(a, b map[string]struct{}) map[string]struct{} {
 	if len(a) > len(b) {
 		a, b = b, a
 	}
-	result := make(map[string]struct{}, len(a))
+	result := make(jobNameSet, len(a))
 	for k := range a {
 		if _, ok := b[k]; ok {
 			result[k] = struct{}{}
@@ -273,7 +277,7 @@ func intersectSets(a, b map[string]struct{}) map[string]struct{} {
 }
 
 // addTransitiveDeps adds all transitive dependencies of name to visited via DFS.
-func addTransitiveDeps(name string, deps map[string][]string, visited map[string]struct{}) {
+func addTransitiveDeps(name string, deps map[string][]string, visited jobNameSet) {
 	for _, dep := range deps[name] {
 		if _, ok := visited[dep]; ok {
 			continue
