@@ -126,7 +126,7 @@ func runNode(ctx context.Context, node *dagNode, cfg runConfig) error {
 	// Extract outputs for downstream deferred conditions.
 	// Step-controlled jobs extract outputs inside the gateway BuildFunc.
 	if node.outputs == nil && node.job.OutputDef != nil {
-		node.outputs, err = extractOutputs(ctx, node.job.OutputDef, cfg)
+		node.outputs, err = extractOutputs(jobCtx, node.job.OutputDef, cfg)
 		if err != nil {
 			node.err = fmt.Errorf("job %q output extraction: %w", node.job.Name, err)
 			return node.err

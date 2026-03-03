@@ -78,8 +78,10 @@ func (h *PrettyHandler) Handle(_ context.Context, r slog.Record) error {
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	_, err := lipgloss.Fprintln(h.out, line)
-	return err
+	if _, err := lipgloss.Fprintln(h.out, line); err != nil {
+		return fmt.Errorf("writing log line: %w", err)
+	}
+	return nil
 }
 
 // WithAttrs returns a new handler that prepends the given attributes to messages.

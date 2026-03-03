@@ -15,7 +15,7 @@ import (
 // sets p.TopoOrder to the returned ordering.
 // A single 3-state DFS handles unknown-dep, cycle, and ordering in one pass.
 func Validate(p *pm.Pipeline) ([]int, error) {
-	if len(p.Jobs) == 0 {
+	if p == nil || len(p.Jobs) == 0 {
 		return nil, pm.ErrEmptyPipeline
 	}
 
