@@ -182,7 +182,7 @@ func ParseState(s string) runtime.ContainerState {
 
 // BuildRunArgs constructs CLI arguments from a RunConfig.
 func BuildRunArgs(cfg runtime.RunConfig) ([]string, error) {
-	args := make([]string, 1, 8+2*len(cfg.Ports)+2*len(cfg.Volumes)+len(cfg.Args))
+	args := make([]string, 1, 8+2*len(cfg.Env)+2*len(cfg.Ports)+2*len(cfg.Volumes)+len(cfg.Args))
 	args[0] = "run"
 	if cfg.Detach {
 		args = append(args, "-d")
@@ -192,6 +192,9 @@ func BuildRunArgs(cfg runtime.RunConfig) ([]string, error) {
 	}
 	if cfg.Privileged {
 		args = append(args, "--privileged")
+	}
+	for _, e := range cfg.Env {
+		args = append(args, "-e", e)
 	}
 	for _, p := range cfg.Ports {
 		if p.HostPort == "" || p.ContPort == "" {

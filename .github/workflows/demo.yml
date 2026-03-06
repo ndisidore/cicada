@@ -1,0 +1,25 @@
+name: Cicada Demo
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  actions: write # required for BuildKit GHA cache backend
+
+jobs:
+  cicada:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: jdx/mise-action@v3
+      - name: Build cicada
+        run: mise run build
+      - name: Run pipeline
+        run: |
+          ./bin/cicada run cicada.kdl \
+            --cache-from type=gha,scope=cicada \
+            --cache-to   type=gha,scope=cicada \
+            --cache-stats
