@@ -67,6 +67,7 @@ type VolumeMount struct {
 type RunConfig struct {
 	Name       string
 	Image      string
+	Env        []string // KEY=VALUE pairs forwarded into the container environment.
 	Privileged bool
 	Ports      []PortBinding
 	Volumes    []VolumeMount
