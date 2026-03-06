@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	bkclient "github.com/moby/buildkit/client"
@@ -31,6 +32,10 @@ const (
 	_defaultAddr   = "tcp://127.0.0.1:" + _port
 	_volumeName    = "cicada-buildkit-state"
 )
+
+// _ghaEnvVars are forwarded to the BuildKit daemon container when set,
+// enabling the GitHub Actions cache backend (type=gha).
+var _ghaEnvVars = [...]string{"ACTIONS_CACHE_URL", "ACTIONS_RUNTIME_TOKEN"}
 
 // healthConfig holds timing parameters for the engine health check loop.
 type healthConfig struct {
@@ -133,9 +138,16 @@ func (m *Manager) Start(ctx context.Context) (string, error) {
 		}
 	default: // includes container-not-found (zero-value state)
 		log.InfoContext(ctx, "starting buildkitd container")
+		var env []string
+		for _, k := range _ghaEnvVars {
+			if v := os.Getenv(k); v != "" {
+				env = append(env, k+"="+v)
+			}
+		}
 		if _, err := m.rt.Run(ctx, runtime.RunConfig{
 			Name:       _containerName,
 			Image:      _buildkitImage,
+			Env:        env,
 			Privileged: true,
 			Detach:     true,
 			Ports: []runtime.PortBinding{
