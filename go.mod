@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	charm.land/bubbletea/v2 v2.0.2
-	charm.land/lipgloss/v2 v2.0.1
+	charm.land/lipgloss/v2 v2.0.2
 	github.com/calico32/kdl-go v0.10.0
 	github.com/containerd/errdefs v1.0.0
 	github.com/containerd/errdefs/pkg v0.3.0
@@ -22,7 +22,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.42.0
 	go.opentelemetry.io/otel/trace v1.42.0
 	golang.org/x/sync v0.20.0
-	golang.org/x/term v0.40.0
+	golang.org/x/term v0.41.0
 )
 
 require (
