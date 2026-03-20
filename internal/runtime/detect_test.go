@@ -1,4 +1,4 @@
-//revive:disable:var-naming Package name conflict with standard library is intentional.
+//revive:disable:package-naming Package name conflict with standard library is intentional.
 package runtime_test
 
 import (
