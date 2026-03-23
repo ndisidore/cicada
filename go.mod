@@ -8,7 +8,7 @@ require (
 	github.com/calico32/kdl-go v0.10.0
 	github.com/containerd/errdefs v1.0.0
 	github.com/containerd/errdefs/pkg v0.3.0
-	github.com/containerd/platforms v1.0.0-rc.2
+	github.com/containerd/platforms v1.0.0-rc.3
 	github.com/google/cel-go v0.27.0
 	github.com/moby/buildkit v0.28.0
 	github.com/opencontainers/go-digest v1.0.0
