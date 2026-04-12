@@ -155,42 +155,69 @@ func TestParseSpecs(t *testing.T) {
 // environment via t.Setenv.
 func TestDetectGHA(t *testing.T) {
 	tests := []struct {
-		name     string
-		entries  []client.CacheOptionsEntry
-		envURL   string
-		envToken string
-		wantURL  string
-		wantTok  string
+		name      string
+		entries   []client.CacheOptionsEntry
+		envURLV1  string
+		envURLV2  string
+		envToken  string
+		wantURLV1 string
+		wantURLV2 string
+		wantTok   string
 	}{
 		{
-			name: "populates from env",
+			name: "populates v1 url and token from env",
 			entries: []client.CacheOptionsEntry{
 				{Type: "gha", Attrs: map[string]string{"scope": "main"}},
 			},
-			envURL:   "https://actions.example.com/cache",
-			envToken: "tok-123",
-			wantURL:  "https://actions.example.com/cache",
-			wantTok:  "tok-123",
+			envURLV1:  "https://actions.example.com/cache",
+			envToken:  "tok-123",
+			wantURLV1: "https://actions.example.com/cache",
+			wantTok:   "tok-123",
+		},
+		{
+			name: "populates v2 url and token from env",
+			entries: []client.CacheOptionsEntry{
+				{Type: "gha", Attrs: map[string]string{"scope": "main"}},
+			},
+			envURLV2:  "https://results.actions.githubusercontent.com/",
+			envToken:  "tok-456",
+			wantURLV2: "https://results.actions.githubusercontent.com/",
+			wantTok:   "tok-456",
+		},
+		{
+			name: "populates both url and url_v2 when both env vars set",
+			entries: []client.CacheOptionsEntry{
+				{Type: "gha", Attrs: map[string]string{"scope": "main"}},
+			},
+			envURLV1:  "https://actions.example.com/cache",
+			envURLV2:  "https://results.actions.githubusercontent.com/",
+			envToken:  "tok-789",
+			wantURLV1: "https://actions.example.com/cache",
+			wantURLV2: "https://results.actions.githubusercontent.com/",
+			wantTok:   "tok-789",
 		},
 		{
 			name: "preserves explicit attrs",
 			entries: []client.CacheOptionsEntry{
 				{Type: "gha", Attrs: map[string]string{
-					"url":   "https://custom.example.com",
-					"token": "explicit-tok",
+					"url":    "https://custom.example.com",
+					"url_v2": "https://custom-v2.example.com",
+					"token":  "explicit-tok",
 				}},
 			},
-			envURL:   "https://actions.example.com/cache",
-			envToken: "tok-123",
-			wantURL:  "https://custom.example.com",
-			wantTok:  "explicit-tok",
+			envURLV1:  "https://actions.example.com/cache",
+			envURLV2:  "https://results.actions.githubusercontent.com/",
+			envToken:  "tok-123",
+			wantURLV1: "https://custom.example.com",
+			wantURLV2: "https://custom-v2.example.com",
+			wantTok:   "explicit-tok",
 		},
 		{
 			name: "skips non-gha entries",
 			entries: []client.CacheOptionsEntry{
 				{Type: "registry", Attrs: map[string]string{"ref": "foo"}},
 			},
-			envURL:   "https://actions.example.com/cache",
+			envURLV1: "https://actions.example.com/cache",
 			envToken: "tok-123",
 		},
 		{
@@ -204,31 +231,37 @@ func TestDetectGHA(t *testing.T) {
 			entries: []client.CacheOptionsEntry{
 				{Type: "gha"},
 			},
-			envURL:   "https://actions.example.com/cache",
-			envToken: "tok-123",
-			wantURL:  "https://actions.example.com/cache",
-			wantTok:  "tok-123",
+			envURLV1:  "https://actions.example.com/cache",
+			envToken:  "tok-123",
+			wantURLV1: "https://actions.example.com/cache",
+			wantTok:   "tok-123",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("ACTIONS_CACHE_URL", tt.envURL)
+			t.Setenv("ACTIONS_CACHE_URL", tt.envURLV1)
+			t.Setenv("ACTIONS_RESULTS_URL", tt.envURLV2)
 			t.Setenv("ACTIONS_RUNTIME_TOKEN", tt.envToken)
 
 			result := DetectGHA(tt.entries)
 			require.Len(t, result, len(tt.entries))
 			for _, e := range result {
 				if e.Type != "gha" {
-					// Non-gha entries should be untouched.
 					assert.NotContains(t, e.Attrs, "url")
+					assert.NotContains(t, e.Attrs, "url_v2")
 					assert.NotContains(t, e.Attrs, "token")
 					continue
 				}
-				if tt.wantURL != "" {
-					assert.Equal(t, tt.wantURL, e.Attrs["url"])
-				} else if tt.envURL == "" {
+				if tt.wantURLV1 != "" {
+					assert.Equal(t, tt.wantURLV1, e.Attrs["url"])
+				} else if tt.envURLV1 == "" {
 					assert.NotContains(t, e.Attrs, "url")
+				}
+				if tt.wantURLV2 != "" {
+					assert.Equal(t, tt.wantURLV2, e.Attrs["url_v2"])
+				} else if tt.envURLV2 == "" {
+					assert.NotContains(t, e.Attrs, "url_v2")
 				}
 				if tt.wantTok != "" {
 					assert.Equal(t, tt.wantTok, e.Attrs["token"])

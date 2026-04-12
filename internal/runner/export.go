@@ -41,6 +41,7 @@ func solveExport(ctx context.Context, exp rm.Export, cfg runConfig) error {
 			Type:      client.ExporterLocal,
 			OutputDir: outputDir,
 		}},
+		LocalMounts:  cfg.localMounts,
 		CacheExports: cfg.cacheExports,
 		CacheImports: cfg.cacheImports,
 		Session:      cfg.session,

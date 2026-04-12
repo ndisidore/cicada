@@ -64,7 +64,13 @@ cicada run pipeline.kdl \
 
 ### GitHub Actions
 
-The `gha` backend uses the GitHub Actions cache service. Cicada auto-detects the `ACTIONS_CACHE_URL` and `ACTIONS_RUNTIME_TOKEN` environment variables when they are available, so you only need to specify the scope:
+The `gha` backend uses the GitHub Actions cache service. Cicada auto-detects the required environment variables when they are available, so you only need to specify the scope:
+
+| Variable | Purpose |
+|---|---|
+| `ACTIONS_RUNTIME_TOKEN` | Auth token (both cache API versions) |
+| `ACTIONS_RESULTS_URL` | Cache service URL (v2 API, newer runners) |
+| `ACTIONS_CACHE_URL` | Cache service URL (v1 API, older runners) |
 
 ```bash
 cicada run pipeline.kdl \

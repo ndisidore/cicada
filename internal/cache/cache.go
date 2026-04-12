@@ -83,11 +83,17 @@ func ParseSpecs(raw []string) ([]client.CacheOptionsEntry, error) {
 	return entries, nil
 }
 
-// DetectGHA auto-populates url and token attributes for type=gha entries from
-// ACTIONS_CACHE_URL and ACTIONS_RUNTIME_TOKEN environment variables. Entries
-// that already have explicit url/token attributes are left unchanged.
+// DetectGHA auto-populates url, url_v2, and token attributes for type=gha
+// entries from well-known GitHub Actions environment variables. Entries that
+// already carry explicit values for those attributes are left unchanged.
+//
+// Supported env vars:
+//   - ACTIONS_RESULTS_URL  → url_v2 (cache v2 / Actions Results API)
+//   - ACTIONS_CACHE_URL    → url    (cache v1 API, older runners)
+//   - ACTIONS_RUNTIME_TOKEN → token (auth for both APIs)
 func DetectGHA(entries []client.CacheOptionsEntry) []client.CacheOptionsEntry {
-	cacheURL := os.Getenv("ACTIONS_CACHE_URL")
+	urlV2 := os.Getenv("ACTIONS_RESULTS_URL")
+	urlV1 := os.Getenv("ACTIONS_CACHE_URL")
 	token := os.Getenv("ACTIONS_RUNTIME_TOKEN")
 
 	for i := range entries {
@@ -97,8 +103,11 @@ func DetectGHA(entries []client.CacheOptionsEntry) []client.CacheOptionsEntry {
 		if entries[i].Attrs == nil {
 			entries[i].Attrs = make(map[string]string)
 		}
-		if _, ok := entries[i].Attrs["url"]; !ok && cacheURL != "" {
-			entries[i].Attrs["url"] = cacheURL
+		if _, ok := entries[i].Attrs["url_v2"]; !ok && urlV2 != "" {
+			entries[i].Attrs["url_v2"] = urlV2
+		}
+		if _, ok := entries[i].Attrs["url"]; !ok && urlV1 != "" {
+			entries[i].Attrs["url"] = urlV1
 		}
 		if _, ok := entries[i].Attrs["token"]; !ok && token != "" {
 			entries[i].Attrs["token"] = token

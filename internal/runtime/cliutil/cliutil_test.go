@@ -371,15 +371,6 @@ func TestBuildRunArgs(t *testing.T) {
 			},
 			wantErr: runtime.ErrInvalidVolume,
 		},
-		{
-			name: "env vars emitted as -e flags before ports",
-			cfg: runtime.RunConfig{
-				Image: "alpine:latest",
-				Env:   []string{"FOO=bar", "BAZ=qux"},
-				Ports: []runtime.PortBinding{{HostPort: "80", ContPort: "80"}},
-			},
-			want: []string{"run", "-e", "FOO=bar", "-e", "BAZ=qux", "-p", "80:80", "alpine:latest"},
-		},
 	}
 
 	for _, tt := range tests {

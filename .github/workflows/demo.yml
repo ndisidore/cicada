@@ -15,6 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: jdx/mise-action@v3
+      - uses: crazy-max/ghaction-github-runtime@v4
       - name: Build cicada
         run: mise run build
       - name: Run pipeline
