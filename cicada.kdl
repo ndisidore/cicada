@@ -1,0 +1,37 @@
+// CI pipeline for cicada itself, run by .github/workflows/demo.yml.
+// Mirrors the checks in .github/workflows/ci.yaml.
+
+defaults {
+    image "golang:1.26"
+    mount "." "/src" readonly=#true
+    workdir "/src"
+}
+
+job "quality" {
+    step "fmt" {
+        run #"test -z "$(gofmt -l .)""#
+    }
+    step "vet" {
+        cache "go-build" "/root/.cache/go-build"
+        cache "go-mod" "/go/pkg/mod"
+        run "go vet ./..."
+    }
+}
+
+job "test" {
+    depends-on "quality"
+    step "unit" {
+        cache "go-build" "/root/.cache/go-build"
+        cache "go-mod" "/go/pkg/mod"
+        run "go test -race -count=1 ./..."
+    }
+}
+
+job "lint" {
+    image "golangci/golangci-lint:v2.10.1"
+    step "check" {
+        cache "go-build" "/root/.cache/go-build"
+        cache "go-mod" "/go/pkg/mod"
+        run "golangci-lint run --config=.golangci.yaml"
+    }
+}

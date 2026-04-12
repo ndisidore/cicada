@@ -30,6 +30,7 @@ func extractOutputs(ctx context.Context, def *llb.Definition, cfg runConfig) (ma
 			Type:      client.ExporterLocal,
 			OutputDir: dir,
 		}},
+		LocalMounts:  cfg.localMounts,
 		CacheImports: cfg.cacheImports,
 		Session:      cfg.session,
 	}, ch)
