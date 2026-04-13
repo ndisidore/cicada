@@ -28,7 +28,7 @@ job "test" {
 }
 
 job "lint" {
-    image "golangci/golangci-lint:v2.10.1"
+    image "golangci/golangci-lint:v2.11.4"
     step "check" {
         cache "go-build" "/root/.cache/go-build"
         cache "go-mod" "/go/pkg/mod"

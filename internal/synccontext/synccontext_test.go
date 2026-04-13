@@ -62,6 +62,9 @@ func TestLoadIgnorePatterns(t *testing.T) {
 				if runtime.GOOS == "windows" {
 					t.Skip("permission test not supported on windows")
 				}
+				if os.Geteuid() == 0 {
+					t.Skip("permission test not effective as root")
+				}
 				require.NoError(t, os.Chmod(filepath.Join(dir, ".cicadaignore"), 0o000))
 			},
 			wantErr: os.ErrPermission,
