@@ -3,26 +3,26 @@ module github.com/ndisidore/cicada
 go 1.26
 
 require (
-	charm.land/bubbletea/v2 v2.0.2
-	charm.land/lipgloss/v2 v2.0.2
-	github.com/calico32/kdl-go v0.10.0
+	charm.land/bubbletea/v2 v2.1.1
+	charm.land/lipgloss/v2 v2.0.6
+	github.com/calico32/kdl-go v0.16.0
 	github.com/containerd/errdefs v1.0.0
 	github.com/containerd/errdefs/pkg v0.3.0
-	github.com/containerd/platforms v1.0.0-rc.4
-	github.com/google/cel-go v0.28.0
-	github.com/moby/buildkit v0.29.0
+	github.com/containerd/platforms v1.0.0-rc.5
+	github.com/google/cel-go v0.30.0
+	github.com/moby/buildkit v0.34.1
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
-	github.com/stretchr/testify v1.11.1
-	github.com/tonistiigi/fsutil v0.0.0-20251211185533-a2aa163d723f
-	github.com/urfave/cli/v3 v3.8.0
-	go.opentelemetry.io/otel v1.43.0
-	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.43.0
-	go.opentelemetry.io/otel/exporters/stdout/stdouttrace v1.43.0
-	go.opentelemetry.io/otel/sdk v1.43.0
-	go.opentelemetry.io/otel/trace v1.43.0
-	golang.org/x/sync v0.20.0
-	golang.org/x/term v0.42.0
+	github.com/stretchr/testify v1.12.1
+	github.com/tonistiigi/fsutil v0.0.0-20261027232937-ca65610c2295
+	github.com/urfave/cli/v3 v3.14.0
+	go.opentelemetry.io/otel v1.47.0
+	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.47.0
+	go.opentelemetry.io/otel/exporters/stdout/stdouttrace v1.47.0
+	go.opentelemetry.io/otel/sdk v1.47.0
+	go.opentelemetry.io/otel/trace v1.47.0
+	golang.org/x/sync v0.24.0
+	golang.org/x/term v0.47.0
 )
 
 require (
